@@ -22,6 +22,11 @@ struct settings_option {
   const char *name;
   enum settings_type type;
   union settings_default_value default_value;
+
+  /* In-memory current value (replaces SQLite db_admin_* storage) */
+  union settings_default_value current_value;
+  bool is_set;
+  char *current_strval;  /* heap-allocated current string value, or NULL */
 };
 
 struct settings_category {

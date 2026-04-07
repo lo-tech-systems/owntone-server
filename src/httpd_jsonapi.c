@@ -39,6 +39,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <event2/buffer.h>
 
 #include "httpd_internal.h"
 #include "owntone_config.h"
@@ -327,17 +328,8 @@ static int
 jsonapi_reply_library(struct httpd_request *hreq)
 {
   json_object *jreply;
-  char *s;
-  int ret;
 
   CHECK_NULL(L_WEB, jreply = json_object_new_object());
-
-  ret = db_admin_get(&s, DB_ADMIN_START_TIME);
-  if (ret == 0)
-    {
-      safe_json_add_time_from_string(jreply, "started_at", s);
-      free(s);
-    }
 
   json_object_object_add(jreply, "updating", json_object_new_boolean(false));
   json_object_object_add(jreply, "songs", json_object_new_int(1));

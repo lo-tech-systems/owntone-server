@@ -71,7 +71,7 @@
 
 #include <gcrypt.h>
 
-#include "db.h"
+#include "queue.h"
 #include "logger.h"
 #include "owntone_config.h"
 #include "settings.h"
@@ -358,24 +358,6 @@ pb_suspend(void);
 
 /* ----------------------- Misc helpers and callbacks ----------------------- */
 
-// Callback from the worker thread (async operation as it may block)
-static void
-playcount_inc_cb(void *arg)
-{
-  int *id = arg;
-
-  db_file_inc_playcount(*id);
-}
-
-static void
-skipcount_inc_cb(void *arg)
-{
-  int *id = arg;
-
-  db_file_inc_skipcount(*id);
-}
-
-
 // This is just to be able to log the caller in a simple way
 #define status_update(x, y) status_update_impl((x), (y), __func__)
 static void
@@ -415,15 +397,6 @@ history_add(uint32_t id, uint32_t item_id)
 
   if (history->count < MAX_HISTORY_COUNT)
     history->count++;
-}
-
-static void
-seek_save(void)
-{
-  struct player_source *ps = pb_session.playing_now;
-
-  if (ps && (ps->media_kind & (MEDIA_KIND_MOVIE | MEDIA_KIND_PODCAST | MEDIA_KIND_AUDIOBOOK | MEDIA_KIND_TVSHOW)))
-    db_file_seek_update(ps->id, ps->pos_ms);
 }
 
 /*
@@ -1071,13 +1044,7 @@ event_play_eof()
 {
   DPRINTF(E_DBG, L_PLAYER, "event_play_eof()\n");
 
-  int id = (int)pb_session.playing_now->id;
-
-  if (id != DB_MEDIA_FILE_NON_PERSISTENT_ID)
-    {
-      worker_execute(playcount_inc_cb, &id, sizeof(int), 5);
-      history_add(pb_session.playing_now->id, pb_session.playing_now->item_id);
-    }
+  history_add(pb_session.playing_now->id, pb_session.playing_now->item_id);
 
   if (consume)
     db_queue_delete_byitemid(pb_session.playing_now->item_id);
@@ -1763,8 +1730,6 @@ pb_session_pause(void)
 {
   pb_timer_stop();
 
-  seek_save();
-
   source_stop();
 }
 
@@ -1773,8 +1738,6 @@ static void
 pb_session_stop(void)
 {
   pb_timer_stop();
-
-  seek_save();
 
   source_stop();
 
@@ -1876,8 +1839,6 @@ pb_suspend(void)
   pb_timer_stop();
 
   status_update(PLAY_PAUSED, LISTENER_PLAYER);
-
-  seek_save();
 
   return flush_pending;
 }
@@ -2028,7 +1989,6 @@ static enum command_state
 playback_start_item(void *arg, int *retval)
 {
   struct db_queue_item *queue_item = arg;
-  struct media_file_info *mfi;
   struct output_device *device;
   uint32_t seek_ms;
   int ret;
@@ -2065,17 +2025,7 @@ playback_start_item(void *arg, int *retval)
       // Start playback for given queue item
       DPRINTF(E_DBG, L_PLAYER, "Start playback of '%s' (id=%d, item-id=%d)\n", queue_item->path, queue_item->file_id, queue_item->id);
 
-      // Look up where we should start
-      seek_ms = 0;
-      if (queue_item->file_id > 0)
-	{
-	  mfi = db_file_fetch_byid(queue_item->file_id);
-	  if (mfi)
-	    {
-	      seek_ms = mfi->seek;
-	      free_mfi(mfi, 0);
-	    }
-	}
+      seek_ms = 0; /* pipe has no stored seek position */
 
       ret = pb_session_start(queue_item, seek_ms);
       if (ret < 0)
@@ -2124,28 +2074,17 @@ playback_start_item(void *arg, int *retval)
 static enum command_state
 playback_start_id(void *arg, int *retval)
 {
-  struct query_params qp = { .type = Q_ITEMS };
   struct db_queue_item *queue_item = NULL;
-  union player_arg *cmdarg = arg;
   enum command_state cmd_state;
-  int new_item_id;
-  int ret;
 
   *retval = -1;
 
   if (player_state == PLAY_STOPPED)
     {
-      db_queue_clear(0);
-
-      qp.id = cmdarg->id;
-
-      ret = db_queue_add_by_query(&qp, 0, 0, -1, NULL, &new_item_id);
-      if (ret < 0)
-	return COMMAND_END;
-
-      queue_item = db_queue_fetch_byitemid(new_item_id);
+      /* Pipe-only build: the single queue item is always at position 0 */
+      queue_item = db_queue_fetch_bypos(0, shuffle);
       if (!queue_item)
-	return COMMAND_END;
+        return COMMAND_END;
     }
 
   cmd_state = playback_start_item(queue_item, retval);
@@ -2232,7 +2171,6 @@ playback_next_bh(void *arg, int *retval)
 {
   struct db_queue_item *queue_item;
   int ret;
-  int id;
 
   // outputs_flush() in playback_pause() may have a caused a failure callback
   // from the output, which in streaming_cb() can cause pb_abort()
@@ -2243,12 +2181,7 @@ playback_next_bh(void *arg, int *retval)
 
   // Only add to history if playback started
   if (pb_session.playing_now->pos_ms > 0)
-    {
-      history_add(pb_session.playing_now->id, pb_session.playing_now->item_id);
-
-      id = (int)(pb_session.playing_now->id);
-      worker_execute(skipcount_inc_cb, &id, sizeof(int), 5);
-    }
+    history_add(pb_session.playing_now->id, pb_session.playing_now->item_id);
 
   queue_item = queue_item_next(pb_session.playing_now->item_id);
 
@@ -3815,32 +3748,12 @@ player_raop_verification_kickoff(char **arglist)
 static void *
 player(void *arg)
 {
-  struct output_device *device;
-  int ret;
-
   thread_setname("player");
-
-  ret = db_perthread_init();
-  if (ret < 0)
-    {
-      DPRINTF(E_LOG, L_PLAYER, "Error: DB init failed\n");
-
-      pthread_exit(NULL);
-    }
 
   event_base_dispatch(evbase_player);
 
   if (!player_exit)
     DPRINTF(E_LOG, L_PLAYER, "Player event loop terminated ahead of time!\n");
-
-  for (device = outputs_list(); device; device = device->next)
-    {
-      ret = db_speaker_save(device);
-      if (ret < 0)
-	DPRINTF(E_LOG, L_PLAYER, "Could not save state for %s device '%s'\n", device->type_name, device->name);
-    }
-
-  db_perthread_deinit();
 
   pthread_exit(NULL);
 }
@@ -3856,6 +3769,8 @@ player_init(void)
 
   speaker_autoselect = config_get_bool("speaker_autoselect", false);
   clear_queue_on_stop_disabled = config_get_bool("clear_queue_on_stop_disable", false);
+
+  db_queue_set_pipe(config_get_str("pipe_path", NULL));
 
   ret = SETTINGS_GETINT("player", PLAYER_SETTINGS_MODE_REPEAT);
   repeat = (ret > 0) ? ret : REPEAT_OFF;

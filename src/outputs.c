@@ -34,7 +34,6 @@
 #include "logger.h"
 #include "misc.h"
 #include "transcode.h"
-#include "db.h"
 #include "player.h" //TODO remove me when player_pmap is removed again
 #include "worker.h"
 #include "outputs.h"
@@ -753,7 +752,6 @@ outputs_device_add(struct output_device *add, bool new_deselect)
   struct output_device *device;
   char *keep_name;
   int keep_offset_ms;
-  int ret;
 
   for (device = outputs_device_list; device; device = device->next)
     {
@@ -786,12 +784,9 @@ outputs_device_add(struct output_device *add, bool new_deselect)
       keep_name = strdup(device->name);
       keep_offset_ms = device->offset_ms; // For legacy local audio and Chromecast where offset could come from config file
 
-      ret = db_speaker_get(device, device->id);
-      if (ret < 0)
-	{
-	  device->selected = 0;
-	  device->volume = (outputs_master_volume >= 0) ? outputs_master_volume : OUTPUTS_DEFAULT_VOLUME;;
-	}
+      /* No persistent speaker state — use defaults */
+      device->selected = 0;
+      device->volume = (outputs_master_volume >= 0) ? outputs_master_volume : OUTPUTS_DEFAULT_VOLUME;
 
       free(device->name);
       device->name = keep_name;
@@ -854,7 +849,6 @@ outputs_device_remove(struct output_device *remove)
 {
   struct output_device *device;
   struct output_device *prev;
-  int ret;
 
   // Device stop should be able to handle that we invalidate the device, even
   // if it is an async stop. It might call outputs_device_session_remove(), but
@@ -873,11 +867,6 @@ outputs_device_remove(struct output_device *remove)
 
   if (!device)
     return;
-
-  // Save device volume
-  ret = db_speaker_save(remove);
-  if (ret < 0)
-    DPRINTF(E_LOG, L_PLAYER, "Could not save state for %s device '%s'\n", remove->type_name, remove->name);
 
   DPRINTF(E_INFO, L_PLAYER, "Removing %s device '%s'\n", remove->type_name, remove->name);
 
@@ -1370,4 +1359,3 @@ outputs_deinit(void)
   for (i = 0; i < ARRAY_SIZE(output_buffer.data); i++)
     evbuffer_free(output_buffer.data[i].evbuf);
 }
-

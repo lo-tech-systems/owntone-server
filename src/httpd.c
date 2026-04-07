@@ -40,7 +40,6 @@
 #include <zlib.h>
 
 #include "logger.h"
-#include "db.h"
 #include "owntone_config.h"
 #include "misc.h"
 #include "worker.h"
@@ -48,7 +47,6 @@
 #include "httpd.h"
 #include "httpd_internal.h"
 #include "transcode.h"
-#include "cache.h"
 #include "listener.h"
 #include "player.h"
 #define ERR_PAGE "<html>\n<head>\n" \
@@ -332,25 +330,14 @@ httpd_response_not_cachable(struct httpd_request *hreq)
   httpd_header_add(hreq->out_headers, "Cache-Control", "no-store");
 }
 
-/* -------------------------- SPEAKER/CACHE HANDLING ------------------------ */
-
-// Thread: worker
-static void
-speaker_update_handler_cb(void *arg)
-{
-  const char *prefer_format = config_get_str("prefer_format", NULL);
-  bool want_mp4;
-
-  want_mp4 = (prefer_format && (strcmp(prefer_format, "alac") == 0));
-
-  cache_xcode_toggle(want_mp4);
-}
+/* -------------------------- SPEAKER HANDLING ------------------------------- */
 
 // Thread: player (must not block)
 static void
 httpd_speaker_update_handler(short event_mask, void *ctx)
 {
-  worker_execute(speaker_update_handler_cb, NULL, 0, 0);
+  /* No-op: transcoding cache has been removed */
+  (void)ctx;
 }
 
 
@@ -687,7 +674,6 @@ thread_init_cb(struct evthr *thr, void *shared)
 
   thread_setname("httpd");
 
-  CHECK_ERR(L_HTTPD, db_perthread_init());
   CHECK_NULL(L_HTTPD, evbase = evthr_get_base(thr));
   CHECK_NULL(L_HTTPD, server = httpd_server_new(evbase, httpd_port, request_cb, NULL));
 
@@ -704,8 +690,6 @@ thread_exit_cb(struct evthr *thr, void *shared)
 
   server = evthr_get_aux(thr);
   httpd_server_free(server);
-
-  db_perthread_deinit();
 }
 
 /* Thread: main */

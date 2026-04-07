@@ -1718,25 +1718,6 @@ filter_def_buffersink(struct filter_def *def, struct stream_ctx *out_stream, str
 }
 
 static int
-filter_def_user(struct filter_def *def, struct stream_ctx *out_stream, struct stream_ctx *in_stream, const char *deffn_arg)
-{
-  char *ptr;
-
-  snprintf(def->name, sizeof(def->name), "%s", deffn_arg);
-
-  ptr = strchr(def->name, '=');
-  if (ptr)
-    {
-      *ptr = '\0';
-      snprintf(def->args, sizeof(def->args), "%s", ptr + 1);
-    }
-  else
-    *def->args = '\0';
-
-  return 0;
-}
-
-static int
 define_audio_filters(struct filters *filters, size_t filters_len, bool with_user_filters)
 {
   filters[0].deffn = filter_def_abuffer;

@@ -137,25 +137,7 @@ OWNTONE_MODULES_CHECK([OWNTONE], [LIBCURL], [libcurl], [curl_global_init], [curl
 OWNTONE_MODULES_CHECK([OWNTONE], [LIBSODIUM], [libsodium], [sodium_init], [sodium.h])
 OWNTONE_MODULES_CHECK([OWNTONE], [LIBXML2], [libxml-2.0], [xmlInitParser], [libxml/parser.h])
 
-OWNTONE_MODULES_CHECK([COMMON], [SQLITE3], [sqlite3 >= 3.5.0],
-	[sqlite3_initialize], [sqlite3.h],
-	[dnl Check that SQLite3 has the unlock notify API built-in
-	 AC_CHECK_FUNC([[sqlite3_unlock_notify]], [],
-		[AC_MSG_ERROR([[SQLite3 was built without unlock notify support]])])
-	 dnl Check for sqlite3_expanded_sql (optional)
-	 AC_CHECK_FUNCS([sqlite3_expanded_sql])
-	 dnl Check that SQLite3 has been built with threadsafe operations
-	 AC_MSG_CHECKING([[if SQLite3 was built with threadsafe operations support]])
-	 AC_RUN_IFELSE([AC_LANG_PROGRAM([[#include <sqlite3.h>
-		]], [[
-		int ret = sqlite3_config(SQLITE_CONFIG_MULTITHREAD);
-		if (ret != SQLITE_OK)
-		  return 1;]])],
-		[AC_MSG_RESULT([[yes]])],
-		[AC_MSG_RESULT([[no]])
-		 AC_MSG_ERROR([[SQLite3 was not built with threadsafe operations support]])],
-		[AC_MSG_RESULT([[runtime will tell]])])
-	])
+dnl SQLite3 removed: all queue/speaker state is now in-memory (see src/queue.c)
 
 OWNTONE_MODULES_CHECK([OWNTONE], [LIBEVENT], [libevent >= 2.1.4],
 	[event_base_new], [event2/event.h],

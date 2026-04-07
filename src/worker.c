@@ -37,7 +37,6 @@
 
 #include <event2/event.h>
 
-#include "db.h"
 #include "logger.h"
 #include "worker.h"
 #include "evthr.h"
@@ -96,8 +95,6 @@ execute(struct evthr *thr, void *arg, void *shared)
 static void
 init_cb(struct evthr *thr, void *shared)
 {
-  CHECK_ERR(L_MAIN, db_perthread_init());
-
   worker_thr = thr;
 
   thread_setname("worker");
@@ -107,8 +104,6 @@ static void
 exit_cb(struct evthr *thr, void *shared)
 {
   worker_thr = NULL;
-
-  db_perthread_deinit();
 }
 
 

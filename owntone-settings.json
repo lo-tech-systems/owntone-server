@@ -34,11 +34,6 @@
 
   "prefer_format": null,
 
-  "db_path": "/var/cache/owntone/owntone.db",
-  "db_backup_path": null,
-  "cache_dir": "/var/cache/owntone/",
-  "cache_xcode_filename": "cache.db",
-
   "airplay_devices": {
     "_comment": "Keyed by the mDNS-announced device name. All fields are optional.",
     "Living Room": {

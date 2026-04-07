@@ -61,19 +61,15 @@
 #include <pthread.h>
 #include <gcrypt.h>
 
-#include "db.h"
 #include "logger.h"
 #include "misc.h"
-#include "cache.h"
 #include "httpd.h"
 #include "mdns.h"
 #include "player.h"
 #include "worker.h"
-#include "library.h"
 #include "ptpd.h"
 
-#define PIDFILE          STATEDIR "/run/owntone.pid"
-#define SQLITE_EXT_PATH  PKGLIBDIR "/owntone-sqlext.so"
+#define PIDFILE  STATEDIR "/run/owntone.pid"
 
 struct event_base *evbase_main;
 
@@ -565,27 +561,6 @@ main(int argc, char **argv)
       goto mdns_fail;
     }
 
-  /* Initialize the database before starting */
-  DPRINTF(E_INFO, L_MAIN, "Initializing database\n");
-  ret = db_init(SQLITE_EXT_PATH);
-  if (ret < 0)
-    {
-      DPRINTF(E_FATAL, L_MAIN, "Database init failed\n");
-
-      ret = EXIT_FAILURE;
-      goto db_fail;
-    }
-
-  /* Open a DB connection for the main thread */
-  ret = db_perthread_init();
-  if (ret < 0)
-    {
-      DPRINTF(E_FATAL, L_MAIN, "Could not perform perthread DB init for main\n");
-
-      ret = EXIT_FAILURE;
-      goto db_fail;
-    }
-
   /* Spawn worker thread */
   ret = worker_init();
   if (ret != 0)
@@ -594,26 +569,6 @@ main(int argc, char **argv)
 
       ret = EXIT_FAILURE;
       goto worker_fail;
-    }
-
-  /* Spawn cache thread */
-  ret = cache_init();
-  if (ret != 0)
-    {
-      DPRINTF(E_FATAL, L_MAIN, "Cache thread failed to start\n");
-
-      ret = EXIT_FAILURE;
-      goto cache_fail;
-    }
-
-  /* Spawn library scan thread */
-  ret = library_init();
-  if (ret != 0)
-    {
-      DPRINTF(E_FATAL, L_MAIN, "Library thread failed to start\n");
-
-      ret = EXIT_FAILURE;
-      goto library_fail;
     }
 
   /* Spawn player thread */
@@ -712,23 +667,10 @@ main(int argc, char **argv)
   player_deinit();
 
  player_fail:
-  DPRINTF(E_LOG, L_MAIN, "Library scanner deinit\n");
-  library_deinit();
-
- library_fail:
-  DPRINTF(E_LOG, L_MAIN, "Cache deinit\n");
-  cache_deinit();
-
- cache_fail:
   DPRINTF(E_LOG, L_MAIN, "Worker deinit\n");
   worker_deinit();
 
  worker_fail:
-  DPRINTF(E_LOG, L_MAIN, "Database deinit\n");
-  db_perthread_deinit();
-  db_deinit();
-
- db_fail:
   if (ret == EXIT_FAILURE)
     {
       DPRINTF(E_LOG, L_MAIN, "mDNS deinit\n");

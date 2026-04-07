@@ -4048,9 +4048,6 @@ raop_cb_pair_setup_step3(struct evrtsp_request *req, void *arg)
   free(device->auth_key);
   device->auth_key = strdup(authorization_key);
 
-  // A blocking db call... :-~
-  db_speaker_save(device);
-
   // No longer RAOP_STATE_PASSWORD
   rs->state = RAOP_STATE_STOPPED;
 

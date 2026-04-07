@@ -648,16 +648,7 @@ input_wait(void)
 static void *
 input(void *arg)
 {
-  int ret;
-
   thread_setname("input");
-
-  ret = db_perthread_init();
-  if (ret < 0)
-    {
-      DPRINTF(E_LOG, L_MAIN, "Error: DB init failed (input thread)\n");
-      pthread_exit(NULL);
-    }
 
   input_initialized = true;
 
@@ -668,8 +659,6 @@ input(void *arg)
       DPRINTF(E_LOG, L_MAIN, "Input event loop terminated ahead of time!\n");
       input_initialized = false;
     }
-
-  db_perthread_deinit();
 
   pthread_exit(NULL);
 }
@@ -975,4 +964,3 @@ input_deinit(void)
   evbuffer_free(input_buffer.evbuf);
   event_base_free(evbase_input);
 }
-
