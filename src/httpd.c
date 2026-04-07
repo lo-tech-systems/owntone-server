@@ -41,7 +41,7 @@
 
 #include "logger.h"
 #include "db.h"
-#include "conffile.h"
+#include "owntone_config.h"
 #include "misc.h"
 #include "worker.h"
 #include "evthr.h"
@@ -338,7 +338,7 @@ httpd_response_not_cachable(struct httpd_request *hreq)
 static void
 speaker_update_handler_cb(void *arg)
 {
-  const char *prefer_format = cfg_getstr(cfg_getsec(cfg, "library"), "prefer_format");
+  const char *prefer_format = config_get_str("prefer_format", NULL);
   bool want_mp4;
 
   want_mp4 = (prefer_format && (strcmp(prefer_format, "alac") == 0));
@@ -569,7 +569,7 @@ httpd_request_is_authorized(struct httpd_request *hreq)
   if (httpd_request_is_trusted(hreq))
     return true;
 
-  passwd = cfg_getstr(cfg_getsec(cfg, "general"), "admin_password");
+  passwd = config_get_str("admin_password", NULL);
   if (!passwd)
     {
       DPRINTF(E_LOG, L_HTTPD, "Web interface request to '%s' denied: No password set in the config\n", hreq->uri);
@@ -715,8 +715,8 @@ httpd_init(void)
   int ret;
 
   // Read config
-  httpd_port = cfg_getint(cfg_getsec(cfg, "library"), "port");
-  httpd_allow_origin = cfg_getstr(cfg_getsec(cfg, "general"), "allow_origin");
+  httpd_port = config_get_int("port", 3689);
+  httpd_allow_origin = config_get_str("allow_origin", "*");
   if (strlen(httpd_allow_origin) == 0)
     httpd_allow_origin = NULL;
 

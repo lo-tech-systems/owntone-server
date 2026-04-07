@@ -35,7 +35,7 @@
 
 #include "misc.h"
 #include "logger.h"
-#include "conffile.h"
+#include "owntone_config.h"
 #include "commands.h"
 #include "input.h"
 

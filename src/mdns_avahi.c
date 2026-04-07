@@ -54,7 +54,7 @@
 #endif
 
 #include "logger.h"
-#include "conffile.h"
+#include "owntone_config.h"
 #include "mdns.h"
 
 #define MDNSERR avahi_strerror(avahi_client_errno(mdns_client))
@@ -700,7 +700,7 @@ address_check(const char *hostname, const AvahiAddress *addr, int port, enum mdn
   else
     snprintf(address_log, sizeof(address_log), "[%s]", address);
 
-  if (addr->proto == AVAHI_PROTO_INET6 && (flags & MDNS_IPV4ONLY || !cfg_getbool(cfg_getsec(cfg, "general"), "ipv6"))) {
+  if (addr->proto == AVAHI_PROTO_INET6 && (flags & MDNS_IPV4ONLY || !config_get_bool("ipv6", false))) {
     DPRINTF(E_WARN, L_MDNS, "Ignoring announcement from %s, address %s is ipv6, but ipv6 is disabled\n", hostname, address_log);
     return -1;
   }
@@ -1155,7 +1155,7 @@ mdns_init(void)
 
   DPRINTF(E_DBG, L_MDNS, "Initializing Avahi mDNS\n");
 
-  cfgaddr = cfg_getstr(cfg_getsec(cfg, "general"), "bind_address");
+  cfgaddr = config_get_str("bind_address", NULL);
   if (cfgaddr)
     {
       mdns_interface = interface_index_get(cfgaddr);
@@ -1256,7 +1256,7 @@ mdns_browse(char *type, mdns_browse_cb cb, enum mdns_options flags)
 
   CHECK_NULL(L_MDNS, mb = calloc(1, sizeof(struct mdns_browser)));
 
-  if (flags & MDNS_IPV4ONLY || !cfg_getbool(cfg_getsec(cfg, "general"), "ipv6"))
+  if (flags & MDNS_IPV4ONLY || !config_get_bool("ipv6", false))
     family = AF_INET;
   else
     family = AF_UNSPEC;

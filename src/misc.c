@@ -69,7 +69,7 @@
 #include <libavutil/base64.h>
 
 #include "logger.h"
-#include "conffile.h"
+#include "owntone_config.h"
 #include "misc.h"
 
 
@@ -198,7 +198,6 @@ net_address_has_prefix(union net_sockaddr *naddr, const char *prefix)
 bool
 net_peer_address_is_trusted(union net_sockaddr *naddr)
 {
-  cfg_t *section;
   const char *network;
   int i;
   int n;
@@ -206,12 +205,10 @@ net_peer_address_is_trusted(union net_sockaddr *naddr)
   if (!naddr)
     return false;
 
-  section = cfg_getsec(cfg, "general");
-
-  n = cfg_size(section, "trusted_networks");
+  n = config_get_strlist_count("trusted_networks");
   for (i = 0; i < n; i++)
     {
-      network = cfg_getnstr(section, "trusted_networks", i);
+      network = config_get_strlist_item("trusted_networks", i);
 
       if (!network || network[0] == '\0' || strcmp(network, "none") == 0)
 	return false;
@@ -263,7 +260,7 @@ net_sockaddr_get(union net_sockaddr *naddr, const char *addr, unsigned short por
       return 0;
     }
 
-  if (cfg_getbool(cfg_getsec(cfg, "general"), "ipv6") && inet_pton(AF_INET6, addr, &naddr->sin6.sin6_addr) == 1)
+  if (config_get_bool("ipv6", false) && inet_pton(AF_INET6, addr, &naddr->sin6.sin6_addr) == 1)
     {
       naddr->sin6.sin6_family = AF_INET6;
       naddr->sin6.sin6_port = htons(port);
@@ -472,7 +469,7 @@ net_connect_impl(const char *addr, unsigned short port, int type, const char *lo
   DPRINTF(E_DBG, L_MISC, "Connecting to '%s' at %s (port %u)\n", log_service_name, addr, port);
 
   hints.ai_socktype = type;
-  hints.ai_family = (cfg_getbool(cfg_getsec(cfg, "general"), "ipv6")) ? AF_UNSPEC : AF_INET;
+  hints.ai_family = config_get_bool("ipv6", false) ? AF_UNSPEC : AF_INET;
 
   snprintf(strport, sizeof(strport), "%hu", port);
   ret = getaddrinfo(addr, strport, &hints, &servinfo);
@@ -635,8 +632,8 @@ bind_one(const char *node, unsigned short *port, int type, int family, const cha
 static int
 bind_impl(struct net_socket *socket, unsigned short *port, int type, const char *log_service_name, bool reuseport)
 {
-  const char *bind_address = cfg_getstr(cfg_getsec(cfg, "general"), "bind_address");
-  bool v6_enabled = cfg_getbool(cfg_getsec(cfg, "general"), "ipv6");
+  const char *bind_address = config_get_str("bind_address", NULL);
+  bool v6_enabled = config_get_bool("ipv6", false);
 
   // Normally comply with config, except for "::" where we want to listen on
   // both ipv4 and ipv6 (as the comment in the config file says)
@@ -684,7 +681,7 @@ net_evhttp_bind(struct evhttp *evhttp, unsigned short port, const char *log_serv
   bool v6_enabled;
   int ret;
 
-  bind_address = cfg_getstr(cfg_getsec(cfg, "general"), "bind_address");
+  bind_address = config_get_str("bind_address", NULL);
 
   // Normally comply with config, except for "::" where we want to listen on
   // both ipv4 and ipv6 (as the comment in the config file says)
@@ -694,7 +691,7 @@ net_evhttp_bind(struct evhttp *evhttp, unsigned short port, const char *log_serv
   // For Linux, we could just do evhttp_bind_socket() for "::", and both the
   // ipv4 and v6 port would be bound. However, for bsd it seems it is necessary
   // to do like below.
-  v6_enabled = cfg_getbool(cfg_getsec(cfg, "general"), "ipv6");
+  v6_enabled = config_get_bool("ipv6", false);
   if (v6_enabled)
     {
       ret = evhttp_bind_socket(evhttp, "::", port);

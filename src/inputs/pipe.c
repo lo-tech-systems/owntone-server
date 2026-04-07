@@ -55,7 +55,7 @@
 #include "input.h"
 #include "misc.h"
 #include "logger.h"
-#include "conffile.h"
+#include "owntone_config.h"
 #include "player.h"
 #include "worker.h"
 #include "commands.h"
@@ -1046,9 +1046,9 @@ init(void)
 
   pipe_metadata.prepared.pict_tmpfile_fd = -1;
 
-  pipe_path = cfg_getstr(cfg_getsec(cfg, "library"), "pipe_path");
+  pipe_path = config_get_str("pipe_path", NULL);
 
-  pipe_autostart = cfg_getbool(cfg_getsec(cfg, "library"), "pipe_autostart");
+  pipe_autostart = config_get_bool("pipe_autostart", true);
   if (pipe_autostart && pipe_path)
     {
       union pipe_arg *cmdarg;
@@ -1069,14 +1069,14 @@ init(void)
         }
     }
 
-  pipe_sample_rate = cfg_getint(cfg_getsec(cfg, "library"), "pipe_sample_rate");
+  pipe_sample_rate = config_get_int("pipe_sample_rate", 44100);
   if (pipe_sample_rate != 44100 && pipe_sample_rate != 48000 && pipe_sample_rate != 88200 && pipe_sample_rate != 96000)
     {
       DPRINTF(E_FATAL, L_PLAYER, "The configuration of pipe_sample_rate is invalid: %d\n", pipe_sample_rate);
       return -1;
     }
 
-  pipe_bits_per_sample = cfg_getint(cfg_getsec(cfg, "library"), "pipe_bits_per_sample");
+  pipe_bits_per_sample = config_get_int("pipe_bits_per_sample", 16);
   if (pipe_bits_per_sample != 16 && pipe_bits_per_sample != 32)
     {
       DPRINTF(E_FATAL, L_PLAYER, "The configuration of pipe_bits_per_sample is invalid: %d\n", pipe_bits_per_sample);

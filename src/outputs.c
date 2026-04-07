@@ -38,7 +38,7 @@
 #include "player.h" //TODO remove me when player_pmap is removed again
 #include "worker.h"
 #include "outputs.h"
-#include "conffile.h"
+#include "owntone_config.h"
 
 extern struct output_definition output_raop;
 extern struct output_definition output_airplay;
@@ -1289,11 +1289,9 @@ outputs_list(void)
 int
 outputs_init(void)
 {
-  cfg_opt_t *start_buffer_opt;
   int no_output;
   int ret;
   int i;
-  int j;
 
   outputs_master_volume = -1;
 
@@ -1303,9 +1301,8 @@ outputs_init(void)
   // audio latency of 250 ms/11025. See e.g. shairport-sync's rtp.c. While a
   // shorter delay would seem desirable, some Airplay devices ignore the values
   // we give and stick to 2.25 seconds.
-  start_buffer_opt = cfg_getopt(cfg_getsec(cfg, "general"), "start_buffer_ms");
-  outputs_buffer_duration_ms = cfg_opt_getnint(start_buffer_opt, 0);
-  if (outputs_buffer_duration_ms != start_buffer_opt->def.number)
+  outputs_buffer_duration_ms = config_get_int("start_buffer_ms", 2250);
+  if (outputs_buffer_duration_ms != 2250)
     DPRINTF(E_WARN, L_PLAYER, "Output buffer duration is configured to a non-standard value %" PRIu64 "\n", outputs_buffer_duration_ms);
 
   CHECK_NULL(L_PLAYER, outputs_deferredev = evtimer_new(evbase_player, deferred_cb, NULL));
@@ -1322,13 +1319,6 @@ outputs_init(void)
       if (outputs[i]->disabled)
 	{
 	  continue;
-	}
-
-      // Check if the user has configured "exclusive" for any output type speaker
-      if (outputs[i]->cfg_name)
-	{
-	  for (j = 0; j < cfg_size(cfg, outputs[i]->cfg_name) && !outputs_exclusive_mode; j++)
-	    outputs_exclusive_mode = cfg_getbool(cfg_getnsec(cfg, outputs[i]->cfg_name, j), "exclusive");
 	}
 
       if (!outputs[i]->init)

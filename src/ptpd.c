@@ -23,7 +23,7 @@
 #include "libairptp/airptp.h"
 #include "misc.h"
 #include "logger.h"
-#include "conffile.h"
+#include "owntone_config.h"
 
 static struct airptp_handle *ptpd_hdl;
 static bool airptp_create_own_service = false;
@@ -74,7 +74,7 @@ int
 ptpd_find_or_bind(void)
 {
   struct airptp_callbacks cb = { .logmsg = logmsg, .hexdump = hexdump, .thread_name_set = thread_setname };
-  const char *bind_address = cfg_getstr(cfg_getsec(cfg, "general"), "bind_address");
+  const char *bind_address = config_get_str("bind_address", NULL);
 
   if (bind_address && strcmp(bind_address, "::") == 0)
     bind_address = NULL;

@@ -42,7 +42,7 @@
 
 #include <sqlite3.h>
 
-#include "conffile.h"
+#include "owntone_config.h"
 #include "logger.h"
 #include "listener.h"
 #include "library.h"
@@ -649,7 +649,7 @@ db_pl_type_label(enum pl_type pl_type)
 
 
 
-static char *db_path;
+static const char *db_path;
 static char *db_sqlite_ext_path;
 static bool db_rating_updates;
 
@@ -1127,7 +1127,7 @@ fixup_sanitize(char **tag, enum fixup_type fixup, struct fixup_ctx *ctx)
 static void
 fixup_defaults(char **tag, enum fixup_type fixup, struct fixup_ctx *ctx)
 {
-  char *ca;
+  (void)0; /* ca removed, compilation_artist now handled inline */
 
   switch(fixup)
     {
@@ -1157,7 +1157,7 @@ fixup_defaults(char **tag, enum fixup_type fixup, struct fixup_ctx *ctx)
 	else if (ctx->qi && ctx->qi->path)
 	  *tag = strdup(ctx->qi->path);
 	else
-	  *tag = strdup(CFG_NAME_UNKNOWN_TITLE);
+	  *tag = strdup(config_get_str("name_unknown_title", "Unknown title"));
 	break;
 
       case DB_FIXUP_ARTIST:
@@ -1175,7 +1175,7 @@ fixup_defaults(char **tag, enum fixup_type fixup, struct fixup_ctx *ctx)
         else if (ctx->mfi && ctx->mfi->tv_series_name)
 	  *tag = strdup(ctx->mfi->tv_series_name);
 	else
-	  *tag = strdup(CFG_NAME_UNKNOWN_ARTIST);
+	  *tag = strdup(config_get_str("name_unknown_artist", "Unknown artist"));
 	break;
 
       case DB_FIXUP_ALBUM:
@@ -1185,7 +1185,7 @@ fixup_defaults(char **tag, enum fixup_type fixup, struct fixup_ctx *ctx)
 	if (ctx->mfi && ctx->mfi->tv_series_name)
 	  *tag = safe_asprintf("%s, Season %u", ctx->mfi->tv_series_name, ctx->mfi->tv_season_num);
 	else
-	  *tag = strdup(CFG_NAME_UNKNOWN_ALBUM);
+	  *tag = strdup(config_get_str("name_unknown_album", "Unknown album"));
 	break;
 
       case DB_FIXUP_ALBUM_ARTIST: // Will be set after artist, because artist (must) come first in the col_maps
@@ -1195,10 +1195,14 @@ fixup_defaults(char **tag, enum fixup_type fixup, struct fixup_ctx *ctx)
 	    *tag = strdup("");
 	  }
 
-	if (ctx->mfi && ctx->mfi->compilation && (ca = cfg_getstr(cfg_getsec(cfg, "library"), "compilation_artist")))
+	if (ctx->mfi && ctx->mfi->compilation)
 	  {
-	    free(*tag);
-	    *tag = strdup(ca); // If ca is empty string then the artist will not be shown in artist view
+	    const char *ca_str = config_get_str("compilation_artist", NULL);
+	    if (ca_str)
+	      {
+		free(*tag);
+		*tag = strdup(ca_str);
+	      }
 	  }
 
 	if (*tag)
@@ -1209,14 +1213,14 @@ fixup_defaults(char **tag, enum fixup_type fixup, struct fixup_ctx *ctx)
 	else if (ctx->qi && ctx->qi->artist)
 	  *tag = strdup(ctx->qi->artist);
 	else
-	  *tag = strdup(CFG_NAME_UNKNOWN_ARTIST);
+	  *tag = strdup(config_get_str("name_unknown_artist", "Unknown artist"));
 	break;
 
       case DB_FIXUP_GENRE:
 	if (*tag)
 	  break;
 
-	*tag = strdup(CFG_NAME_UNKNOWN_GENRE);
+	*tag = strdup(config_get_str("name_unknown_genre", "Unknown genre"));
 	break;
 
       case DB_FIXUP_MEDIA_KIND:
@@ -1623,23 +1627,20 @@ static void
 db_set_cfg_names(void)
 {
 #define Q_TMPL "UPDATE playlists SET title = '%q' WHERE type = %d AND special_id = %d;"
-  char *cfg_item[6] = { "name_library", "name_music", "name_movies", "name_tvshows", "name_podcasts", "name_audiobooks" };
+  const char *cfg_item[6] = { "name_library", "name_music", "name_movies", "name_tvshows", "name_podcasts", "name_audiobooks" };
   char special_id[6] = { 0, 6, 4, 5, 1, 7 };
-  cfg_t *lib;
   char *query;
-  char *title;
+  const char *title;
   char *errmsg;
   int ret;
   int i;
 
-  lib = cfg_getsec(cfg, "library");
-
   for (i = 0; i < (sizeof(cfg_item) / sizeof(cfg_item[0])); i++)
     {
-      title = cfg_getstr(lib, cfg_item[i]);
+      title = config_get_str(cfg_item[i], NULL);
       if (!title)
 	{
-	  DPRINTF(E_LOG, L_DB, "Internal error, unknown config item '%s'\n", cfg_item[i]);
+	  DPRINTF(E_DBG, L_DB, "Config item '%s' not set, using default\n", cfg_item[i]);
 
 	  continue;
 	}
@@ -6933,7 +6934,7 @@ db_open(void)
   char *errmsg;
   int ret;
   int cache_size;
-  char *journal_mode;
+  const char *journal_mode;
   int synchronous;
   int mmap_size;
 
@@ -6978,7 +6979,7 @@ db_open(void)
   sqlite3_trace_v2(hdl, SQLITE_TRACE_PROFILE, db_xprofile, NULL);
 #endif
 
-  cache_size = cfg_getint(cfg_getsec(cfg, "sqlite"), "pragma_cache_size_library");
+  cache_size = config_get_int("pragma_cache_size_library", -1);
   if (cache_size > -1)
     {
       db_pragma_set_cache_size(cache_size);
@@ -6986,14 +6987,14 @@ db_open(void)
       DPRINTF(E_DBG, L_DB, "Database cache size in pages: %d\n", cache_size);
     }
 
-  journal_mode = cfg_getstr(cfg_getsec(cfg, "sqlite"), "pragma_journal_mode");
+  journal_mode = config_get_str("pragma_journal_mode", NULL);
   if (journal_mode)
     {
-      journal_mode = db_pragma_set_journal_mode(journal_mode);
+      journal_mode = db_pragma_set_journal_mode((char *)journal_mode);
       DPRINTF(E_DBG, L_DB, "Database journal mode: %s\n", journal_mode);
     }
 
-  synchronous = cfg_getint(cfg_getsec(cfg, "sqlite"), "pragma_synchronous");
+  synchronous = config_get_int("pragma_synchronous", -1);
   if (synchronous > -1)
     {
       db_pragma_set_synchronous(synchronous);
@@ -7001,7 +7002,7 @@ db_open(void)
       DPRINTF(E_DBG, L_DB, "Database synchronous: %d\n", synchronous);
     }
 
-  mmap_size = cfg_getint(cfg_getsec(cfg, "sqlite"), "pragma_mmap_size_library");
+  mmap_size = config_get_int("pragma_mmap_size_library", -1);
   if (mmap_size > -1)
     {
       db_pragma_set_mmap_size(mmap_size);
@@ -7150,7 +7151,7 @@ db_backup(void)
   char resolved_bp[PATH_MAX];
   char resolved_dbp[PATH_MAX];
 
-  backup_path = cfg_getstr(cfg_getsec(cfg, "general"), "db_backup_path");
+  backup_path = config_get_str("db_backup_path", NULL);
   if (!backup_path)
     {
       DPRINTF(E_LOG, L_DB, "Backup not enabled, 'db_backup_path' is unset\n");
@@ -7246,7 +7247,7 @@ db_check_version(void)
   int vacuum;
   int ret;
 
-  vacuum = cfg_getbool(cfg_getsec(cfg, "sqlite"), "vacuum");
+  vacuum = config_get_bool("vacuum", false);
 
   db_admin_getint(&db_ver_major, DB_ADMIN_SCHEMA_VERSION_MAJOR);
   if (!db_ver_major)
@@ -7385,9 +7386,9 @@ db_init(char *sqlite_ext_path)
       assert(qi_cols_map[i].offset == qi_mfi_map[i].qi_offset);
     }
 
-  db_path = cfg_getstr(cfg_getsec(cfg, "general"), "db_path");
+  db_path = config_get_str("db_path", STATEDIR "/owntone.db");
   db_sqlite_ext_path = sqlite_ext_path;
-  db_rating_updates = cfg_getbool(cfg_getsec(cfg, "library"), "rating_updates");
+  db_rating_updates = config_get_bool("rating_updates", false);
 
   DPRINTF(E_INFO, L_DB, "Configured to use database file '%s'\n", db_path);
 

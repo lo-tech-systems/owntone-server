@@ -41,7 +41,7 @@
 #include <time.h>
 
 #include "httpd_internal.h"
-#include "conffile.h"
+#include "owntone_config.h"
 #include "db.h"
 #ifdef LASTFM
 # include "lastfm.h"
@@ -784,30 +784,8 @@ jsonapi_request(struct httpd_request *hreq)
 static int
 jsonapi_init(void)
 {
-  char *temp_path;
-
   default_playlist_directory = NULL;
-  allow_modifying_stored_playlists = cfg_getbool(cfg_getsec(cfg, "library"), "allow_modifying_stored_playlists");
-  if (allow_modifying_stored_playlists)
-    {
-      temp_path = cfg_getstr(cfg_getsec(cfg, "library"), "default_playlist_directory");
-      if (temp_path)
-	{
-	  // The path in the conf file may have a trailing slash character. Return the realpath like it is done for the library directories.
-	  default_playlist_directory = realpath(temp_path, NULL);
-	  if (default_playlist_directory)
-	    {
-	      if (access(default_playlist_directory, W_OK) < 0)
-	        DPRINTF(E_WARN, L_WEB, "Non-writable playlist save directory '%s'\n", default_playlist_directory);
-	    }
-	}
-
-      if (!default_playlist_directory)
-	{
-	  DPRINTF(E_LOG, L_WEB, "Invalid playlist save directory, disabling modifying stored playlists\n");
-	  allow_modifying_stored_playlists = false;
-	}
-     }
+  allow_modifying_stored_playlists = false;
 
   return 0;
 }

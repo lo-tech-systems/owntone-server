@@ -35,7 +35,7 @@
 
 #include <pthread.h>
 
-#include "conffile.h"
+#include "owntone_config.h"
 #include "misc.h"
 #include "listener.h"
 #include "logger.h"

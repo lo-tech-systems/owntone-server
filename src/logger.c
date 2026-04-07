@@ -36,7 +36,7 @@
 
 #include <libavutil/log.h>
 
-#include "conffile.h"
+#include "owntone_config.h"
 #include "misc.h"
 
 #define LOGGER_REPEAT_MAX 10

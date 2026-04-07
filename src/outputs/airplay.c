@@ -42,7 +42,7 @@
 #include "plist_wrap.h"
 
 #include "evrtsp/evrtsp.h"
-#include "conffile.h"
+#include "owntone_config.h"
 #include "logger.h"
 #include "mdns.h"
 #include "misc.h"
@@ -1778,12 +1778,7 @@ airplay_metadata_send(struct output_metadata *metadata)
 static int
 volume_max_get(const char *name)
 {
-  int max_volume = AIRPLAY_CONFIG_MAX_VOLUME;
-  cfg_t *airplay;
-
-  airplay = cfg_gettsec(cfg, "airplay", name);
-  if (airplay)
-    max_volume = cfg_getint(airplay, "max_volume");
+  int max_volume = config_get_device_int(name, "max_volume", AIRPLAY_CONFIG_MAX_VOLUME);
 
   if ((max_volume < 1) || (max_volume > AIRPLAY_CONFIG_MAX_VOLUME))
     {
@@ -3915,8 +3910,7 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
   struct output_device *device;
   struct airplay_extra *extra;
   struct keyval features_kv = { 0 };
-  cfg_t *devcfg;
-  cfg_opt_t *cfgopt;
+  int reconnect;
   const char *p;
   const char *nickname = NULL;
   const char *password = NULL;
@@ -3952,30 +3946,18 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
 
   DPRINTF(E_DBG, L_AIRPLAY, "Event for AirPlay device '%s' (port %d, id %" PRIx64 ", Active-Remote %" PRIu32 ")\n", name, port, id, (uint32_t)id);
 
-  devcfg = cfg_gettsec(cfg, "airplay", name);
-  if (devcfg && cfg_getbool(devcfg, "exclude"))
+  if (config_get_device_bool(name, "exclude", false))
     {
       DPRINTF(E_LOG, L_AIRPLAY, "Excluding AirPlay device '%s' as set in config\n", name);
       return;
     }
-  if (devcfg && cfg_getbool(devcfg, "permanent") && (port < 0))
+  if (config_get_device_bool(name, "permanent", false) && (port < 0))
     {
       DPRINTF(E_INFO, L_AIRPLAY, "AirPlay device '%s' disappeared, but set as permanent in config\n", name);
       return;
     }
-  if (outputs_exclusive_mode_get() && !(devcfg && cfg_getbool(devcfg, "exclusive")))
-    {
-      DPRINTF(E_INFO, L_AIRPLAY, "AirPlay device '%s' ignored, other speaker(s) set as exclusive\n", name);
-      return;
-    }
-  if (devcfg && cfg_getstr(devcfg, "nickname"))
-    {
-      nickname = cfg_getstr(devcfg, "nickname");
-    }
-  if (devcfg && cfg_getstr(devcfg, "password"))
-    {
-      password = cfg_getstr(devcfg, "password");
-    }
+  nickname = config_get_device_str(name, "nickname", NULL);
+  password = config_get_device_str(name, "password", NULL);
 
   CHECK_NULL(L_AIRPLAY, device = calloc(1, sizeof(struct output_device)));
   CHECK_NULL(L_AIRPLAY, extra = calloc(1, sizeof(struct airplay_extra)));
@@ -4037,7 +4019,7 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
     extra->wanted_metadata |= AIRPLAY_MD_WANTS_TEXT;
   if (keyval_get(&features_kv, "Authentication_8"))
     extra->supports_auth_setup = 1;
-  if (keyval_get(&features_kv, "SupportsPTP") && !(devcfg && cfg_getbool(devcfg, "ptp_disable")) && !airplay_ptp_is_disabled)
+  if (keyval_get(&features_kv, "SupportsPTP") && !config_get_device_bool(name, "ptp_disable", false) && !airplay_ptp_is_disabled)
     extra->use_ptp = 1;
 
   extra->supports_encryption = (keyval_get(&features_kv, "SupportsCoreUtilsPairingAndEncryption") != NULL);
@@ -4078,9 +4060,9 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
 
   // If the user didn't set any reconnect setting we enable for Apple TV and
   // HomePods due to https://github.com/owntone/owntone-server/issues/734
-  cfgopt = devcfg ? cfg_getopt(devcfg, "reconnect") : NULL;
-  if (cfgopt && cfgopt->nvalues == 1)
-    device->resurrect = cfg_opt_getnbool(cfgopt, 0);
+  reconnect = config_get_device_reconnect(name);
+  if (reconnect >= 0)
+    device->resurrect = (reconnect == 1);
   else
     device->resurrect = (extra->devtype == AIRPLAY_DEV_APPLETV4) || (extra->devtype == AIRPLAY_DEV_HOMEPOD);
 
@@ -4284,10 +4266,10 @@ airplay_init(void)
 
   CHECK_NULL(L_AIRPLAY, keep_alive_timer = evtimer_new(evbase_player, airplay_keep_alive_timer_cb, NULL));
 
-  airplay_user_agent = cfg_getstr(cfg_getsec(cfg, "general"), "user_agent");
-  airplay_client_name = cfg_getstr(cfg_getsec(cfg, "library"), "name");
+  airplay_user_agent = config_get_str("user_agent", PACKAGE_NAME "/" PACKAGE_VERSION);
+  airplay_client_name = config_get_str("server_name", PACKAGE_NAME);
 
-  timing_port = cfg_getint(cfg_getsec(cfg, "airplay_shared"), "timing_port");
+  timing_port = config_get_int("airplay_timing_port", 0);
   ret = service_start(&airplay_timing_svc, timing_svc_cb, timing_port, "AirPlay timing");
   if (ret < 0)
     {
@@ -4295,7 +4277,7 @@ airplay_init(void)
       goto out_free_timer;
     }
 
-  control_port = cfg_getint(cfg_getsec(cfg, "airplay_shared"), "control_port");
+  control_port = config_get_int("airplay_control_port", 0);
   ret = service_start(&airplay_control_svc, control_svc_cb, control_port, "AirPlay control");
   if (ret < 0)
     {

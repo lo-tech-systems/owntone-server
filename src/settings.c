@@ -22,7 +22,7 @@
 #include <string.h>
 
 #include "db.h"
-#include "conffile.h"
+#include "owntone_config.h"
 
 
 static struct settings_option webinterface_options[] =

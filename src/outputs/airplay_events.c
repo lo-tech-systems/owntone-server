@@ -33,6 +33,7 @@
 #include <event2/buffer.h>
 #include <plist/plist.h>
 
+#include "owntone_config.h"
 #include "airplay_events.h"
 #include "commands.h"
 #include "misc.h"

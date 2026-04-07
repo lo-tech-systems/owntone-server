@@ -37,7 +37,7 @@
 #include <libavutil/mathematics.h>
 
 #include "logger.h"
-#include "conffile.h"
+#include "owntone_config.h"
 #include "misc.h"
 #include "transcode.h"
 
@@ -1398,7 +1398,7 @@ open_input(struct decode_ctx *ctx, const char *path, struct transcode_evbuf_io *
     {
       av_dict_set(&options, "icy", "1", 0);
 
-      user_agent = cfg_getstr(cfg_getsec(cfg, "general"), "user_agent");
+      user_agent = config_get_str("user_agent", PACKAGE_NAME "/" PACKAGE_VERSION);
       av_dict_set(&options, "user_agent", user_agent, 0);
 
       av_dict_set(&options, "reconnect", "1", 0);
@@ -1739,24 +1739,9 @@ filter_def_user(struct filter_def *def, struct stream_ctx *out_stream, struct st
 static int
 define_audio_filters(struct filters *filters, size_t filters_len, bool with_user_filters)
 {
-  int num_user_filters;
-  int i;
-
-  num_user_filters = cfg_size(cfg_getsec(cfg, "library"), "decode_audio_filters");
-  if (filters_len < num_user_filters + 3)
-    {
-      DPRINTF(E_LOG, L_XCODE, "Too many audio filters configured (%d, max is %zu)\n", num_user_filters, filters_len - 3);
-      return -1;
-    }
-
   filters[0].deffn = filter_def_abuffer;
-  for (i = 0; with_user_filters && i < num_user_filters; i++)
-    {
-      filters[1 + i].deffn = filter_def_user;
-      filters[1 + i].deffn_arg = cfg_getnstr(cfg_getsec(cfg, "library"), "decode_audio_filters", i);
-    }
-  filters[1 + i].deffn = filter_def_aformat;
-  filters[2 + i].deffn = filter_def_abuffersink;
+  filters[1].deffn = filter_def_aformat;
+  filters[2].deffn = filter_def_abuffersink;
 
   return 0;
 }
@@ -1764,25 +1749,10 @@ define_audio_filters(struct filters *filters, size_t filters_len, bool with_user
 static int
 define_video_filters(struct filters *filters, size_t filters_len, bool with_user_filters)
 {
-  int num_user_filters;
-  int i;
-
-  num_user_filters = cfg_size(cfg_getsec(cfg, "library"), "decode_video_filters");
-  if (filters_len < num_user_filters + 3)
-    {
-      DPRINTF(E_LOG, L_XCODE, "Too many video filters configured (%d, max is %zu)\n", num_user_filters, filters_len - 3);
-      return -1;
-    }
-
   filters[0].deffn = filter_def_buffer;
-  for (i = 0; with_user_filters && i < num_user_filters; i++)
-    {
-      filters[1 + i].deffn = filter_def_user;
-      filters[1 + i].deffn_arg = cfg_getnstr(cfg_getsec(cfg, "library"), "decode_video_filters", i);
-    }
-  filters[1 + i].deffn = filter_def_format;
-  filters[2 + i].deffn = filter_def_scale;
-  filters[3 + i].deffn = filter_def_buffersink;
+  filters[1].deffn = filter_def_format;
+  filters[2].deffn = filter_def_scale;
+  filters[3].deffn = filter_def_buffersink;
 
   return 0;
 }
@@ -2094,37 +2064,15 @@ transcode_decode_setup_raw(enum transcode_profile profile, struct media_quality 
 enum transcode_profile
 transcode_needed(const char *user_agent, const char *client_codecs, const char *file_codectype)
 {
-  const char *codectype;
   const char *prefer_format;
-  cfg_t *lib;
-  bool force_xcode;
+  bool force_xcode = false;
   bool supports_alac;
   bool supports_mpeg;
   bool supports_wav;
-  int count;
-  int i;
 
   if (!file_codectype)
     {
       return XCODE_UNKNOWN;
-    }
-
-  lib = cfg_getsec(cfg, "library");
-
-  count = cfg_size(lib, "no_decode");
-  for (i = 0; i < count; i++)
-    {
-      codectype = cfg_getnstr(lib, "no_decode", i);
-      if (strcmp(file_codectype, codectype) == 0)
-	return XCODE_NONE; // Codectype is in no_decode
-    }
-
-  count = cfg_size(lib, "force_decode");
-  for (i = 0, force_xcode = false; i < count && !force_xcode; i++)
-    {
-      codectype = cfg_getnstr(lib, "force_decode", i);
-      if (strcmp(file_codectype, codectype) == 0)
-	force_xcode = true; // Codectype is in force_decode
     }
 
   if (!client_codecs && user_agent)
@@ -2161,7 +2109,7 @@ transcode_needed(const char *user_agent, const char *client_codecs, const char *
   supports_mpeg = strstr(client_codecs, "mpeg") && avcodec_find_encoder(AV_CODEC_ID_MP3);
   supports_wav = strstr(client_codecs, "wav");
 
-  prefer_format = cfg_getstr(lib, "prefer_format");
+  prefer_format = config_get_str("prefer_format", NULL);
   if (prefer_format)
     {
       if (strcmp(prefer_format, "wav") == 0 && supports_wav)

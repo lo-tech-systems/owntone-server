@@ -132,7 +132,7 @@ OWNTONE_FUNC_REQUIRE([COMMON], [GNU libunistring], [LIBUNISTRING], [unistring],
 		[unistring], [u8_strconv_from_locale], [uniconv.h])])
 
 OWNTONE_MODULES_CHECK([OWNTONE], [ZLIB], [zlib], [deflate], [zlib.h])
-OWNTONE_MODULES_CHECK([OWNTONE], [CONFUSE], [libconfuse >= 3.0], [cfg_init], [confuse.h])
+dnl libconfuse removed: config is now JSON-based (see src/config.c)
 OWNTONE_MODULES_CHECK([OWNTONE], [LIBCURL], [libcurl], [curl_global_init], [curl/curl.h])
 OWNTONE_MODULES_CHECK([OWNTONE], [LIBSODIUM], [libsodium], [sodium_init], [sodium.h])
 OWNTONE_MODULES_CHECK([OWNTONE], [LIBXML2], [libxml-2.0], [xmlInitParser], [libxml/parser.h])

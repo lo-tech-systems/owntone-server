@@ -23,6 +23,10 @@
 # include <config.h>
 #endif
 
+/* owntone_config.h provides platform detection fallbacks (HAVE_SIGNALFD etc.)
+ * and must come before any conditional system includes below. */
+#include "owntone_config.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -40,7 +44,7 @@
 
 #ifdef HAVE_SIGNALFD
 # include <sys/signalfd.h>
-#else
+#elif defined(HAVE_KQUEUE)
 # include <sys/time.h>
 # include <sys/event.h>
 #endif
@@ -57,7 +61,6 @@
 #include <pthread.h>
 #include <gcrypt.h>
 
-#include "conffile.h"
 #include "db.h"
 #include "logger.h"
 #include "misc.h"
@@ -69,8 +72,8 @@
 #include "library.h"
 #include "ptpd.h"
 
-#define PIDFILE          STATEDIR "/run/" PACKAGE ".pid"
-#define SQLITE_EXT_PATH  PKGLIBDIR "/" PACKAGE_NAME "-sqlext.so"
+#define PIDFILE          STATEDIR "/run/owntone.pid"
+#define SQLITE_EXT_PATH  PKGLIBDIR "/owntone-sqlext.so"
 
 struct event_base *evbase_main;
 
@@ -92,14 +95,10 @@ usage(char *program)
   printf("Options:\n");
   printf("  -d <number>     Log level (0-5)\n");
   printf("  -D <dom,dom..>  Log domains\n");
-  printf("  -c <file>       Use <file> as the configuration file\n");
+  printf("  -c <file>       Use <file> as the settings file (default: " SETTINGS_FILE ")\n");
   printf("  -P <file>       Write PID to specified file\n");
   printf("  -f              Run in foreground\n");
-  printf("  -b <id>         ffid to be broadcast\n");
   printf("  -v              Display version information\n");
-  printf("  --mdns-no-cname Don't register owntone.local as CNAME via mDNS\n");
-  printf("  --mdns-no-web   Don't announce web interface via mDNS\n");
-  printf("  -s <path>      Use <path> as the path for the OwnTone sqlite extension (owntone-sqlext.so)\n");
   printf("\n\n");
   printf("Available log domains:\n");
   logger_domains();
@@ -185,7 +184,7 @@ daemonize(bool background, char *pidfile)
 
   if (geteuid() == (uid_t) 0)
     {
-      runas = cfg_getstr(cfg_getsec(cfg, "general"), "uid");
+      runas = (char *)config_get_str("uid", "nobody");
 
       ret = initgroups(runas, runas_gid);
       if (ret != 0)
@@ -210,38 +209,6 @@ daemonize(bool background, char *pidfile)
 
 	  return -1;
 	}
-    }
-
-  return 0;
-}
-
-static int
-register_services(char *ffid, bool no_web)
-{
-  cfg_t *lib;
-  char *libname;
-  char *txtrecord[2];
-  char records[1][128];
-  int port;
-  int ret;
-
-  lib = cfg_getsec(cfg, "library");
-  libname = cfg_getstr(lib, "name");
-  port = cfg_getint(lib, "port");
-
-  memset(records[0], 0, 128);
-  txtrecord[0] = records[0];
-  txtrecord[1] = NULL;
-
-  snprintf(txtrecord[0], 128, "txtvers=1");
-
-  DPRINTF(E_INFO, L_MAIN, "Registering rendezvous names\n");
-
-  if (!no_web)
-    {
-      ret = mdns_register(libname, "_http._tcp", port, txtrecord);
-      if (ret < 0)
-	return ret;
     }
 
   return 0;
@@ -288,7 +255,7 @@ signal_signalfd_cb(int fd, short event, void *arg)
     event_add(sig_event, NULL);
 }
 
-#else
+#elif defined(HAVE_KQUEUE)
 
 static void
 signal_kqueue_cb(int fd, short event, void *arg)
@@ -371,18 +338,14 @@ int
 main(int argc, char **argv)
 {
   int option;
-  char *configfile = CONFFILE;
+  const char *settings_file = SETTINGS_FILE;
   bool background = true;
   bool testrun = false;
-  bool mdns_no_cname = false;
-  bool mdns_no_web = false;
   int loglevel = -1;
   char *logdomains = NULL;
-  char *logfile = NULL;
-  char *logformat = NULL;
-  char *ffid = NULL;
+  const char *logfile = NULL;
+  const char *logformat = NULL;
   char *pidfile = PIDFILE;
-  char *sqlite_extension_path = SQLITE_EXT_PATH;
   char **buildopts;
   const char *av_version;
   const char *gcry_version;
@@ -395,45 +358,28 @@ main(int argc, char **argv)
   int ret;
 
   struct option option_map[] = {
-    { "ffid",          1, NULL, 'b' },
     { "debug",         1, NULL, 'd' },
     { "logdomains",    1, NULL, 'D' },
     { "foreground",    0, NULL, 'f' },
     { "config",        1, NULL, 'c' },
     { "pidfile",       1, NULL, 'P' },
     { "version",       0, NULL, 'v' },
-    { "sqliteext",     1, NULL, 's' },
     { "testrun",       0, NULL, 't' }, // Used for CI, not documented to user
-
-    { "mdns-no-cname", 0, NULL, 514 },
-    { "mdns-no-web",   0, NULL, 515 },
     { "logformat",     1, NULL, 516 },
 
     { NULL,            0, NULL, 0   }
   };
 
-  while ((option = getopt_long(argc, argv, "D:d:c:P:ftb:vs:", option_map, NULL)) != -1)
+  while ((option = getopt_long(argc, argv, "D:d:c:P:ftv", option_map, NULL)) != -1)
     {
       switch (option)
 	{
-	  case 514:
-	    mdns_no_cname = true;
-	    break;
-
-	  case 515:
-	    mdns_no_web = true;
-	    break;
-
 	  case 516:
 	    logformat = optarg;
 	    break;
 
 	  case 't':
 	    testrun = true;
-	    break;
-
-	  case 'b':
-	    ffid = optarg;
 	    break;
 
 	  case 'd':
@@ -453,7 +399,7 @@ main(int argc, char **argv)
 	    break;
 
 	  case 'c':
-	    configfile = optarg;
+	    settings_file = optarg;
 	    break;
 
 	  case 'P':
@@ -463,10 +409,6 @@ main(int argc, char **argv)
 	  case 'v':
 	    version();
 	    return EXIT_SUCCESS;
-	    break;
-
-	  case 's':
-	    sqlite_extension_path = optarg;
 	    break;
 
 	  default:
@@ -484,10 +426,10 @@ main(int argc, char **argv)
       return EXIT_FAILURE;
     }
 
-  ret = conffile_load(configfile);
+  ret = config_load(settings_file);
   if (ret != 0)
     {
-      DPRINTF(E_FATAL, L_MAIN, "Config file errors; please fix your config\n");
+      DPRINTF(E_FATAL, L_MAIN, "Settings file errors; please fix %s\n", settings_file);
 
       logger_deinit();
       return EXIT_FAILURE;
@@ -495,19 +437,19 @@ main(int argc, char **argv)
 
   logger_deinit();
 
-  /* Reinit log facility with configfile values */
+  /* Reinit log facility with settings values */
   if (loglevel < 0)
-    loglevel = cfg_getint(cfg_getsec(cfg, "general"), "loglevel");
+    loglevel = config_get_int("loglevel", E_LOG);
   if (!logformat)
-    logformat = cfg_getstr(cfg_getsec(cfg, "general"), "logformat");
-  logfile = cfg_getstr(cfg_getsec(cfg, "general"), "logfile");
+    logformat = config_get_str("logformat", "default");
+  logfile = config_get_str("logfile", NULL);
 
-  ret = logger_init(logfile, logdomains, loglevel, logformat);
+  ret = logger_init((char *)logfile, logdomains, loglevel, (char *)logformat);
   if (ret != 0)
     {
-      fprintf(stderr, "Could not reinitialize log facility with config file settings\n");
+      fprintf(stderr, "Could not reinitialize log facility with settings file values\n");
 
-      conffile_unload();
+      config_unload();
       return EXIT_FAILURE;
     }
 
@@ -625,7 +567,7 @@ main(int argc, char **argv)
 
   /* Initialize the database before starting */
   DPRINTF(E_INFO, L_MAIN, "Initializing database\n");
-  ret = db_init(sqlite_extension_path);
+  ret = db_init(SQLITE_EXT_PATH);
   if (ret < 0)
     {
       DPRINTF(E_FATAL, L_MAIN, "Database init failed\n");
@@ -694,20 +636,6 @@ main(int argc, char **argv)
       goto httpd_fail;
     }
 
-  /* Register mDNS services */
-  ret = register_services(ffid, mdns_no_web);
-  if (ret < 0)
-    {
-      ret = EXIT_FAILURE;
-      goto mdns_reg_fail;
-    }
-
-  /* Register this CNAME with mDNS for OAuth */
-  if (!mdns_no_cname)
-    {
-      mdns_cname("owntone.local");
-    }
-
 #ifdef HAVE_SIGNALFD
   /* Set up signal fd */
   sigfd = signalfd(-1, &sigs, SFD_NONBLOCK | SFD_CLOEXEC);
@@ -720,7 +648,7 @@ main(int argc, char **argv)
     }
 
   sig_event = event_new(evbase_main, sigfd, EV_READ, signal_signalfd_cb, NULL);
-#else
+#elif defined(HAVE_KQUEUE)
   sigfd = kqueue();
   if (sigfd < 0)
     {
@@ -745,6 +673,8 @@ main(int argc, char **argv)
     }
 
   sig_event = event_new(evbase_main, sigfd, EV_READ, signal_kqueue_cb, NULL);
+#else
+# error "Need either signalfd (Linux) or kqueue (BSD/macOS) for signal handling"
 #endif
   if (!sig_event)
     {
@@ -774,7 +704,6 @@ main(int argc, char **argv)
 
  sig_event_fail:
  signalfd_fail:
- mdns_reg_fail:
   DPRINTF(E_LOG, L_MAIN, "HTTPd deinit\n");
   httpd_deinit();
 
@@ -836,7 +765,7 @@ main(int argc, char **argv)
 #endif
 
   DPRINTF(E_LOG, L_MAIN, "Exiting.\n");
-  conffile_unload();
+  config_unload();
   logger_deinit();
 
   return ret;

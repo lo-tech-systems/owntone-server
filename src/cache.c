@@ -35,7 +35,7 @@
 #include <event2/event.h>
 #include <sqlite3.h>
 
-#include "conffile.h"
+#include "owntone_config.h"
 #include "logger.h"
 #include "transcode.h"
 #include "db.h"
@@ -272,7 +272,7 @@ cache_pragma_set(sqlite3 *hdl)
   char *query;
 
   // Set page cache size in number of pages
-  cache_size = cfg_getint(cfg_getsec(cfg, "sqlite"), "pragma_cache_size_cache");
+  cache_size = config_get_int("pragma_cache_size_cache", -1);
   if (cache_size > -1)
     {
       query = sqlite3_mprintf(Q_PRAGMA_CACHE_SIZE, cache_size);
@@ -288,7 +288,7 @@ cache_pragma_set(sqlite3 *hdl)
     }
 
   // Set journal mode
-  journal_mode = cfg_getstr(cfg_getsec(cfg, "sqlite"), "pragma_journal_mode");
+  journal_mode = config_get_str("pragma_journal_mode", NULL);
   if (journal_mode)
     {
       query = sqlite3_mprintf(Q_PRAGMA_JOURNAL_MODE, journal_mode);
@@ -304,7 +304,7 @@ cache_pragma_set(sqlite3 *hdl)
     }
 
   // Set synchronous flag
-  synchronous = cfg_getint(cfg_getsec(cfg, "sqlite"), "pragma_synchronous");
+  synchronous = config_get_int("pragma_synchronous", -1);
   if (synchronous > -1)
     {
       query = sqlite3_mprintf(Q_PRAGMA_SYNCHRONOUS, synchronous);
@@ -320,7 +320,7 @@ cache_pragma_set(sqlite3 *hdl)
     }
 
   // Set mmap size
-  mmap_size = cfg_getint(cfg_getsec(cfg, "sqlite"), "pragma_mmap_size_cache");
+  mmap_size = config_get_int("pragma_mmap_size_cache", -1);
   if (synchronous > -1)
     {
       query = sqlite3_mprintf(Q_PRAGMA_MMAP_SIZE, mmap_size);
@@ -426,9 +426,9 @@ cache_open(void)
   char *xcode_db_path;
   int ret;
 
-  directory = cfg_getstr(cfg_getsec(cfg, "general"), "cache_dir");
+  directory = config_get_str("cache_dir", STATEDIR "/cache/" PACKAGE "/");
 
-  CHECK_NULL(L_DB, filename = cfg_getstr(cfg_getsec(cfg, "general"), "cache_xcode_filename"));
+  CHECK_NULL(L_DB, filename = config_get_str("cache_xcode_filename", "cache.db"));
   CHECK_NULL(L_DB, xcode_db_path = safe_asprintf("%s%s", directory, filename));
 
   ret = cache_open_one(&cache_xcode_hdl, xcode_db_path, "xcode", CACHE_XCODE_VERSION, cache_xcode_db_def, ARRAY_SIZE(cache_xcode_db_def));

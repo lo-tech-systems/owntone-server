@@ -50,7 +50,7 @@
 #endif
 
 #include "logger.h"
-#include "conffile.h"
+#include "owntone_config.h"
 
 /* Main event base, from main.c */
 extern struct event_base *evbase_main;
@@ -886,7 +886,7 @@ mdns_browse(char *regtype, mdns_browse_cb cb, enum mdns_options flags)
   mb->flags = flags;
   mb->cb = cb;
 
-  if (flags & MDNS_IPV4ONLY || !cfg_getbool(cfg_getsec(cfg, "general"), "ipv6"))
+  if (flags & MDNS_IPV4ONLY || !config_get_bool("ipv6", false))
     family = AF_INET;
   else
     family = AF_UNSPEC;

@@ -37,7 +37,7 @@ owntone_SOURCES = main.c \
 	db_init.c db_init.h \
 	db_upgrade.c db_upgrade.h \
 	logger.c logger.h \
-	conffile.c conffile.h \
+	owntone_config.c owntone_config.h \
 	cache.c cache.h \
 	library.c library.h \
 	$(MDNS_SRC) mdns.h \

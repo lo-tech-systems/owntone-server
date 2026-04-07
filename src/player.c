@@ -73,7 +73,7 @@
 
 #include "db.h"
 #include "logger.h"
-#include "conffile.h"
+#include "owntone_config.h"
 #include "settings.h"
 #include "misc.h"
 #include "player.h"
@@ -3854,14 +3854,8 @@ player_init(void)
   uint64_t interval;
   int ret;
 
-  speaker_autoselect = cfg_getbool(cfg_getsec(cfg, "general"), "speaker_autoselect");
-  clear_queue_on_stop_disabled = cfg_getbool(cfg_getsec(cfg, "library"), "clear_queue_on_stop_disable");
-
-  /* Handle deprecated config options, note that this is also in library.c */
-  if (0 < cfg_opt_size(cfg_getopt(cfg_getsec(cfg, "mpd"), "clear_queue_on_stop_disable")))
-    {
-      clear_queue_on_stop_disabled = cfg_getbool(cfg_getsec(cfg, "mpd"), "clear_queue_on_stop_disable");
-    }
+  speaker_autoselect = config_get_bool("speaker_autoselect", false);
+  clear_queue_on_stop_disabled = config_get_bool("clear_queue_on_stop_disable", false);
 
   ret = SETTINGS_GETINT("player", PLAYER_SETTINGS_MODE_REPEAT);
   repeat = (ret > 0) ? ret : REPEAT_OFF;
@@ -3881,7 +3875,7 @@ player_init(void)
       goto error_history_free;
     }
 
-  if (!cfg_getbool(cfg_getsec(cfg, "general"), "high_resolution_clock"))
+  if (!config_get_bool("high_resolution_clock", true))
     {
       DPRINTF(E_INFO, L_PLAYER, "High resolution clock not enabled on this system (res is %ld)\n", player_timer_res.tv_nsec);
       player_timer_res.tv_nsec = 10 * PLAYER_TICK_INTERVAL * 1000000;

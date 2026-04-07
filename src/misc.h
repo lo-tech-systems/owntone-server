@@ -256,7 +256,8 @@ int
 clock_getres(clockid_t clock_id, struct timespec *res);
 #endif
 
-#ifndef HAVE_TIMER_SETTIME
+#if defined(__APPLE__) || defined(__MACH__)
+/* macOS lacks POSIX timer_settime — provide our own shims */
 
 struct itimerspec {
   struct timespec it_interval;
@@ -277,7 +278,7 @@ timer_settime(timer_t timer_id, int flags, const struct itimerspec *tp,
 int
 timer_getoverrun(timer_t timer_id);
 
-#endif
+#endif /* __APPLE__ || __MACH__ */
 
 // Timer function for platforms without hi-res timers
 int

@@ -1,0 +1,55 @@
+{
+  "_comment": "OwnTone minimal settings — fifo→AirPlay/AirPlay2 streamer",
+
+  "uid": "nobody",
+
+  "logfile": null,
+  "loglevel": 2,
+  "logformat": "default",
+
+  "port": 3689,
+  "bind_address": null,
+  "ipv6": false,
+  "trusted_networks": ["localhost", "192.168.0.0/24"],
+  "admin_password": null,
+  "allow_origin": "*",
+
+  "server_name": "OwnTone",
+  "user_agent": "OwnTone/0.0.0",
+
+  "pipe_path": "/tmp/owntone.fifo",
+  "pipe_autostart": true,
+  "pipe_sample_rate": 44100,
+  "pipe_bits_per_sample": 16,
+
+  "start_buffer_ms": 2250,
+  "uncompressed_alac": false,
+
+  "speaker_autoselect": false,
+  "high_resolution_clock": true,
+  "clear_queue_on_stop_disable": false,
+
+  "airplay_timing_port": 0,
+  "airplay_control_port": 0,
+
+  "prefer_format": null,
+
+  "db_path": "/var/cache/owntone/owntone.db",
+  "db_backup_path": null,
+  "cache_dir": "/var/cache/owntone/",
+  "cache_xcode_filename": "cache.db",
+
+  "airplay_devices": {
+    "_comment": "Keyed by the mDNS-announced device name. All fields are optional.",
+    "Living Room": {
+      "max_volume": 100,
+      "exclude": false,
+      "permanent": false,
+      "reconnect": null,
+      "password": null,
+      "nickname": null,
+      "ptp_disable": false,
+      "raop_disable": false
+    }
+  }
+}
