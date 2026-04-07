@@ -47,3 +47,5 @@ owntone@.service
 /.vscode/
 /.devcontainer/
 !/.dev/Makefile
+
+/.claude/
