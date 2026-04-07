@@ -58,11 +58,9 @@
   "</body>\n</html>\n"
 
 extern struct httpd_module httpd_jsonapi;
-extern struct httpd_module httpd_artworkapi;
 
 static struct httpd_module *httpd_modules[] = {
     &httpd_jsonapi,
-    &httpd_artworkapi,
     NULL
 };
 
@@ -336,15 +334,6 @@ httpd_response_not_cachable(struct httpd_request *hreq)
 
 /* -------------------------- SPEAKER/CACHE HANDLING ------------------------ */
 
-// Thread: player (must not block)
-static void
-speaker_enum_cb(struct player_speaker_info *spk, void *arg)
-{
-  bool *want_mp4 = arg;
-
-  *want_mp4 = *want_mp4 || (spk->format == MEDIA_FORMAT_ALAC && strcmp(spk->output_type, "RCP/SoundBridge") == 0);
-}
-
 // Thread: worker
 static void
 speaker_update_handler_cb(void *arg)
@@ -353,8 +342,6 @@ speaker_update_handler_cb(void *arg)
   bool want_mp4;
 
   want_mp4 = (prefer_format && (strcmp(prefer_format, "alac") == 0));
-  if (!want_mp4)
-    player_speaker_enumerate(speaker_enum_cb, &want_mp4);
 
   cache_xcode_toggle(want_mp4);
 }

@@ -3,7 +3,7 @@
 #define __TRANSCODE_H__
 
 #include <event2/buffer.h>
-#include "http.h"
+
 #include "misc.h"
 
 enum transcode_profile
@@ -204,9 +204,6 @@ transcode_decode_query(struct decode_ctx *ctx, const char *query);
 int
 transcode_encode_query(struct encode_ctx *ctx, const char *query);
 
-// Metadata
-struct http_icy_metadata *
-transcode_metadata(struct transcode_ctx *ctx, int *changed);
 
 /* When transcoding, we are in essence serving a different source file than the
  * original to the client. So we can't serve some of the file metadata from the

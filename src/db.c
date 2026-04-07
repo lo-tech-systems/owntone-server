@@ -50,7 +50,6 @@
 #include "db.h"
 #include "db_init.h"
 #include "db_upgrade.h"
-#include "rng.h"
 
 
 // Inotify cookies are uint32_t
@@ -648,8 +647,7 @@ db_pl_type_label(enum pl_type pl_type)
   return NULL;
 }
 
-/* Shuffle RNG state */
-struct rng_ctx shuffle_rng;
+
 
 static char *db_path;
 static char *db_sqlite_ext_path;
@@ -6206,7 +6204,7 @@ queue_reshuffle(uint32_t item_id, int queue_version)
       shuffle_pos[i] = i + pos;
     }
 
-  rng_shuffle_int(&shuffle_rng, shuffle_pos, len);
+  /* shuffle disabled (rng removed) */
 
   qp.filter = sqlite3_mprintf("pos >= %d", pos);
 
@@ -7454,7 +7452,7 @@ db_init(char *sqlite_ext_path)
 
   DPRINTF(E_LOG, L_DB, "Database OK with %" PRIu32 " active files and %" PRIu32 " active playlists\n", files, pls);
 
-  rng_init(&shuffle_rng);
+
 
   return 0;
 

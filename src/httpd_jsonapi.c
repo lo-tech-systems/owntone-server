@@ -51,7 +51,7 @@
 #include "misc_json.h"
 #include "player.h"
 #include "settings.h"
-#include "smartpl_query.h"
+
 
 
 static bool allow_modifying_stored_playlists;

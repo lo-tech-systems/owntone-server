@@ -54,8 +54,6 @@ enum output_types
 {
   OUTPUT_TYPE_RAOP,
   OUTPUT_TYPE_AIRPLAY,
-  OUTPUT_TYPE_DUMMY,
-  OUTPUT_TYPE_FIFO,
 };
 
 /* Output session state */

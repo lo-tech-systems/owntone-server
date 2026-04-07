@@ -80,47 +80,13 @@ static char *buildopts[] =
 #else
     "libav",
 #endif
-#ifdef SPOTIFY
-    "Spotify",
-#else
     "Without Spotify",
-#endif
-#ifdef SPOTIFY_LIBRESPOTC
-    "librespot-c",
-#endif
-#ifdef LASTFM
-    "LastFM",
-#else
     "Without LastFM",
-#endif
-#ifdef CHROMECAST
-    "Chromecast",
-#else
     "Without Chromecast",
-#endif
-#ifdef MPD
-    "MPD",
-#else
     "Without MPD",
-#endif
-#ifdef HAVE_LIBWEBSOCKETS
-    "Websockets",
-#else
     "Without websockets",
-#endif
-#ifdef HAVE_ALSA
-    "ALSA",
-#else
     "Without ALSA",
-#endif
-#ifdef HAVE_LIBPULSE
-    "Pulseaudio",
-#endif
-#ifdef WEBINTERFACE
-    "Webinterface",
-#else
     "Without webinterface",
-#endif
 #ifdef HAVE_REGEX_H
     "Regex",
 #else

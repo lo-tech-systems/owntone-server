@@ -65,11 +65,15 @@
 #include "misc.h"
 #include "player.h"
 #include "db.h"
-#include "artwork.h"
+
 #include "rtp_common.h"
 #include "transcode.h"
 #include "outputs.h"
 #include "pair_ap/pair.h"
+
+// artwork.h was removed; define format constants locally
+#define ART_FMT_PNG  1
+#define ART_FMT_JPEG 2
 
 #define ALAC_HEADER_LEN                      3
 
@@ -2327,7 +2331,7 @@ raop_metadata_prepare(struct output_metadata *metadata)
   CHECK_NULL(L_RAOP, rmd = calloc(1, sizeof(struct raop_metadata)));
   CHECK_NULL(L_RAOP, rmd->artwork = evbuffer_new());
 
-  ret = artwork_get_by_queue_item_id(rmd->artwork, queue_item->id, ART_DEFAULT_WIDTH, ART_DEFAULT_HEIGHT, 0);
+  ret = -1; // No artwork support
   if (ret < 0)
     {
       DPRINTF(E_INFO, L_RAOP, "Failed to retrieve artwork for file '%s'; no artwork will be sent\n", queue_item->path);

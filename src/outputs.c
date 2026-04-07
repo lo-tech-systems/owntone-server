@@ -42,8 +42,6 @@
 
 extern struct output_definition output_raop;
 extern struct output_definition output_airplay;
-extern struct output_definition output_dummy;
-extern struct output_definition output_fifo;
 
 /* From player.c */
 extern struct event_base *evbase_player;
@@ -52,8 +50,6 @@ extern struct event_base *evbase_player;
 static struct output_definition *outputs[] = {
     &output_raop,
     &output_airplay,
-    &output_dummy,
-    &output_fifo,
     NULL
 };
 

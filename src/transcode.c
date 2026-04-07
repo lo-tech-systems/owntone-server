@@ -52,7 +52,6 @@
 #define USE_INJECT_GLOBAL_SIDE_DATA (LIBAVFORMAT_VERSION_MAJOR < 61) || ((LIBAVFORMAT_VERSION_MAJOR == 61) && (LIBAVFORMAT_VERSION_MINOR < 8))
 
 // Interval between ICY metadata checks for streams, in seconds
-#define METADATA_ICY_INTERVAL 5
 // Maximum number of streams in a file that we will accept
 #define MAX_STREAMS 64
 // Maximum number of times we retry when we encounter bad packets
@@ -109,7 +108,6 @@ struct settings_ctx
   bool with_wav_header;
   bool without_libav_header;
   bool without_libav_trailer;
-  bool with_icy;
   bool with_user_filters;
 
   // Video settings
@@ -204,9 +202,7 @@ struct encode_ctx
   // Estimated total size of output
   off_t bytes_total;
 
-  // Used to check for ICY metadata changes at certain intervals
-  uint32_t icy_interval;
-  uint32_t icy_hash;
+
 };
 
 enum probe_type
@@ -249,7 +245,6 @@ init_settings(struct settings_ctx *settings, enum transcode_profile profile, str
     {
       case XCODE_PCM_NATIVE: // Sample rate and bit depth determined by source
 	settings->encode_audio = true;
-	settings->with_icy = true;
 	settings->with_user_filters = true;
 	break;
 
@@ -1995,9 +1990,6 @@ transcode_encode_setup(struct transcode_encode_setup_args args)
   dst_bytes_per_sample = av_get_bytes_per_sample(ctx->settings.sample_format);
   ctx->bytes_total = size_estimate(args.profile, ctx->settings.bit_rate, ctx->settings.sample_rate, dst_bytes_per_sample, ctx->settings.nb_channels, args.src_ctx->len_ms);
 
-  if (ctx->settings.with_icy && args.src_ctx->is_http)
-    ctx->icy_interval = METADATA_ICY_INTERVAL * ctx->settings.nb_channels * dst_bytes_per_sample * ctx->settings.sample_rate;
-
   if (open_output(ctx, args.evbuf_io, args.prepared_header, args.src_ctx) < 0)
     goto error;
 
@@ -2342,8 +2334,8 @@ transcode(struct evbuffer *evbuf, int *icy_timer, struct transcode_ctx *ctx, int
   evbuffer_add_buffer(evbuf, ctx->encode_ctx->obuf);
 
   ctx->encode_ctx->bytes_processed += processed;
-  if (icy_timer && ctx->encode_ctx->icy_interval)
-    *icy_timer = (ctx->encode_ctx->bytes_processed % ctx->encode_ctx->icy_interval < processed);
+  if (icy_timer)
+    *icy_timer = 0;
 
   if ((ret < 0) && (ret != AVERROR_EOF))
     return ret;
@@ -2559,26 +2551,6 @@ transcode_encode_query(struct encode_ctx *ctx, const char *query)
 }
 
 
-/*                                  Metadata                                 */
-
-struct http_icy_metadata *
-transcode_metadata(struct transcode_ctx *ctx, int *changed)
-{
-  struct http_icy_metadata *m;
-
-  if (!ctx->decode_ctx->ifmt_ctx)
-    return NULL;
-
-  m = http_icy_metadata_get(ctx->decode_ctx->ifmt_ctx, 1);
-  if (!m)
-    return NULL;
-
-  *changed = (m->hash != ctx->encode_ctx->icy_hash);
-
-  ctx->encode_ctx->icy_hash = m->hash;
-
-  return m;
-}
 
 void
 transcode_metadata_strings_set(struct transcode_metadata_string *s, enum transcode_profile profile, struct media_quality *q, uint32_t len_ms)

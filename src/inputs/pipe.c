@@ -54,7 +54,6 @@
 
 #include "input.h"
 #include "misc.h"
-#include "misc_xml.h"
 #include "logger.h"
 #include "conffile.h"
 #include "player.h"
@@ -530,61 +529,10 @@ log_incoming(int severity, const char *msg, uint32_t type, uint32_t code, int da
   DPRINTF(severity, L_PLAYER, "%s (type=%s, code=%s, len=%d)\n", msg, typestr, codestr, data_len);
 }
 
-/* Example of xml item:
-
-<item><type>73736e63</type><code>6d647374</code><length>9</length>
-<data encoding="base64">
-NDE5OTg3OTU0</data></item>
-*/
 static int
 parse_item_xml(uint32_t *type, uint32_t *code, uint8_t **data, int *data_len, const char *item)
 {
-  xml_node *xml;
-  const char *s;
-
-//  DPRINTF(E_DBG, L_PLAYER, "Got pipe metadata item: '%s'\n", item);
-
-  xml = xml_from_string(item);
-  if (!xml)
-    {
-      DPRINTF(E_LOG, L_PLAYER, "Could not parse pipe metadata item: %s\n", item);
-      goto error;
-    }
-
-  *type = 0;
-  if ((s = xml_get_val(xml, "item/type")))
-    sscanf(s, "%8x", type);
-
-  *code = 0;
-  if ((s = xml_get_val(xml, "item/code")))
-    sscanf(s, "%8x", code);
-
-  if (*type == 0 || *code == 0)
-    {
-      DPRINTF(E_LOG, L_PLAYER, "No type (%d) or code (%d) in pipe metadata: %s\n", *type, *code, item);
-      goto error;
-    }
-
-  *data = NULL;
-  *data_len = 0;
-  if ((s = xml_get_val(xml, "item/data")))
-    {
-      *data = b64_decode(data_len, s);
-      if (*data == NULL)
-	{
-	  DPRINTF(E_LOG, L_PLAYER, "Base64 decode of '%s' failed\n", s);
-	  goto error;
-	}
-    }
-
-  log_incoming(E_SPAM, "Read Shairport metadata", *type, *code, *data_len);
-
-  xml_free(xml);
-  return 0;
-
- error:
-  xml_free(xml);
-  return -1;
+  return -1; // XML metadata parsing removed (misc_xml removed)
 }
 
 static int
