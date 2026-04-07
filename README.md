@@ -1,28 +1,71 @@
-# OwnTone
+# OwnTone-Minimal
 
-OwnTone is a media server that lets you play audio sources such as local files,
-Spotify, pipe input or internet radio to AirPlay 1 and 2 receivers, Chromecast
-receivers, Roku Soundbridge, a browser or the server’s own sound system. Or you
-can listen to your music via any client that supports mp3 streaming.
+OwnTone-Minimal is a stripped-down, headless build of OwnTone designed to act as a lightweight AirPlay output engine for external audio pipelines.
 
-You control the server via a web interface, Apple Remote, an Android remote
-(e.g. Retune), an MPD client, json API or DACP.
+It provides:
 
-OwnTone also serves local files via the Digital Audio Access Protocol (DAAP) to
-iTunes (Windows), Apple Music (macOS) and Rhythmbox (Linux), and via the Roku
-Server Protocol (RSP) to Roku devices.
+* FIFO (pipe) audio input
+* AirPlay 1 and AirPlay 2 output
+* API-only control (no web UI)
 
-Runs on Linux, BSD and macOS.
+This makes it suitable for automated or embedded use cases where audio is generated or processed by another service.
 
-OwnTone was previously called forked-daapd, which again was a rewrite of
-mt-daapd (Firefly Media Server).
+---
 
+## Overview
 
-## Looking for help?
+OwnTone-Minimal removes non-essential functionality from OwnTone, including:
 
-Visit the [OwnTone documentation](https://owntone.github.io/owntone-server/) for
-usage and set up instructions, API documentation, etc.
+* Web interface
+* Library/database management
+* External service integrations (e.g. Spotify)
 
-If you are looking for information on how to get and install OwnTone, then see
-the [Installation](https://owntone.github.io/owntone-server/installation/)
-instructions.
+and retains only the components required for:
+
+* receiving PCM audio via FIFO
+* streaming to AirPlay receivers
+* control via HTTP API
+
+---
+
+## Use Case
+
+OwnTone-Minimal is intended to be used as a backend audio output service.
+
+Typical pipeline:
+
+```text
+Audio source → DSP / processing → FIFO → OwnTone-Minimal → AirPlay devices
+```
+
+It is commonly used in conjunction with external controllers or audio processing services.
+
+---
+
+## Platform
+
+* Linux only
+* Requires ALSA-compatible system
+
+---
+
+## Lineage
+
+OwnTone-Minimal is a fork of OwnTone, which was previously forked-daapd, itself a rewrite of mt-daapd (Firefly Media Server).
+
+---
+
+## License
+
+This project is licensed under the GNU General Public License v2.0, as inherited from OwnTone.
+
+See the LICENSE file for details.
+
+---
+
+## Notes
+
+This is a specialized fork intended for headless and programmatic use.
+For a full-featured media server, please refer to the upstream OwnTone project.
+
+---
