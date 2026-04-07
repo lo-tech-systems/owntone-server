@@ -37,8 +37,6 @@
 
 #include "conffile.h"
 #include "logger.h"
-#include "httpd.h" // TODO get rid of this, only used for httpd_gzip_deflate
-#include "httpd_daap.h"
 #include "transcode.h"
 #include "db.h"
 #include "worker.h"
@@ -117,7 +115,6 @@ static struct commands_base *cmdbase;
 
 // State
 static bool cache_is_initialized;
-static bool cache_is_suspended;
 
 #define DB_DEF_ADMIN \
   { \
@@ -128,43 +125,6 @@ static bool cache_is_suspended;
     ");", \
     "DROP TABLE IF EXISTS admin;", \
   }
-
-// DAAP cache
-#define CACHE_DAAP_VERSION 5
-static sqlite3 *cache_daap_hdl;
-static struct event *cache_daap_updateev;
-// The user may configure a threshold (in msec), and queries slower than
-// that will have their reply cached
-static int cache_daap_threshold;
-static struct cache_db_def cache_daap_db_def[] = {
-  DB_DEF_ADMIN,
-  {
-    "replies",
-    "CREATE TABLE IF NOT EXISTS replies ("
-    "   id                 INTEGER PRIMARY KEY NOT NULL,"
-    "   query              VARCHAR(4096) NOT NULL,"
-    "   reply              BLOB"
-    ");",
-    "DROP TABLE IF EXISTS replies;",
-  },
-  {
-    "queries",
-    "CREATE TABLE IF NOT EXISTS queries ("
-    "   id                 INTEGER PRIMARY KEY NOT NULL,"
-    "   query              VARCHAR(4096) UNIQUE NOT NULL,"
-    "   user_agent         VARCHAR(1024),"
-    "   is_remote          INTEGER DEFAULT 0,"
-    "   msec               INTEGER DEFAULT 0,"
-    "   timestamp          INTEGER DEFAULT 0"
-    ");",
-    "DROP TABLE IF EXISTS queries;",
-  },
-  {
-    "idx_query",
-    "CREATE INDEX IF NOT EXISTS idx_query ON replies (query);",
-    "DROP INDEX IF EXISTS idx_query;",
-  },
-};
 
 // Artwork cache
 #define CACHE_ARTWORK_VERSION 5
@@ -235,26 +195,6 @@ static struct cache_db_def cache_xcode_db_def[] = {
 
 
 /* --------------------------------- HELPERS -------------------------------- */
-
-/* The purpose of this function is to remove transient tags from a request 
- * url (query), eg remove session-id=xxx
- */
-static void
-remove_tag(char *in, const char *tag)
-{
-  char *s;
-  char *e;
-
-  s = strstr(in, tag);
-  if (!s)
-    return;
-
-  e = strchr(s, '&');
-  if (e)
-    memmove(s, (e + 1), strlen(e + 1) + 1);
-  else if (s > in)
-    *(s - 1) = '\0';
-}
 
 
 /* ---------------------------------- MAIN ---------------------------------- */
@@ -459,7 +399,6 @@ cache_close_one(sqlite3 **hdl)
 static void
 cache_close(void)
 {
-  cache_close_one(&cache_daap_hdl);
   cache_close_one(&cache_artwork_hdl);
   cache_close_one(&cache_xcode_hdl);
 
@@ -524,25 +463,17 @@ cache_open(void)
 {
   const char *directory;
   const char *filename;
-  char *daap_db_path;
   char *artwork_db_path;
   char *xcode_db_path;
   int ret;
 
   directory = cfg_getstr(cfg_getsec(cfg, "general"), "cache_dir");
 
-  CHECK_NULL(L_DB, filename = cfg_getstr(cfg_getsec(cfg, "general"), "cache_daap_filename"));
-  CHECK_NULL(L_DB, daap_db_path = safe_asprintf("%s%s", directory, filename));
-
   CHECK_NULL(L_DB, filename = cfg_getstr(cfg_getsec(cfg, "general"), "cache_artwork_filename"));
   CHECK_NULL(L_DB, artwork_db_path = safe_asprintf("%s%s", directory, filename));
 
   CHECK_NULL(L_DB, filename = cfg_getstr(cfg_getsec(cfg, "general"), "cache_xcode_filename"));
   CHECK_NULL(L_DB, xcode_db_path = safe_asprintf("%s%s", directory, filename));
-
-  ret = cache_open_one(&cache_daap_hdl, daap_db_path, "daap", CACHE_DAAP_VERSION, cache_daap_db_def, ARRAY_SIZE(cache_daap_db_def));
-  if (ret < 0)
-    goto error;
 
   ret = cache_open_one(&cache_artwork_hdl, artwork_db_path, "artwork", CACHE_ARTWORK_VERSION, cache_artwork_db_def, ARRAY_SIZE(cache_artwork_db_def));
   if (ret < 0)
@@ -558,317 +489,15 @@ cache_open(void)
 
   DPRINTF(E_DBG, L_CACHE, "Cache opened\n");
 
-  free(daap_db_path);
   free(artwork_db_path);
   free(xcode_db_path);
   return 0;
 
  error:
   cache_close();
-  free(daap_db_path);
   free(artwork_db_path);
   free(xcode_db_path);
   return -1;
-}
-
-
-/* Adds the reply (stored in evbuf) to the cache */
-static int
-cache_daap_reply_add(sqlite3 *hdl, const char *query, struct evbuffer *evbuf)
-{
-#define Q_TMPL "INSERT INTO replies (query, reply) VALUES (?, ?);"
-  sqlite3_stmt *stmt;
-  unsigned char *data;
-  size_t datalen;
-  int ret;
-
-  datalen = evbuffer_get_length(evbuf);
-  data = evbuffer_pullup(evbuf, -1);
-
-  ret = sqlite3_prepare_v2(hdl, Q_TMPL, -1, &stmt, 0);
-  if (ret != SQLITE_OK)
-    {
-      DPRINTF(E_LOG, L_CACHE, "Error preparing query for cache update: %s\n", sqlite3_errmsg(hdl));
-      return -1;
-    }
-
-  sqlite3_bind_text(stmt, 1, query, -1, SQLITE_STATIC);
-  sqlite3_bind_blob(stmt, 2, data, datalen, SQLITE_STATIC);
-
-  ret = sqlite3_step(stmt);
-  if (ret != SQLITE_DONE)
-    {
-      DPRINTF(E_LOG, L_CACHE, "Error stepping query for cache update: %s\n", sqlite3_errmsg(hdl));
-      sqlite3_finalize(stmt);
-      return -1;
-    }
-
-  ret = sqlite3_finalize(stmt);
-  if (ret != SQLITE_OK)
-    {
-      DPRINTF(E_LOG, L_CACHE, "Error finalizing query for cache update: %s\n", sqlite3_errmsg(hdl));
-      return -1;
-    }
-
-  //DPRINTF(E_DBG, L_CACHE, "Wrote cache reply, size %d\n", datalen);
-
-  return 0;
-#undef Q_TMPL
-}
-
-/* Adds the query to the list of queries for which we will build and cache a reply */
-static enum command_state
-cache_daap_query_add(void *arg, int *retval)
-{
-#define Q_TMPL "INSERT OR REPLACE INTO queries (user_agent, is_remote, query, msec, timestamp) VALUES ('%q', %d, '%q', %d, %" PRIi64 ");"
-#define Q_CLEANUP "DELETE FROM queries WHERE id NOT IN (SELECT id FROM queries ORDER BY timestamp DESC LIMIT 20);"
-  struct cache_arg *cmdarg = arg;
-  struct timeval delay = { 60, 0 };
-  char *query;
-  char *errmsg;
-  int ret;
-
-  if (!cmdarg->ua)
-    {
-      DPRINTF(E_LOG, L_CACHE, "Couldn't add slow query to cache, unknown user-agent\n");
-
-      goto error_add;
-    }
-
-  // Currently we are only able to pre-build and cache these reply types
-  if ( (strncmp(cmdarg->query, "/databases/1/containers/", strlen("/databases/1/containers/")) != 0) &&
-       (strncmp(cmdarg->query, "/databases/1/groups?", strlen("/databases/1/groups?")) != 0) &&
-       (strncmp(cmdarg->query, "/databases/1/items?", strlen("/databases/1/items?")) != 0) &&
-       (strncmp(cmdarg->query, "/databases/1/browse/", strlen("/databases/1/browse/")) != 0) )
-    goto error_add;
-
-  remove_tag(cmdarg->query, "session-id");
-  remove_tag(cmdarg->query, "revision-number");
-
-  query = sqlite3_mprintf(Q_TMPL, cmdarg->ua, cmdarg->is_remote, cmdarg->query, cmdarg->msec, (int64_t)time(NULL));
-  if (!query)
-    {
-      DPRINTF(E_LOG, L_CACHE, "Out of memory making query string.\n");
-
-      goto error_add;
-    }
-
-  ret = sqlite3_exec(cmdarg->hdl, query, NULL, NULL, &errmsg);
-  sqlite3_free(query);
-  if (ret != SQLITE_OK)
-    {
-      DPRINTF(E_LOG, L_CACHE, "Error adding query to query list: %s\n", errmsg);
-
-      sqlite3_free(errmsg);
-      goto error_add;
-    }
-
-  DPRINTF(E_INFO, L_CACHE, "Slow query (%d ms) added to cache: '%s' (user-agent: '%s')\n", cmdarg->msec, cmdarg->query, cmdarg->ua);
-
-  free(cmdarg->ua);
-  free(cmdarg->query);
-
-  // Limits the size of the cache to only contain replies for 20 most recent queries
-  ret = sqlite3_exec(cmdarg->hdl, Q_CLEANUP, NULL, NULL, &errmsg);
-  if (ret != SQLITE_OK)
-    {
-      DPRINTF(E_LOG, L_CACHE, "Error cleaning up query list before update: %s\n", errmsg);
-      sqlite3_free(errmsg);
-      *retval = -1;
-      return COMMAND_END;
-    }
-
-  // Will set of cache regeneration after waiting a bit (so there is less risk
-  // of disturbing the user)
-  evtimer_add(cache_daap_updateev, &delay);
-
-  *retval = 0;
-  return COMMAND_END;
-
- error_add:
-  if (cmdarg->ua)
-    free(cmdarg->ua);
-
-  if (cmdarg->query)
-    free(cmdarg->query);
-
-  *retval = -1;
-  return COMMAND_END;
-#undef Q_CLEANUP
-#undef Q_TMPL
-}
-
-// Gets a reply from the cache.
-// cmdarg->evbuf will be filled with the reply (gzipped)
-static enum command_state
-cache_daap_query_get(void *arg, int *retval)
-{
-#define Q_TMPL "SELECT reply FROM replies WHERE query = ?;"
-  struct cache_arg *cmdarg = arg;
-  sqlite3_stmt *stmt;
-  char *query;
-  int datalen;
-  int ret;
-
-  query = cmdarg->query;
-  remove_tag(query, "session-id");
-  remove_tag(query, "revision-number");
-
-  // Look in the DB
-  ret = sqlite3_prepare_v2(cmdarg->hdl, Q_TMPL, -1, &stmt, 0);
-  if (ret != SQLITE_OK)
-    {
-      DPRINTF(E_LOG, L_CACHE, "Error preparing query for cache update: %s\n", sqlite3_errmsg(cmdarg->hdl));
-      free(query);
-      *retval = -1;
-      return COMMAND_END;
-    }
-
-  sqlite3_bind_text(stmt, 1, query, -1, SQLITE_STATIC);
-
-  ret = sqlite3_step(stmt);
-  if (ret != SQLITE_ROW)  
-    {
-      if (ret != SQLITE_DONE)
-	DPRINTF(E_LOG, L_CACHE, "Error stepping query for cache update: %s\n", sqlite3_errmsg(cmdarg->hdl));
-      goto error_get;
-    }
-
-  datalen = sqlite3_column_bytes(stmt, 0);
-
-  if (!cmdarg->evbuf)
-    {
-      DPRINTF(E_LOG, L_CACHE, "Error: DAAP reply evbuffer is NULL\n");
-      goto error_get;
-    }
-
-  ret = evbuffer_add(cmdarg->evbuf, sqlite3_column_blob(stmt, 0), datalen);
-  if (ret < 0)
-    {
-      DPRINTF(E_LOG, L_CACHE, "Out of memory for DAAP reply evbuffer\n");
-      goto error_get;
-    }
-
-  ret = sqlite3_finalize(stmt);
-  if (ret != SQLITE_OK)
-    DPRINTF(E_LOG, L_CACHE, "Error finalizing query for getting cache: %s\n", sqlite3_errmsg(cmdarg->hdl));
-
-  DPRINTF(E_INFO, L_CACHE, "Cache hit: %s\n", query);
-
-  free(query);
-
-  *retval = 0;
-  return COMMAND_END;
-
- error_get:
-  sqlite3_finalize(stmt);
-  free(query);
-  *retval = -1;
-  return COMMAND_END;
-#undef Q_TMPL
-}
-
-/* Removes the query from the cache */
-static int
-cache_daap_query_delete(sqlite3 *hdl, const int id)
-{
-#define Q_TMPL "DELETE FROM queries WHERE id = %d;"
-  char *query;
-  char *errmsg;
-  int ret;
-
-  query = sqlite3_mprintf(Q_TMPL, id);
-
-  ret = sqlite3_exec(hdl, query, NULL, NULL, &errmsg);
-  sqlite3_free(query);
-  if (ret != SQLITE_OK)
-    {
-      DPRINTF(E_LOG, L_CACHE, "Error deleting query from cache: %s\n", errmsg);
-
-      sqlite3_free(errmsg);
-      return -1;
-    }
-
-  return 0;
-#undef Q_TMPL
-}
-
-/* Here we actually update the cache by asking httpd_daap for responses
- * to the queries set for caching
- */
-static void
-cache_daap_update_cb(int fd, short what, void *arg)
-{
-  sqlite3 *hdl = cache_daap_hdl;
-  sqlite3_stmt *stmt;
-  struct evbuffer *evbuf;
-  struct evbuffer *gzbuf;
-  char *errmsg;
-  char *query;
-  int ret;
-
-  if (cache_is_suspended)
-    {
-      DPRINTF(E_DBG, L_CACHE, "Got a request to update DAAP cache while suspended\n");
-      return;
-    }
-
-  DPRINTF(E_INFO, L_CACHE, "Beginning DAAP cache update\n");
-
-  ret = sqlite3_exec(hdl, "DELETE FROM replies;", NULL, NULL, &errmsg);
-  if (ret != SQLITE_OK)
-    {
-      DPRINTF(E_LOG, L_CACHE, "Error clearing reply cache before update: %s\n", errmsg);
-      sqlite3_free(errmsg);
-      return;
-    }
-
-  ret = sqlite3_prepare_v2(hdl, "SELECT id, user_agent, is_remote, query FROM queries;", -1, &stmt, 0);
-  if (ret != SQLITE_OK)
-    {
-      DPRINTF(E_LOG, L_CACHE, "Error preparing for cache update: %s\n", sqlite3_errmsg(hdl));
-      return;
-    }
-
-  while ((ret = sqlite3_step(stmt)) == SQLITE_ROW)
-    {
-      query = strdup((char *)sqlite3_column_text(stmt, 3));
-
-      evbuf = daap_reply_build(query, (char *)sqlite3_column_text(stmt, 1), sqlite3_column_int(stmt, 2));
-      if (!evbuf)
-	{
-	  DPRINTF(E_LOG, L_CACHE, "Error building DAAP reply for query: %s\n", query);
-	  cache_daap_query_delete(hdl, sqlite3_column_int(stmt, 0));
-	  free(query);
-
-	  continue;
-	}
-
-      gzbuf = httpd_gzip_deflate(evbuf);
-      if (!gzbuf)
-	{
-	  DPRINTF(E_LOG, L_CACHE, "Error gzipping DAAP reply for query: %s\n", query);
-	  cache_daap_query_delete(hdl, sqlite3_column_int(stmt, 0));
-	  free(query);
-	  evbuffer_free(evbuf);
-
-	  continue;
-	}
-
-      evbuffer_free(evbuf);
-
-      cache_daap_reply_add(hdl, query, gzbuf);
-
-      free(query);
-      evbuffer_free(gzbuf);
-    }
-
-  if (ret != SQLITE_DONE)
-    DPRINTF(E_LOG, L_CACHE, "Could not step: %s\n", sqlite3_errmsg(hdl));
-
-  sqlite3_finalize(stmt);
-
-  DPRINTF(E_INFO, L_CACHE, "DAAP cache updated\n");
 }
 
 
@@ -1293,21 +922,15 @@ cache_xcode_update_cb(int fd, short what, void *arg)
 static enum command_state
 cache_database_update(void *arg, int *retval)
 {
-  struct timeval delay_daap = { 10, 0 };
-
-  event_add(cache_daap_updateev, &delay_daap);
-
-// TODO unlink or rename cache.db
-
   xcode_trigger();
 
   *retval = 0;
   return COMMAND_END;
 }
 
-/* Callback from filescanner thread */
+/* Callback from database listener */
 static void
-cache_daap_listener_cb(short event_mask, void *ctx)
+cache_listener_cb(short event_mask, void *ctx)
 {
   commands_exec_async(cmdbase, cache_database_update, NULL);
 }
@@ -1699,8 +1322,6 @@ cache(void *arg)
       pthread_exit(NULL);
     }
 
-  // The thread needs a connection with the main db, so it can generate DAAP
-  // replies through httpd_daap.c and read changes from the files table
   ret = db_perthread_init();
   if (ret < 0)
     {
@@ -1710,14 +1331,13 @@ cache(void *arg)
       pthread_exit(NULL);
     }
 
-  CHECK_NULL(L_CACHE, cache_daap_updateev = evtimer_new(evbase_cache, cache_daap_update_cb, NULL));
   CHECK_NULL(L_CACHE, cache_xcode_updateev = evtimer_new(evbase_cache, cache_xcode_update_cb, NULL));
   CHECK_NULL(L_CACHE, cache_xcode_prepareev = evtimer_new(evbase_cache, cache_xcode_prepare_cb, NULL));
   CHECK_ERR(L_CACHE, event_priority_set(cache_xcode_prepareev, 0));
   for (i = 0; i < ARRAY_SIZE(cache_xcode_jobs); i++)
     CHECK_NULL(L_CACHE, cache_xcode_jobs[i].ev = evtimer_new(evbase_cache, cache_xcode_job_complete_cb, &cache_xcode_jobs[i]));
 
-  CHECK_ERR(L_CACHE, listener_add(cache_daap_listener_cb, LISTENER_DATABASE, NULL));
+  CHECK_ERR(L_CACHE, listener_add(cache_listener_cb, LISTENER_DATABASE, NULL));
 
   cache_is_initialized = 1;
 
@@ -1729,86 +1349,18 @@ cache(void *arg)
       cache_is_initialized = 0;
     }
 
-  listener_remove(cache_daap_listener_cb);
+  listener_remove(cache_listener_cb);
 
   for (i = 0; i < ARRAY_SIZE(cache_xcode_jobs); i++)
     event_free(cache_xcode_jobs[i].ev);
   event_free(cache_xcode_prepareev);
   event_free(cache_xcode_updateev);
-  event_free(cache_daap_updateev);
 
   db_perthread_deinit();
 
   cache_close();
 
   pthread_exit(NULL);
-}
-
-
-/* ----------------------------- DAAP cache API  ---------------------------- */
-
-/* The DAAP cache will cache raw daap replies for queries added with
- * cache_daap_add(). Only some query types are supported.
- * You can't add queries where the canonical reply is not HTTP_OK, because
- * daap_request will use that as default for cache replies.
- *
- */
-
-void
-cache_daap_suspend(void)
-{
-  cache_is_suspended = 1;
-}
-
-void
-cache_daap_resume(void)
-{
-  cache_is_suspended = 0;
-}
-
-int
-cache_daap_get(struct evbuffer *evbuf, const char *query)
-{
-  struct cache_arg cmdarg;
-
-  if (!cache_is_initialized)
-    return -1;
-
-  cmdarg.hdl = cache_daap_hdl;
-  cmdarg.query = strdup(query);
-  cmdarg.evbuf = evbuf;
-
-  return commands_exec_sync(cmdbase, cache_daap_query_get, NULL, &cmdarg);
-}
-
-void
-cache_daap_add(const char *query, const char *ua, int is_remote, int msec)
-{
-  struct cache_arg *cmdarg;
-
-  if (!cache_is_initialized)
-    return;
-
-  cmdarg = calloc(1, sizeof(struct cache_arg));
-  if (!cmdarg)
-    {
-      DPRINTF(E_LOG, L_CACHE, "Could not allocate cache_arg\n");
-      return;
-    }
-
-  cmdarg->hdl = cache_daap_hdl;
-  cmdarg->query = strdup(query);
-  cmdarg->ua = strdup(ua);
-  cmdarg->is_remote = is_remote;
-  cmdarg->msec = msec;
-
-  commands_exec_async(cmdbase, cache_daap_query_add, cmdarg);
-}
-
-int
-cache_daap_threshold_get(void)
-{
-  return cache_daap_threshold;
 }
 
 
@@ -2052,13 +1604,6 @@ cache_artwork_read(struct evbuffer *evbuf, const char *path, int *format)
 int
 cache_init(void)
 {
-  cache_daap_threshold = cfg_getint(cfg_getsec(cfg, "general"), "cache_daap_threshold");
-  if (cache_daap_threshold == 0)
-    {
-      DPRINTF(E_LOG, L_CACHE, "Cache threshold set to 0, disabling cache\n");
-      return 0;
-    }
-
   CHECK_NULL(L_CACHE, evbase_cache = event_base_new());
   CHECK_ERR(L_CACHE, event_base_priority_init(evbase_cache, 8));
   CHECK_NULL(L_CACHE, cmdbase = commands_base_new(evbase_cache, NULL));

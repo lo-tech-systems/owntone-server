@@ -51,29 +51,11 @@
 // For testing http stream underruns
 //#define DEBUG_UNDERRUN 1
 
-extern struct input_definition input_file;
-extern struct input_definition input_http;
 extern struct input_definition input_pipe;
-extern struct input_definition input_timer;
-#ifdef SPOTIFY_LIBRESPOTC
-extern struct input_definition input_spotify;
-#endif
-#ifdef SPOTIFY_LIBSPOTIFY
-extern struct input_definition input_libspotify;
-#endif
 
 // Must be in sync with enum input_types
 static struct input_definition *inputs[] = {
-    &input_file,
-    &input_http,
     &input_pipe,
-    &input_timer,
-#ifdef SPOTIFY_LIBRESPOTC
-    &input_spotify,
-#endif
-#ifdef SPOTIFY_LIBSPOTIFY
-    &input_libspotify,
-#endif
     NULL
 };
 
@@ -159,31 +141,10 @@ int debug_underrun_trigger;
 static int
 map_data_kind(int data_kind)
 {
-  // Test mode - ignores the actual source and just plays a signal with clicks
-  if (cfg_getbool(cfg_getsec(cfg, "general"), "timer_test"))
-    return INPUT_TYPE_TIMER;
-
   switch (data_kind)
     {
-      case DATA_KIND_FILE:
-	return INPUT_TYPE_FILE;
-
-      case DATA_KIND_HTTP:
-	return INPUT_TYPE_HTTP;
-
       case DATA_KIND_PIPE:
 	return INPUT_TYPE_PIPE;
-
-      case DATA_KIND_SPOTIFY:
-#ifdef SPOTIFY_LIBRESPOTC
-	if (!inputs[INPUT_TYPE_SPOTIFY]->disabled)
-	  return INPUT_TYPE_SPOTIFY;
-#endif
-#ifdef SPOTIFY_LIBSPOTIFY
-	if (!inputs[INPUT_TYPE_LIBSPOTIFY]->disabled)
-	  return INPUT_TYPE_LIBSPOTIFY;
-#endif
-	return -1;
 
       default:
 	return -1;

@@ -20,16 +20,6 @@ AC_PROG_SED
 AC_PROG_MKDIR_P
 LT_INIT([disable-static])
 
-AC_PATH_PROG([GPERF], [[gperf]])
-AS_IF([[test -z "$GPERF"]],
-	[AS_IF([[test -f "$srcdir/src/dmap_fields_hash.h"]],
-		[AM_MISSING_PROG([GPERF], [[gperf]])
-		AC_MSG_NOTICE([[
-
-GNU gperf not found, but its output appears to be present.
-If you modify any .gperf files, you will need to install it.]])],
-		[AC_MSG_ERROR([[GNU gperf required, please install it.]])])
-	])
 
 AX_PROG_FLEX([AC_DEFINE([LEX], [flex], [flex found])],
 	[AS_IF([test ! -f "$srcdir/src/parsers/smartpl_lexer.c"],
@@ -284,22 +274,6 @@ AC_CHECK_SIZEOF([void *])
 OWNTONE_VAR_PREPEND([OWNTONE_LIBS], [libairptp/src/libairptp.a])
 
 dnl --- Begin configuring the options ---
-dnl ALSA
-OWNTONE_ARG_WITH_CHECK([OWNTONE_OPTS], [ALSA support], [alsa], [ALSA],
-	[alsa], [snd_mixer_open], [alsa/asoundlib.h])
-AM_CONDITIONAL([COND_ALSA], [[test "x$with_alsa" = "xyes"]])
-
-dnl PULSEAUDIO
-OWNTONE_ARG_WITH_CHECK([OWNTONE_OPTS], [Pulseaudio support], [pulseaudio], [LIBPULSE],
-	[libpulse], [pa_stream_get_state], [pulse/pulseaudio.h],
-	[AC_CHECK_FUNCS([pa_threaded_mainloop_set_name])])
-AM_CONDITIONAL([COND_PULSEAUDIO], [[test "x$with_pulseaudio" = "xyes"]])
-
-dnl Build with libwebsockets
-OWNTONE_ARG_WITH_CHECK([OWNTONE_OPTS], [libwebsockets support], [libwebsockets], [LIBWEBSOCKETS],
-	[libwebsockets >= 2.0.2])
-AM_CONDITIONAL([COND_LIBWEBSOCKETS], [[test "x$with_libwebsockets" = "xyes"]])
-
 dnl Build with Avahi (or Bonjour if not)
 OWNTONE_ARG_WITH_CHECK([OWNTONE_OPTS], [Avahi mDNS], [avahi], [AVAHI],
 	[avahi-client >= 0.6.24], [avahi_client_new], [avahi-client/client.h])
@@ -309,40 +283,9 @@ AS_IF([[test "x$with_avahi" = "xno"]],
 		[AC_MSG_ERROR([[Avahi client or Bonjour DNS_SD required, please install one.]])])])
 AM_CONDITIONAL([COND_AVAHI], [[test "x$with_avahi" = "xyes"]])
 
-dnl Spotify support
-OWNTONE_ARG_DISABLE([Spotify support], [spotify], [SPOTIFY_LIBRESPOTC],
-	[OWNTONE_MODULES_CHECK([OWNTONE_OPTS], [LIBPROTOBUF_C],
-		[libprotobuf-c >= 1.0.0], [protobuf_c_message_pack],
-		[protobuf-c/protobuf-c.h])
-	 OWNTONE_VAR_PREPEND([OWNTONE_OPTS_LIBS], [inputs/librespot-c/librespot-c.a])
-	 AC_DEFINE([SPOTIFY], 1,
-		[Define to 1 to enable Spotify])
-	])
-AM_CONDITIONAL([COND_SPOTIFY], [[test "x$enable_spotify" = "xyes"]])
+dnl Spotify support (disabled in minimal build)
+AM_CONDITIONAL([COND_SPOTIFY], [false])
 
-dnl LastFM support
-OWNTONE_ARG_DISABLE([LastFM support], [lastfm], [LASTFM])
-AM_CONDITIONAL([COND_LASTFM], [[test "x$enable_lastfm" = "xyes"]])
-
-dnl ChromeCast support with libprotobuf-c
-OWNTONE_ARG_ENABLE([Chromecast support], [chromecast], [CHROMECAST],
-	[OWNTONE_MODULES_CHECK([OWNTONE_OPTS], [LIBPROTOBUF_C],
-		[libprotobuf-c >= 1.0.0], [protobuf_c_message_pack],
-		[protobuf-c/protobuf-c.h], [],
-		[OWNTONE_FUNC_REQUIRE([OWNTONE_OPTS], [v0 libprotobuf-c],
-			[LIBPROTOBUF_OLD], [protobuf-c],
-			[protobuf_c_message_pack],
-			[google/protobuf-c/protobuf-c.h],
-			[AC_DEFINE([HAVE_PROTOBUF_OLD], 1,
-				[Define to 1 if you have libprotobuf < 1.0.0])
-			 [protobuf_old=yes]],
-			[AC_MSG_ERROR([[Chromecast support requires protobuf-c]])])
-		])
-	 OWNTONE_MODULES_CHECK([OWNTONE_OPTS], [GNUTLS], [gnutls], [gnutls_init],
-		[gnutls/gnutls.h])
-	])
-AM_CONDITIONAL([COND_CHROMECAST], [[test "x$enable_chromecast" = "xyes"]])
-AM_CONDITIONAL([COND_PROTOBUF_OLD], [[test "x$protobuf_old" = "xyes"]])
 
 dnl Prefer AirPlay 2
 OWNTONE_ARG_DISABLE([preference for AirPlay 2 for devices that support both 1 and 2], [preferairplay2], [PREFER_AIRPLAY2])
@@ -350,16 +293,6 @@ OWNTONE_ARG_DISABLE([preference for AirPlay 2 for devices that support both 1 an
 dnl DB profiling support
 OWNTONE_ARG_ENABLE([DB profiling support], [dbprofile], [DB_PROFILE])
 
-dnl MPD support
-OWNTONE_ARG_DISABLE([MPD client protocol support], [mpd], [MPD])
-AM_CONDITIONAL([COND_MPD], [[test "x$enable_mpd" = "xyes"]])
-
-dnl Include default webinterface
-OWNTONE_ARG_DISABLE([include default web interface], [webinterface], [WEBINTERFACE],
-	[AS_IF([[test "x$with_libwebsockets" = "xno"]],
-		[AC_MSG_ERROR([[Web interface requires libwebsockets >= 2.0.2 (or use --disable-webinterface)]])])
-	])
-AM_CONDITIONAL([COND_WEBINTERFACE], [[test "x$enable_webinterface" = "xyes"]])
 
 dnl Creating and defining users and groups
 OWNTONE_ARG_ENABLE([having 'make install' add user/group and 'make uninstall' delete], [install_user], [INSTALL_USER],
@@ -414,7 +347,6 @@ AC_CONFIG_SUBDIRS([
 AC_CONFIG_FILES([
 	src/Makefile
 	sqlext/Makefile
-	htdocs/Makefile
 	Makefile
 	owntone.spec
 ])

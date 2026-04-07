@@ -87,11 +87,6 @@
 // Audio and metadata input
 #include "input.h"
 
-// Scrobbling
-#ifdef LASTFM
-# include "lastfm.h"
-#endif
-#include "listenbrainz.h"
 
 // The interval between each tick of the playback clock in ms. This means that
 // we read 10 ms frames from the input and pass to the output, so the clock
@@ -380,17 +375,6 @@ skipcount_inc_cb(void *arg)
   db_file_inc_skipcount(*id);
 }
 
-// Callback from the worker thread (async operation as it may block)
-static void
-scrobble_cb(void *arg)
-{
-  int *id = arg;
-
-#ifdef LASTFM
-  lastfm_scrobble(*id);
-#endif
-  listenbrainz_scrobble(*id);
-}
 
 // This is just to be able to log the caller in a simple way
 #define status_update(x, y) status_update_impl((x), (y), __func__)
@@ -1092,7 +1076,6 @@ event_play_eof()
   if (id != DB_MEDIA_FILE_NON_PERSISTENT_ID)
     {
       worker_execute(playcount_inc_cb, &id, sizeof(int), 5);
-      worker_execute(scrobble_cb, &id, sizeof(int), 8);
       history_add(pb_session.playing_now->id, pb_session.playing_now->item_id);
     }
 
@@ -3044,47 +3027,6 @@ speaker_start_all(void *arg, int *retval)
   return COMMAND_END;
 }
 
-// This is borderline misuse of the outputs_device interface, but the purpose is
-// to register streaming session info with outputs/streaming.c via the player
-// thread. It must be the player thread because session setup requires that
-// outputs_quality_subscribe() is called, and by design it isn't thread safe.
-static enum command_state
-streaming_register(void *arg, int *retval)
-{
-  struct speaker_attr_param *param = arg;
-  struct output_device device =
-  {
-    .type = OUTPUT_TYPE_STREAMING,
-    .type_name = "streaming",
-    .name = "streaming",
-    .quality = param->quality,
-    .selected_format = param->format,
-  };
-
-  *retval = outputs_device_start(&device, NULL, false);
-
-  param->spk_id = device.id;
-  param->audio_fd = device.audio_fd;
-  param->metadata_fd = device.metadata_fd;
-  return COMMAND_END;
-}
-
-static enum command_state
-streaming_deregister(void *arg, int *retval)
-{
-  struct speaker_attr_param *param = arg;
-  struct output_device device =
-  {
-    .type = OUTPUT_TYPE_STREAMING,
-    .type_name = "streaming",
-    .name = "streaming",
-    .id = param->spk_id,
-    .session = "dummy", // to pass check in outputs_device_stop()
-  };
-
-  *retval = outputs_device_stop(&device, NULL);
-  return COMMAND_END;
-}
 
 static enum command_state
 volume_set(void *arg, int *retval)
@@ -3672,36 +3614,6 @@ player_speaker_offset_ms_set(uint64_t id, int offset_ms)
   return commands_exec_sync(cmdbase, speaker_offset_ms_set, speaker_generic_bh, &param);
 }
 
-int
-player_streaming_register(int *audio_fd, int *metadata_fd, enum media_format format, struct media_quality quality)
-{
-  struct speaker_attr_param param;
-  int ret;
-
-  param.format = format;
-  param.quality = quality;
-
-  ret = commands_exec_sync(cmdbase, streaming_register, NULL, &param);
-  if (ret < 0)
-    return ret;
-
-  *audio_fd = param.audio_fd;
-  *metadata_fd = param.metadata_fd;
-  return param.spk_id;
-}
-
-int
-player_streaming_deregister(int id)
-{
-  struct speaker_attr_param param;
-  int ret;
-
-  param.spk_id = id;
-
-  ret = commands_exec_sync(cmdbase, streaming_deregister, NULL, &param);
-
-  return ret;
-}
 
 int
 player_volume_set(int vol)

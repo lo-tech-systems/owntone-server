@@ -63,20 +63,13 @@
 #include "misc.h"
 #include "cache.h"
 #include "httpd.h"
-#include "mpd.h"
 #include "mdns.h"
-#include "remote_pairing.h"
 #include "player.h"
 #include "worker.h"
 #include "library.h"
 #include "ptpd.h"
-#ifdef LASTFM
-# include "lastfm.h"
-#endif
-#include "listenbrainz.h"
 
 #define PIDFILE          STATEDIR "/run/" PACKAGE ".pid"
-#define WEB_ROOT         DATADIR "/htdocs"
 #define SQLITE_EXT_PATH  PKGLIBDIR "/" PACKAGE_NAME "-sqlext.so"
 
 struct event_base *evbase_main;
@@ -104,9 +97,6 @@ usage(char *program)
   printf("  -f              Run in foreground\n");
   printf("  -b <id>         ffid to be broadcast\n");
   printf("  -v              Display version information\n");
-  printf("  -w <directory>  Use <directory> as the web root directory for serving static files\n");
-  printf("  --mdns-no-rsp   Don't announce RSP service via mDNS\n");
-  printf("  --mdns-no-daap  Don't announce DAAP service via mDNS\n");
   printf("  --mdns-no-cname Don't register owntone.local as CNAME via mDNS\n");
   printf("  --mdns-no-web   Don't announce web interface via mDNS\n");
   printf("  -s <path>      Use <path> as the path for the OwnTone sqlite extension (owntone-sqlext.so)\n");
@@ -226,136 +216,32 @@ daemonize(bool background, char *pidfile)
 }
 
 static int
-register_services(char *ffid, bool no_web, bool no_rsp, bool no_daap, bool no_mpd)
+register_services(char *ffid, bool no_web)
 {
   cfg_t *lib;
-  cfg_t *mpd;
   char *libname;
-  char *password;
-  char *txtrecord[10];
-  char records[9][128];
+  char *txtrecord[2];
+  char records[1][128];
   int port;
-  int mpd_port;
-  uint32_t hash;
-  int i;
   int ret;
 
-  srand((unsigned int)time(NULL));
-
   lib = cfg_getsec(cfg, "library");
-
   libname = cfg_getstr(lib, "name");
-  hash = djb_hash(libname, strlen(libname));
+  port = cfg_getint(lib, "port");
 
-  for (i = 0; i < (sizeof(records) / sizeof(records[0])); i++)
-    {
-      memset(records[i], 0, 128);
-      txtrecord[i] = records[i];
-    }
-
-  txtrecord[9] = NULL;
+  memset(records[0], 0, 128);
+  txtrecord[0] = records[0];
+  txtrecord[1] = NULL;
 
   snprintf(txtrecord[0], 128, "txtvers=1");
-  snprintf(txtrecord[1], 128, "Database ID=%0X", hash);
-  snprintf(txtrecord[2], 128, "Machine ID=%0X", hash);
-  snprintf(txtrecord[3], 128, "Machine Name=%s", libname);
-  snprintf(txtrecord[4], 128, "mtd-version=%s", VERSION);
-  snprintf(txtrecord[5], 128, "iTSh Version=131073"); // iTunes 6.0.4
-  snprintf(txtrecord[6], 128, "Version=196610");      // iTunes 6.0.4
-
-  password = cfg_getstr(lib, "password");
-  snprintf(txtrecord[7], 128, "Password=%s", (password) ? "true" : "false");
-
-  if (ffid)
-    snprintf(txtrecord[8], 128, "ffid=%s", ffid);
-  else
-    snprintf(txtrecord[8], 128, "ffid=%08x", rand());
 
   DPRINTF(E_INFO, L_MAIN, "Registering rendezvous names\n");
-
-  port = cfg_getint(lib, "port");
 
   if (!no_web)
     {
       ret = mdns_register(libname, "_http._tcp", port, txtrecord);
       if (ret < 0)
 	return ret;
-    }
-
-  // Register RSP service
-  if (!no_rsp)
-    {
-      ret = mdns_register(libname, "_rsp._tcp", port, txtrecord);
-      if (ret < 0)
-	return ret;
-    }
-
-  // Register DAAP service
-  if (!no_daap)
-    {
-      ret = mdns_register(libname, "_daap._tcp", port, txtrecord);
-      if (ret < 0)
-	return ret;
-    }
-
-  for (i = 0; i < (sizeof(records) / sizeof(records[0])); i++)
-    {
-      memset(records[i], 0, 128);
-      txtrecord[i] = records[i];
-    }
-
-  // Register DACP service
-  snprintf(txtrecord[0], 128, "txtvers=1");
-  snprintf(txtrecord[1], 128, "Ver=131077");   // iTunes 12.7.4
-  snprintf(txtrecord[2], 128, "DbId=1");       // Must be the id of our database, i.e. 1
-  snprintf(txtrecord[3], 128, "OSsi=0x2012E"); // Magic number! Yay!
-  txtrecord[4] = NULL;
-
-  // The group name for the dacp service must be iTunes_Ctrl_(libhash),
-  // otherwise at least my Sony speaker won't use the service.
-
-  // Use as scratch space for the hash
-  snprintf(records[4], 128, "iTunes_Ctrl_%016" PRIX64, libhash);
-
-  ret = mdns_register(records[4], "_dacp._tcp", port, txtrecord);
-  if (ret < 0)
-    return ret;
-
-  for (i = 0; i < (sizeof(records) / sizeof(records[0])); i++)
-    {
-      memset(records[i], 0, 128);
-      txtrecord[i] = records[i];
-    }
-
-  // Register touch-able service, for Remote.app
-  snprintf(txtrecord[0], 128, "txtvers=1");
-  snprintf(txtrecord[1], 128, "DbId=%016" PRIX64, libhash);
-  snprintf(txtrecord[2], 128, "DvTy=iTunes");
-  snprintf(txtrecord[3], 128, "DvSv=2306");  // Magic number! Yay!
-  snprintf(txtrecord[4], 128, "Ver=131073"); // iTunes 6.0.4
-  snprintf(txtrecord[5], 128, "OSsi=0x1F5"); // Magic number! Yay!
-  snprintf(txtrecord[6], 128, "CtlN=%s", libname);
-  txtrecord[7] = NULL;
-
-  // The group name for the touch-able service advertising is a 64bit hash
-  // but is different from the DbId in iTunes. For now we'll use a hash of
-  // the library name for both, and we'll change that if needed.
-
-  // Use as scratch space for the hash
-  snprintf(records[7], 128, "%016" PRIX64, libhash);
-
-  ret = mdns_register(records[7], "_touch-able._tcp", port, txtrecord);
-  if (ret < 0)
-    return ret;
-
-  // Register MPD serivce
-  mpd = cfg_getsec(cfg, "mpd");
-  mpd_port = cfg_getint(mpd, "port");
-  if (!no_mpd && mpd_port > 0)
-    {
-      ret = mdns_register(libname, "_mpd._tcp", mpd_port, NULL);
-            if (ret < 0)
-      	return ret;
     }
 
   return 0;
@@ -488,18 +374,14 @@ main(int argc, char **argv)
   char *configfile = CONFFILE;
   bool background = true;
   bool testrun = false;
-  bool mdns_no_rsp = false;
-  bool mdns_no_daap = false;
   bool mdns_no_cname = false;
   bool mdns_no_web = false;
-  bool mdns_no_mpd = false;
   int loglevel = -1;
   char *logdomains = NULL;
   char *logfile = NULL;
   char *logformat = NULL;
   char *ffid = NULL;
   char *pidfile = PIDFILE;
-  char *webroot = WEB_ROOT;
   char *sqlite_extension_path = SQLITE_EXT_PATH;
   char **buildopts;
   const char *av_version;
@@ -520,12 +402,9 @@ main(int argc, char **argv)
     { "config",        1, NULL, 'c' },
     { "pidfile",       1, NULL, 'P' },
     { "version",       0, NULL, 'v' },
-    { "webroot",       1, NULL, 'w' },
     { "sqliteext",     1, NULL, 's' },
     { "testrun",       0, NULL, 't' }, // Used for CI, not documented to user
 
-    { "mdns-no-rsp",   0, NULL, 512 },
-    { "mdns-no-daap",  0, NULL, 513 },
     { "mdns-no-cname", 0, NULL, 514 },
     { "mdns-no-web",   0, NULL, 515 },
     { "logformat",     1, NULL, 516 },
@@ -533,18 +412,10 @@ main(int argc, char **argv)
     { NULL,            0, NULL, 0   }
   };
 
-  while ((option = getopt_long(argc, argv, "D:d:c:P:ftb:vw:s:", option_map, NULL)) != -1)
+  while ((option = getopt_long(argc, argv, "D:d:c:P:ftb:vs:", option_map, NULL)) != -1)
     {
       switch (option)
 	{
-	  case 512:
-	    mdns_no_rsp = true;
-	    break;
-
-	  case 513:
-	    mdns_no_daap = true;
-	    break;
-
 	  case 514:
 	    mdns_no_cname = true;
 	    break;
@@ -592,10 +463,6 @@ main(int argc, char **argv)
 	  case 'v':
 	    version();
 	    return EXIT_SUCCESS;
-	    break;
-
-	  case 'w':
-	    webroot = optarg;
 	    break;
 
 	  case 's':
@@ -818,7 +685,7 @@ main(int argc, char **argv)
     }
 
   /* Spawn HTTPd thread */
-  ret = httpd_init(webroot);
+  ret = httpd_init();
   if (ret != 0)
     {
       DPRINTF(E_FATAL, L_MAIN, "HTTPd thread failed to start\n");
@@ -827,37 +694,8 @@ main(int argc, char **argv)
       goto httpd_fail;
     }
 
-#ifdef MPD
-  /* Spawn MPD thread */
-  ret = mpd_init();
-  if (ret != 0)
-    {
-      DPRINTF(E_FATAL, L_MAIN, "MPD thread failed to start\n");
-
-      ret = EXIT_FAILURE;
-      goto mpd_fail;
-    }
-#else
-  mdns_no_mpd = true;
-#endif
-
-#ifdef LASTFM
-  lastfm_init();
-#endif
-  listenbrainz_init();
-
-  /* Start Remote pairing service */
-  ret = remote_pairing_init();
-  if (ret != 0)
-    {
-      DPRINTF(E_FATAL, L_MAIN, "Remote pairing service failed to start\n");
-
-      ret = EXIT_FAILURE;
-      goto remote_fail;
-    }
-
   /* Register mDNS services */
-  ret = register_services(ffid, mdns_no_web, mdns_no_rsp, mdns_no_daap, mdns_no_mpd);
+  ret = register_services(ffid, mdns_no_web);
   if (ret < 0)
     {
       ret = EXIT_FAILURE;
@@ -937,16 +775,6 @@ main(int argc, char **argv)
  sig_event_fail:
  signalfd_fail:
  mdns_reg_fail:
-  DPRINTF(E_LOG, L_MAIN, "Remote pairing deinit\n");
-  remote_pairing_deinit();
-
- remote_fail:
-#ifdef MPD
-  DPRINTF(E_LOG, L_MAIN, "MPD deinit\n");
-  mpd_deinit();
-
- mpd_fail:
-#endif
   DPRINTF(E_LOG, L_MAIN, "HTTPd deinit\n");
   httpd_deinit();
 

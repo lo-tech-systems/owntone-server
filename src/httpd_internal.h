@@ -204,12 +204,6 @@ struct httpd_request {
 /*------------------------------ HTTPD FUNCTIONS -----------------------------*/
 
 void
-httpd_stream_file(struct httpd_request *hreq, int id);
-
-int
-httpd_xcode_profile_get(struct httpd_request *hreq);
-
-void
 httpd_request_handler_set(struct httpd_request *hreq);
 
 bool

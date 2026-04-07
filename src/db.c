@@ -44,7 +44,6 @@
 
 #include "conffile.h"
 #include "logger.h"
-#include "cache.h"
 #include "listener.h"
 #include "library.h"
 #include "misc.h"
@@ -2494,9 +2493,6 @@ db_query_run(char *query, int free, short update_events)
 
   DPRINTF(E_DBG, L_DB, "Running query '%s'\n", query);
 
-  /* If the query will be long running we don't want the cache to start regenerating */
-  cache_daap_suspend();
-
   ret = db_exec(query, &errmsg);
   if (ret != SQLITE_OK)
     DPRINTF(E_LOG, L_DB, "Error '%s' while runnning '%s'\n", errmsg, query);
@@ -2507,8 +2503,6 @@ db_query_run(char *query, int free, short update_events)
 
   if (free)
     sqlite3_free(query);
-
-  cache_daap_resume();
 
   if (update_events && changes > 0)
     library_update_trigger(update_events);

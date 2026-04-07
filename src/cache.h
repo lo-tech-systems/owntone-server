@@ -4,24 +4,6 @@
 
 #include <event2/buffer.h>
 
-/* ----------------------------- DAAP cache API  ---------------------------- */
-
-void
-cache_daap_suspend(void);
-
-void
-cache_daap_resume(void);
-
-int
-cache_daap_get(struct evbuffer *evbuf, const char *query);
-
-void
-cache_daap_add(const char *query, const char *ua, int is_remote, int msec);
-
-int
-cache_daap_threshold_get(void);
-
-
 /* --------------------------- Transcode cache API  ------------------------- */
 
 int

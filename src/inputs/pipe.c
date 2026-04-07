@@ -56,9 +56,7 @@
 #include "misc.h"
 #include "misc_xml.h"
 #include "logger.h"
-#include "db.h"
 #include "conffile.h"
-#include "listener.h"
 #include "player.h"
 #include "worker.h"
 #include "commands.h"
@@ -144,9 +142,11 @@ static struct commands_base *cmdbase;
 // From config - the sample rate and bps of the pipe input
 static int pipe_sample_rate;
 static int pipe_bits_per_sample;
-// From config - should we watch library pipes for data or only start on request
+// From config - path to the named pipe/FIFO
+static const char *pipe_path;
+// From config - should we watch the pipe for data or only start on request
 static int pipe_autostart;
-// The mfi id of the pipe autostarted by the pipe thread
+// The synthetic id used for the config-driven pipe (fixed)
 static int pipe_autostart_id;
 
 // Global list of pipes we are watching (if watching/autostart is enabled)
@@ -957,68 +957,23 @@ pipe_thread_stop(void)
   tid_pipe = 0;
 }
 
-// Makes a pipelist with pipe items from the db, returns NULL on no pipes
+// Makes a pipelist from the configured pipe_path. Uses a fixed synthetic id=1.
+// Returns NULL if no pipe_path is configured.
 static struct pipe *
 pipelist_create(void)
 {
-  struct query_params qp;
-  struct db_media_file_info dbmfi;
   struct pipe *head;
   struct pipe *pipe;
-  char filter[32];
-  int id;
-  int ret;
 
-  memset(&qp, 0, sizeof(struct query_params));
-  qp.type = Q_ITEMS;
-  qp.filter = filter;
-
-  snprintf(filter, sizeof(filter), "f.data_kind = %d", DATA_KIND_PIPE);
-
-  ret = db_query_start(&qp);
-  if (ret < 0)
+  if (!pipe_path)
     return NULL;
 
+  pipe = pipe_create(pipe_path, 1, PIPE_PCM, pipe_read_cb);
+
   head = NULL;
-  while ((ret = db_query_fetch_file(&dbmfi, &qp)) == 0)
-    {
-      ret = safe_atoi32(dbmfi.id, &id);
-      if (ret < 0)
-	continue;
-
-      pipe = pipe_create(dbmfi.path, id, PIPE_PCM, pipe_read_cb);
-      pipelist_add(&head, pipe);
-    }
-
-  db_query_end(&qp);
+  pipelist_add(&head, pipe);
 
   return head;
-}
-
-// Queries the db to see if any pipes are present in the library. If so, starts
-// the pipe thread to watch the pipes. If no pipes in library, it will shut down
-// the pipe thread.
-static void
-pipe_listener_cb(short event_mask, void *ctx)
-{
-  union pipe_arg *cmdarg;
-
-  cmdarg = malloc(sizeof(union pipe_arg));
-  if (!cmdarg)
-    return;
-
-  cmdarg->pipelist = pipelist_create();
-  if (!cmdarg->pipelist)
-    {
-      pipe_thread_stop();
-      free(cmdarg);
-      return;
-    }
-
-  if (!tid_pipe)
-    pipe_thread_start();
-
-  commands_exec_async(cmdbase, pipe_watch_update, cmdarg);
 }
 
 
@@ -1143,11 +1098,27 @@ init(void)
 
   pipe_metadata.prepared.pict_tmpfile_fd = -1;
 
+  pipe_path = cfg_getstr(cfg_getsec(cfg, "library"), "pipe_path");
+
   pipe_autostart = cfg_getbool(cfg_getsec(cfg, "library"), "pipe_autostart");
-  if (pipe_autostart)
+  if (pipe_autostart && pipe_path)
     {
-      pipe_listener_cb(0, NULL);
-      CHECK_ERR(L_PLAYER, listener_add(pipe_listener_cb, LISTENER_DATABASE, NULL));
+      union pipe_arg *cmdarg;
+
+      cmdarg = malloc(sizeof(union pipe_arg));
+      if (!cmdarg)
+        return -1;
+
+      cmdarg->pipelist = pipelist_create();
+      if (!cmdarg->pipelist)
+        {
+          free(cmdarg);
+        }
+      else
+        {
+          pipe_thread_start();
+          commands_exec_async(cmdbase, pipe_watch_update, cmdarg);
+        }
     }
 
   pipe_sample_rate = cfg_getint(cfg_getsec(cfg, "library"), "pipe_sample_rate");
@@ -1170,11 +1141,8 @@ init(void)
 static void
 deinit(void)
 {
-  if (pipe_autostart)
-    {
-      listener_remove(pipe_listener_cb);
-      pipe_thread_stop();
-    }
+  if (pipe_autostart && pipe_path)
+    pipe_thread_stop();
 
   CHECK_ERR(L_PLAYER, pthread_mutex_destroy(&pipe_metadata.prepared.lock));
 }

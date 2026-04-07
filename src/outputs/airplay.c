@@ -49,7 +49,6 @@
 #include "player.h"
 #include "db.h"
 #include "artwork.h"
-#include "dmap_common.h"
 #include "rtp_common.h"
 #include "transcode.h"
 #include "ptpd.h"
@@ -1681,7 +1680,6 @@ airplay_metadata_prepare(struct output_metadata *metadata)
 {
   struct db_queue_item *queue_item;
   struct airplay_metadata *rmd;
-  struct evbuffer *tmp;
   int ret;
 
   queue_item = db_queue_fetch_byitemid(metadata->item_id);
@@ -1693,8 +1691,6 @@ airplay_metadata_prepare(struct output_metadata *metadata)
 
   CHECK_NULL(L_AIRPLAY, rmd = calloc(1, sizeof(struct airplay_metadata)));
   CHECK_NULL(L_AIRPLAY, rmd->artwork = evbuffer_new());
-  CHECK_NULL(L_AIRPLAY, rmd->metadata = evbuffer_new());
-  CHECK_NULL(L_AIRPLAY, tmp = evbuffer_new());
 
   ret = artwork_get_by_queue_item_id(rmd->artwork, queue_item->id, ART_DEFAULT_WIDTH, ART_DEFAULT_HEIGHT, 0);
   if (ret < 0)
@@ -1706,15 +1702,7 @@ airplay_metadata_prepare(struct output_metadata *metadata)
 
   rmd->artwork_fmt = ret;
 
-  ret = dmap_encode_queue_metadata(rmd->metadata, tmp, queue_item);
-  evbuffer_free(tmp);
   free_queue_item(queue_item, 0);
-  if (ret < 0)
-    {
-      DPRINTF(E_LOG, L_AIRPLAY, "Could not encode file metadata; metadata will not be sent\n");
-      airplay_metadata_free(rmd);
-      return NULL;
-    }
 
   return rmd;
 }
@@ -1727,7 +1715,7 @@ airplay_metadata_send_generic(struct airplay_session *session, struct output_met
   if (session->wanted_metadata & AIRPLAY_MD_WANTS_PROGRESS)
     sequence_start(AIRPLAY_SEQ_SEND_PROGRESS, session, metadata, "SET_PARAMETER (progress)");
 
-  if (!only_progress && (session->wanted_metadata & AIRPLAY_MD_WANTS_TEXT))
+  if (!only_progress && (session->wanted_metadata & AIRPLAY_MD_WANTS_TEXT) && rmd->metadata)
     sequence_start(AIRPLAY_SEQ_SEND_TEXT, session, metadata, "SET_PARAMETER (text)");
 
   if (!only_progress && (session->wanted_metadata & AIRPLAY_MD_WANTS_ARTWORK) && rmd->artwork)

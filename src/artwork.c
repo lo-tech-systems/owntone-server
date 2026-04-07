@@ -45,9 +45,7 @@
 
 #include "artwork.h"
 
-#ifdef SPOTIFY
-# include "library/spotify_webapi.h"
-#endif
+
 
 /* This artwork module will look for artwork by consulting a set of sources one
  * at a time. A source is for instance the local library, the cache or a cover
@@ -1013,26 +1011,6 @@ artwork_get_byurl(struct evbuffer *artwork, const char *url, struct artwork_req_
 
 /* ------------------------- ONLINE SOURCE HANDLING  ----------------------- */
 
-#ifdef SPOTIFY
-static int
-credentials_get_spotify(char **auth_key, char **auth_secret)
-{
-  struct spotifywebapi_status_info webapi_info;
-  struct spotifywebapi_access_token webapi_token;
-
-  spotifywebapi_status_info_get(&webapi_info);
-  if (!webapi_info.token_valid)
-    return -1; // Not logged in
-
-  spotifywebapi_access_token_get(&webapi_token);
-  if (!webapi_token.token)
-    return -1;
-
-  *auth_key = NULL;
-  *auth_secret = webapi_token.token;
-  return 0;
-}
-#else
 static int
 credentials_get_spotify(char **auth_key, char **auth_secret)
 {
@@ -1040,7 +1018,6 @@ credentials_get_spotify(char **auth_key, char **auth_secret)
   *auth_secret = NULL;
   return 0;
 }
-#endif
 
 static int
 credentials_get_discogs(char **auth_key, char **auth_secret)
@@ -1756,47 +1733,6 @@ source_item_coverartarchive_get(struct artwork_ctx *ctx)
   return ret;
 }
 
-#ifdef SPOTIFY
-static int
-source_item_spotifywebapi_track_get(struct artwork_ctx *ctx)
-{
-  char *artwork_url;
-  int ret;
-
-  artwork_url = spotifywebapi_artwork_url_get(ctx->dbmfi->path, ctx->req_params.max_w, ctx->req_params.max_h);
-  if (!artwork_url)
-    {
-      DPRINTF(E_WARN, L_ART, "No artwork from Spotify for %s\n", ctx->dbmfi->path);
-      return ART_E_NONE;
-    }
-
-  ret = artwork_get_byurl(ctx->evbuf, artwork_url, ctx->req_params);
-
-  free(artwork_url);
-  return ret;
-}
-
-static int
-source_item_spotifywebapi_search_get(struct artwork_ctx *ctx)
-{
-  char *url;
-  int ret;
-
-  if (!online_source_is_enabled(&spotify_source))
-    return ART_E_NONE;
-
-  url = online_source_search(&spotify_source, ctx);
-  if (!url)
-    return ART_E_NONE;
-
-  snprintf(ctx->path, sizeof(ctx->path), "%s", url);
-
-  ret = artwork_get_byurl(ctx->evbuf, url, ctx->req_params);
-
-  free(url);
-  return ret;
-}
-#else
 static int
 source_item_spotifywebapi_track_get(struct artwork_ctx *ctx)
 {
@@ -1806,12 +1742,9 @@ source_item_spotifywebapi_track_get(struct artwork_ctx *ctx)
 static int
 source_item_spotifywebapi_search_get(struct artwork_ctx *ctx)
 {
-  // Silence compiler warning about spotify_source being unused
   (void)spotify_source;
-
   return ART_E_NONE;
 }
-#endif
 
 /* First looks of the mfi->path is in any playlist, and if so looks in the dir
  * of the playlist file (m3u et al) to see if there is any artwork. So if the

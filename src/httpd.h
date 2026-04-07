@@ -14,7 +14,7 @@ struct evbuffer *
 httpd_gzip_deflate(struct evbuffer *in);
 
 int
-httpd_init(const char *webroot);
+httpd_init(void);
 
 void
 httpd_deinit(void);

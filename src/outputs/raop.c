@@ -66,7 +66,6 @@
 #include "player.h"
 #include "db.h"
 #include "artwork.h"
-#include "dmap_common.h"
 #include "rtp_common.h"
 #include "transcode.h"
 #include "outputs.h"
@@ -2316,7 +2315,6 @@ raop_metadata_prepare(struct output_metadata *metadata)
 {
   struct db_queue_item *queue_item;
   struct raop_metadata *rmd;
-  struct evbuffer *tmp;
   int ret;
 
   queue_item = db_queue_fetch_byitemid(metadata->item_id);
@@ -2328,8 +2326,6 @@ raop_metadata_prepare(struct output_metadata *metadata)
 
   CHECK_NULL(L_RAOP, rmd = calloc(1, sizeof(struct raop_metadata)));
   CHECK_NULL(L_RAOP, rmd->artwork = evbuffer_new());
-  CHECK_NULL(L_RAOP, rmd->metadata = evbuffer_new());
-  CHECK_NULL(L_RAOP, tmp = evbuffer_new());
 
   ret = artwork_get_by_queue_item_id(rmd->artwork, queue_item->id, ART_DEFAULT_WIDTH, ART_DEFAULT_HEIGHT, 0);
   if (ret < 0)
@@ -2341,15 +2337,7 @@ raop_metadata_prepare(struct output_metadata *metadata)
 
   rmd->artwork_fmt = ret;
 
-  ret = dmap_encode_queue_metadata(rmd->metadata, tmp, queue_item);
-  evbuffer_free(tmp);
   free_queue_item(queue_item, 0);
-  if (ret < 0)
-    {
-      DPRINTF(E_LOG, L_RAOP, "Could not encode file metadata; metadata will not be sent\n");
-      raop_metadata_free(rmd);
-      return NULL;
-    }
 
   return rmd;
 }
@@ -2543,7 +2531,7 @@ raop_metadata_send_generic(struct raop_session *rs, struct output_metadata *meta
 	goto error;
     }
 
-  if (!only_progress && (rs->wanted_metadata & RAOP_MD_WANTS_TEXT))
+  if (!only_progress && (rs->wanted_metadata & RAOP_MD_WANTS_TEXT) && rmd->metadata)
     {
       ret = raop_metadata_send_text(rs, evbuf, rmd, rtptime);
       if (ret < 0)

@@ -12,7 +12,7 @@ endif
 
 BUILT_SOURCES = $(CONF_FILE) $(SYSTEMD_SERVICE_FILE) $(SYSTEMD_TSERVICE_FILE)
 
-SUBDIRS = sqlext src htdocs
+SUBDIRS = sqlext src
 
 dist_man_MANS = owntone.8
 

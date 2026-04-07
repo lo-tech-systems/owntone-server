@@ -54,19 +54,8 @@ enum output_types
 {
   OUTPUT_TYPE_RAOP,
   OUTPUT_TYPE_AIRPLAY,
-  OUTPUT_TYPE_STREAMING,
   OUTPUT_TYPE_DUMMY,
   OUTPUT_TYPE_FIFO,
-  OUTPUT_TYPE_RCP,
-#ifdef HAVE_ALSA
-  OUTPUT_TYPE_ALSA,
-#endif
-#ifdef HAVE_LIBPULSE
-  OUTPUT_TYPE_PULSE,
-#endif
-#ifdef CHROMECAST
-  OUTPUT_TYPE_CAST,
-#endif
 };
 
 /* Output session state */

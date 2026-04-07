@@ -12,16 +12,7 @@
 // Must be in sync with inputs[] in input.c
 enum input_types
 {
-  INPUT_TYPE_FILE,
-  INPUT_TYPE_HTTP,
   INPUT_TYPE_PIPE,
-  INPUT_TYPE_TIMER,
-#ifdef SPOTIFY_LIBRESPOTC
-  INPUT_TYPE_SPOTIFY,
-#endif
-#ifdef SPOTIFY_LIBSPOTIFY
-  INPUT_TYPE_LIBSPOTIFY,
-#endif
 };
 
 enum input_flags

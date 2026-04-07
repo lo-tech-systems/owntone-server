@@ -42,19 +42,8 @@
 
 extern struct output_definition output_raop;
 extern struct output_definition output_airplay;
-extern struct output_definition output_streaming;
 extern struct output_definition output_dummy;
 extern struct output_definition output_fifo;
-extern struct output_definition output_rcp;
-#ifdef HAVE_ALSA
-extern struct output_definition output_alsa;
-#endif
-#ifdef HAVE_LIBPULSE
-extern struct output_definition output_pulse;
-#endif
-#ifdef CHROMECAST
-extern struct output_definition output_cast;
-#endif
 
 /* From player.c */
 extern struct event_base *evbase_player;
@@ -63,19 +52,8 @@ extern struct event_base *evbase_player;
 static struct output_definition *outputs[] = {
     &output_raop,
     &output_airplay,
-    &output_streaming,
     &output_dummy,
     &output_fifo,
-    &output_rcp,
-#ifdef HAVE_ALSA
-    &output_alsa,
-#endif
-#ifdef HAVE_LIBPULSE
-    &output_pulse,
-#endif
-#ifdef CHROMECAST
-    &output_cast,
-#endif
     NULL
 };
 
