@@ -26,14 +26,10 @@ nobase_dist_doc_DATA = \
 	docs/building.md \
 	docs/development.md \
 	docs/changelog.md \
-	docs/library.md \
 	docs/control-clients/cli-api.md \
 	docs/audio-outputs/airplay.md \
 	docs/audio-outputs/chromecast.md \
-	docs/media-clients.md \
 	docs/artwork.md \
-	docs/playlists.md \
-	docs/smart-playlists.md \
 	docs/json-api.md \
 	scripts/pairinghelper.sh
 

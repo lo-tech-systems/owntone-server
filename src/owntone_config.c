@@ -68,6 +68,7 @@ gid_t    runas_gid;
 
 static json_object *root;
 static char        *config_path;
+static bool         restart_required_pending;
 
 
 /* -------------------- API-settable key registry --------------------------- */
@@ -75,10 +76,20 @@ static char        *config_path;
 static const char *api_settable_keys[] = {
   "loglevel",
   "pipe_autostart",
+  "ipv6",
   "start_buffer_ms",
   "uncompressed_alac",
   NULL
 };
+
+static bool
+config_key_requires_restart(const char *key)
+{
+  return (strcmp(key, "pipe_autostart") == 0
+       || strcmp(key, "ipv6") == 0
+       || strcmp(key, "start_buffer_ms") == 0
+       || strcmp(key, "uncompressed_alac") == 0);
+}
 
 bool
 config_is_api_settable(const char *key)
@@ -301,28 +312,69 @@ config_write(void)
 int
 config_set_str(const char *key, const char *value)
 {
+  const char *current;
+  int changed;
+  int ret;
+
   if (!config_is_api_settable(key))
     return -1;
+
+  current = config_get_str(key, NULL);
+  changed = ((current == NULL && value != NULL)
+          || (current != NULL && value == NULL)
+          || (current && value && strcmp(current, value) != 0));
+
   json_object_object_add(root, key, value ? json_object_new_string(value) : NULL);
-  return config_write();
+  ret = config_write();
+  if (ret == 0 && changed && config_key_requires_restart(key))
+    restart_required_pending = true;
+
+  return ret;
 }
 
 int
 config_set_int(const char *key, int value)
 {
+  int current;
+  int ret;
+
   if (!config_is_api_settable(key))
     return -1;
+
+  if (strcmp(key, "start_buffer_ms") == 0 && (value < 300 || value > 3500))
+    return -1;
+
+  current = config_get_int(key, INT_MIN);
   json_object_object_add(root, key, json_object_new_int(value));
-  return config_write();
+  ret = config_write();
+  if (ret == 0 && current != value && config_key_requires_restart(key))
+    restart_required_pending = true;
+
+  return ret;
 }
 
 int
 config_set_bool(const char *key, bool value)
 {
+  bool current;
+  int ret;
+
   if (!config_is_api_settable(key))
     return -1;
+
+  current = config_get_bool(key, !value);
   json_object_object_add(root, key, json_object_new_boolean(value));
-  return config_write();
+  ret = config_write();
+  if (ret == 0 && current != value && config_key_requires_restart(key))
+    restart_required_pending = true;
+
+  return ret;
+}
+
+bool
+config_restart_required_get(void)
+{
+  return restart_required_pending;
 }
 
 
@@ -350,6 +402,8 @@ config_load(const char *path)
       config_path = NULL;
       return -1;
     }
+
+  restart_required_pending = false;
 
   // libhash: stable 64-bit identity derived from hostname, used as the
   // AirPlay device ID (Client-Instance / DACP-ID headers, PTP clock seed).
@@ -412,4 +466,5 @@ config_unload(void)
     }
   free(config_path);
   config_path = NULL;
+  restart_required_pending = false;
 }

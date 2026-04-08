@@ -56,8 +56,6 @@
 #include <libavutil/log.h>
 #include <libavformat/avformat.h>
 #include <libavfilter/avfilter.h>
-#include <curl/curl.h>
-
 #include <pthread.h>
 #include <gcrypt.h>
 
@@ -496,9 +494,6 @@ main(int argc, char **argv)
 #endif
   av_log_set_callback(logger_ffmpeg);
 
-  /* Initialize libcurl */
-  curl_global_init(CURL_GLOBAL_DEFAULT);
-
   gcry_version = gcry_check_version(GCRYPT_VERSION);
   if (!gcry_version)
     {
@@ -696,7 +691,6 @@ main(int argc, char **argv)
 
  signal_block_fail:
  gcrypt_init_fail:
-  curl_global_cleanup();
 #if HAVE_DECL_AVFORMAT_NETWORK_INIT
   avformat_network_deinit();
 #endif

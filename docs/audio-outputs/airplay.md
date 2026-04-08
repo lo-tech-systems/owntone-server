@@ -1,19 +1,36 @@
 # AirPlay devices/speakers
 
-OwnTone will discover the AirPlay devices available on your network. For
-devices that are password-protected, the device's AirPlay name and password
+OwnTone will discover AirPlay and AirPlay 2 devices available on your network using
+mDNS.
+
+## Authentication
+
+Some devices require PIN verification, such as Apple TV.
+
+PIN-based authorization is supported through the HTTP API. Authentication state for
+each discovered output is also exposed through the API; see the API manual for details.
+
+-- TODO - implement API password protection support
+For devices that are password-protected, the device's AirPlay name and password
 must be given in the configuration file. See the sample configuration file
 for the syntax.
 
-If your Apple TV requires device verification (always required by Apple TV4 with
-tvOS 10.2) then you can do that through Settings > Remotes & Outputs in the web
-interface: Select the device and then enter the PIN that the Apple TV displays.
+## Silent Speakers
 
-If your speaker is silent when you start playback, and there is no obvious error
-message in the log, you can try disabling ipv6 in the config. Some speakers
-announce that they support ipv6, but for some reason don't work with OwnTone.
+There are at least two potential causes of apparently successful (but still silent)
+playback:
 
-If the speaker becomes unselected when you start playback, and you in the log
-see "ANNOUNCE request failed in session startup: 400 Bad Request", then try
-the Apple Home app > Allow Speakers & TV Access > Anyone On the Same Network
-(or Everyone).
+1. Some speakers announce IPv6 support, but don't work with OwnTone. Disabling IPv6
+   (requires restart) will resolve this.
+
+2. If the overall offset is too short, the speaker may continually request
+   retransmission and never actually play anything. The default values are 0 for
+   the per-device offset_ms and 2,250ms for the start_buffer_ms. The combined value
+   of these can generally be reduced (which reduces latency) to somewhere between
+   500 to 1,000ms.
+
+## Permissions
+
+If the speaker becomes unselected when you start playback, the log may show "ANNOUNCE
+request failed in session startup: 400 Bad Request". In this case, try the Apple Home
+app > Allow Speakers & TV Access > Anyone On the Same Network (or Everyone).

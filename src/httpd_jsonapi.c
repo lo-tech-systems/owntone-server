@@ -164,7 +164,8 @@ struct setting_entry {
 static const struct setting_entry settings_table[] = {
   { "misc",   "loglevel",          SETTING_TYPE_INT,  "loglevel"          },
   { "misc",   "pipe_autostart",    SETTING_TYPE_BOOL, "pipe_autostart"    },
-  { "misc",   "start_buffer_ms",   SETTING_TYPE_INT,  "start_buffer_ms"   },
+  { "misc",   "ipv6",              SETTING_TYPE_BOOL, "ipv6"              },
+  { "player", "start_buffer_ms",   SETTING_TYPE_INT,  "start_buffer_ms"   },
   { "player", "uncompressed_alac", SETTING_TYPE_BOOL, "uncompressed_alac" },
 };
 
@@ -221,6 +222,7 @@ jsonapi_reply_settings_option_put(struct httpd_request *hreq)
   const char *optionname   = hreq->path_parts[3];
   const struct setting_entry *entry;
   json_object *request;
+  json_object *jreply;
   int ret = 0;
 
   entry = settings_entry_lookup(categoryname, optionname);
@@ -257,9 +259,14 @@ jsonapi_reply_settings_option_put(struct httpd_request *hreq)
       return HTTP_INTERNAL;
     }
 
+  CHECK_NULL(L_WEB, jreply = json_object_new_object());
+  json_object_object_add(jreply, "restart_required", json_object_new_boolean(config_restart_required_get()));
+  CHECK_ERRNO(L_WEB, evbuffer_add_printf(hreq->out_body, "%s", json_object_to_json_string(jreply)));
+
   DPRINTF(E_INFO, L_WEB, "Setting '%s/%s' changed to '%s'\n", categoryname, optionname, json_object_to_json_string(request));
+  jparse_free(jreply);
   jparse_free(request);
-  return HTTP_NOCONTENT;
+  return HTTP_OK;
 }
 /*
  * Endpoint to retrieve informations about the library
@@ -284,6 +291,33 @@ jsonapi_reply_library(struct httpd_request *hreq)
   json_object_object_add(jreply, "updating", json_object_new_boolean(false));
   json_object_object_add(jreply, "songs", json_object_new_int(1));
   json_object_object_add(jreply, "Healthy", json_object_new_boolean(true));
+  json_object_object_add(jreply, "restart_required", json_object_new_boolean(config_restart_required_get()));
+
+  CHECK_ERRNO(L_WEB, evbuffer_add_printf(hreq->out_body, "%s", json_object_to_json_string(jreply)));
+  jparse_free(jreply);
+
+  return HTTP_OK;
+}
+
+static int
+jsonapi_reply_config(struct httpd_request *hreq)
+{
+  json_object *jreply;
+  json_object *jbuildopts;
+  char **buildopts;
+  int i;
+
+  CHECK_NULL(L_WEB, jreply = json_object_new_object());
+  CHECK_NULL(L_WEB, jbuildopts = json_object_new_array());
+
+  buildopts = buildopts_get();
+  for (i = 0; buildopts[i]; i++)
+    json_object_array_add(jbuildopts, json_object_new_string(buildopts[i]));
+
+  json_object_object_add(jreply, "version", json_object_new_string(PACKAGE_VERSION));
+  json_object_object_add(jreply, "websocket_port", json_object_new_int(0));
+  json_object_object_add(jreply, "buildoptions", jbuildopts);
+  json_object_object_add(jreply, "restart_required", json_object_new_boolean(config_restart_required_get()));
 
   CHECK_ERRNO(L_WEB, evbuffer_add_printf(hreq->out_body, "%s", json_object_to_json_string(jreply)));
   jparse_free(jreply);
@@ -671,7 +705,8 @@ static struct httpd_uri_map adm_handlers[] =
     { HTTPD_METHOD_PUT,    "^/api/player/stop$",                           jsonapi_reply_player_stop },
     { HTTPD_METHOD_PUT,    "^/api/player/play$",                           jsonapi_reply_player_play },
 
-    /* Library (health check) and update (config reload) */
+    /* Server info, library (health check) and update (config reload) */
+    { HTTPD_METHOD_GET,    "^/api/config$",                                jsonapi_reply_config },
     { HTTPD_METHOD_GET,    "^/api/library$",                               jsonapi_reply_library },
     { HTTPD_METHOD_PUT,    "^/api/update$",                                jsonapi_reply_update },
 

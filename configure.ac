@@ -21,15 +21,6 @@ AC_PROG_MKDIR_P
 LT_INIT([disable-static])
 
 
-AX_PROG_FLEX([AC_DEFINE([LEX], [flex], [flex found])],
-	[AS_IF([test ! -f "$srcdir/src/parsers/smartpl_lexer.c"],
-		[AC_MSG_ERROR([flex required, please install it])])
-	])
-AX_PROG_BISON([AC_DEFINE([YACC], [bison], [GNU bison found])],
-	[AS_IF([test ! -f "$srcdir/src/parsers/smartpl_parser.c"],
-		[AC_MSG_ERROR([GNU bison required, please install it])])
-	])
-
 dnl Enable all warnings by default.
 AM_CPPFLAGS="-Wall"
 AC_SUBST([AM_CPPFLAGS])
@@ -101,9 +92,6 @@ AC_SEARCH_LIBS([copy_file_range], [c],
 AC_SEARCH_LIBS([fcopyfile], [c],
 	[AC_DEFINE([HAVE_FCOPYFILE], 1,
 		[Define to 1 if you have fcopyfile])])
-AC_SEARCH_LIBS([mnt_new_monitor], [mount],
-	[AC_DEFINE([HAVE_LIBMOUNT], 1,
-		[Define to 1 if you have libmount])])
 
 AC_SEARCH_LIBS([log10], [m])
 AC_SEARCH_LIBS([lrint], [m])
@@ -132,10 +120,8 @@ OWNTONE_FUNC_REQUIRE([COMMON], [GNU libunistring], [LIBUNISTRING], [unistring],
 		[unistring], [u8_strconv_from_locale], [uniconv.h])])
 
 OWNTONE_MODULES_CHECK([OWNTONE], [ZLIB], [zlib], [deflate], [zlib.h])
-dnl libconfuse removed: config is now JSON-based (see src/config.c)
-OWNTONE_MODULES_CHECK([OWNTONE], [LIBCURL], [libcurl], [curl_global_init], [curl/curl.h])
+dnl libconfuse removed: config is now JSON-based (see src/owntone_config.c)
 OWNTONE_MODULES_CHECK([OWNTONE], [LIBSODIUM], [libsodium], [sodium_init], [sodium.h])
-OWNTONE_MODULES_CHECK([OWNTONE], [LIBXML2], [libxml-2.0], [xmlInitParser], [libxml/parser.h])
 
 dnl SQLite3 removed: all queue/speaker state is now in-memory (see src/queue.c)
 
@@ -192,9 +178,6 @@ AC_CHECK_HEADER([sys/eventfd.h], [AC_CHECK_FUNCS([eventfd])])
 
 AC_CHECK_HEADER([sys/timerfd.h], [AC_CHECK_FUNC([timerfd_create],
 	[AC_DEFINE([HAVE_TIMERFD], 1, [Define to 1 if you have timerfd])])])
-
-OWNTONE_FUNC_REQUIRE([OWNTONE], [inotify], [INOTIFY], [inotify],
-	[inotify_add_watch], [sys/inotify.h])
 
 have_signal=no
 AC_CHECK_HEADER([sys/signalfd.h], [AC_CHECK_FUNCS([signalfd], [have_signal=yes])])
@@ -323,7 +306,6 @@ dnl --- End options ---
 dnl Unconditional since we always want to produce Makefiles for dist targets
 AC_CONFIG_SUBDIRS([
 	src/libairptp
-	src/inputs/librespot-c
 ])
 
 AC_CONFIG_FILES([
