@@ -376,6 +376,32 @@ config_load(const char *path)
   return 0;
 }
 
+/*
+ * Reload JSON from the same file used by config_load().
+ * Does not re-derive libhash or runas_uid — only refreshes the key/value store.
+ * Returns 0 on success, -1 if no path is set or the file cannot be parsed.
+ */
+int
+config_reload(void)
+{
+  json_object *new_root;
+
+  if (!config_path)
+    return -1;
+
+  new_root = json_object_from_file(config_path);
+  if (!new_root)
+    {
+      DPRINTF(E_LOG, L_CONF, "config_reload: could not parse '%s'\n", config_path);
+      return -1;
+    }
+
+  if (root)
+    json_object_put(root);
+  root = new_root;
+  return 0;
+}
+
 void
 config_unload(void)
 {

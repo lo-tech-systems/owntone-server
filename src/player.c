@@ -74,7 +74,6 @@
 #include "queue.h"
 #include "logger.h"
 #include "owntone_config.h"
-#include "settings.h"
 #include "misc.h"
 #include "player.h"
 #include "worker.h"
@@ -118,11 +117,6 @@
 // Shorthand condition for outputs_start and outputs_device_start, both need to
 // know if they should only probe the device, or fully start it.
 #define PLAYER_ONLY_PROBE (player_state != PLAY_PLAYING)
-
-// Name of settings used by player
-#define PLAYER_SETTINGS_MODE_REPEAT "player_mode_repeat"
-#define PLAYER_SETTINGS_MODE_SHUFFLE "player_mode_shuffle"
-#define PLAYER_SETTINGS_MODE_CONSUME "player_mode_consume"
 
 //#define DEBUG_PLAYER 1
 
@@ -308,9 +302,6 @@ static int clear_queue_on_stop_disabled;
 
 // Player status
 static enum play_status player_state;
-static enum repeat_mode repeat;
-static char shuffle;
-static char consume;
 
 // Playback timer
 #ifdef HAVE_TIMERFD
@@ -333,10 +324,6 @@ static bool pb_write_recovery;
 
 // Audio source
 static uint32_t cur_plid;
-static uint32_t cur_plversion;
-
-// Play history
-static struct player_history *history;
 
 // When we receive track metadata from the input we have to wait until playback
 // has reached the position before using it. We use this to record the update.
@@ -370,85 +357,7 @@ status_update_impl(enum play_status status, short listener_events, const char *c
   listener_notify(listener_events);
 }
 
-/*
- * Add the song with the given id to the list of previously played songs
- */
-static void
-history_add(uint32_t id, uint32_t item_id)
-{
-  unsigned int cur_index;
-  unsigned int next_index;
-
-  // Check if the current song is already the last in the history to avoid duplicates
-  cur_index = (history->start_index + history->count - 1) % MAX_HISTORY_COUNT;
-  if (id == history->id[cur_index])
-    {
-      DPRINTF(E_DBG, L_PLAYER, "Current playing/streaming song already in history\n");
-      return;
-    }
-
-  // Calculate the next index and update the start-index and count for the id-buffer
-  next_index = (history->start_index + history->count) % MAX_HISTORY_COUNT;
-  if (next_index == history->start_index && history->count > 0)
-    history->start_index = (history->start_index + 1) % MAX_HISTORY_COUNT;
-
-  history->id[next_index] = id;
-  history->item_id[next_index] = item_id;
-
-  if (history->count < MAX_HISTORY_COUNT)
-    history->count++;
-}
-
-/*
- * Returns the next queue item based on the current streaming source and repeat mode
- *
- * If repeat mode is repeat all, shuffle is active and the current streaming source is the
- * last item in the queue, the queue is reshuffled prior to returning the first item of the
- * queue.
- */
-static struct db_queue_item *
-queue_item_next(uint32_t item_id)
-{
-  struct db_queue_item *queue_item;
-
-  if (repeat == REPEAT_SONG)
-    {
-      queue_item = db_queue_fetch_byitemid(item_id);
-      if (!queue_item)
-        goto error;
-    }
-  else
-    {
-      queue_item = db_queue_fetch_next(item_id, shuffle);
-      if (!queue_item && repeat == REPEAT_ALL)
-	{
-	  if (shuffle)
-	    db_queue_reshuffle(0);
-
-	  queue_item = db_queue_fetch_bypos(0, shuffle);
-	  if (!queue_item)
-	    goto error;
-	}
-    }
-
-  if (!queue_item)
-    {
-      DPRINTF(E_DBG, L_PLAYER, "Reached end of queue\n");
-      return NULL;
-    }
-
-  return queue_item;
-
- error:
-  DPRINTF(E_LOG, L_PLAYER, "Error fetching next item from queue (item-id=%" PRIu32 ", repeat=%d)\n", item_id, repeat);
-  return NULL;
-}
-
-static struct db_queue_item *
-queue_item_prev(uint32_t item_id)
-{
-  return db_queue_fetch_prev(item_id, shuffle);
-}
+/* history_add, queue_item_next, queue_item_prev removed (no shuffle/repeat/consume) */
 
 
 /* ------ All this is for dealing with metadata received from the input ----- */
@@ -626,7 +535,8 @@ source_next_create(struct player_source *current)
       return NULL;
     }
 
-  queue_item = queue_item_next(current->item_id);
+  // Single-item fifo queue: there is no next item
+  queue_item = db_queue_fetch_next(current->item_id, 0);
   if (!queue_item)
     return NULL;
 
@@ -1043,11 +953,6 @@ static void
 event_play_eof()
 {
   DPRINTF(E_DBG, L_PLAYER, "event_play_eof()\n");
-
-  history_add(pb_session.playing_now->id, pb_session.playing_now->item_id);
-
-  if (consume)
-    db_queue_delete_byitemid(pb_session.playing_now->item_id);
 
   if (pb_session.playing_now->next)
     outputs_metadata_send(pb_session.playing_now->next->item_id, false, metadata_finalize_cb);
@@ -1853,9 +1758,9 @@ get_status(void *arg, int *retval)
 
   memset(status, 0, sizeof(struct player_status));
 
-  status->shuffle = shuffle;
-  status->consume = consume;
-  status->repeat = repeat;
+  status->shuffle = 0;
+  status->consume = 0;
+  status->repeat = REPEAT_OFF;
 
   status->volume = outputs_volume_get();
 
@@ -1933,9 +1838,6 @@ playback_stop(void *arg, int *retval)
       *retval = 0;
       return COMMAND_END;
     }
-
-  if (pb_session.playing_now && pb_session.playing_now->pos_ms > 0)
-    history_add(pb_session.playing_now->id, pb_session.playing_now->item_id);
 
   // We may be restarting very soon, so we don't bring the devices to a full
   // stop just yet; this saves time when restarting, which is nicer for the user
@@ -2082,7 +1984,7 @@ playback_start_id(void *arg, int *retval)
   if (player_state == PLAY_STOPPED)
     {
       /* Pipe-only build: the single queue item is always at position 0 */
-      queue_item = db_queue_fetch_bypos(0, shuffle);
+      queue_item = db_queue_fetch_bypos(0, 0);
       if (!queue_item)
         return COMMAND_END;
     }
@@ -2105,7 +2007,7 @@ playback_start(void *arg, int *retval)
   if (player_state == PLAY_STOPPED)
     {
       // Start playback of first item in queue
-      queue_item = db_queue_fetch_bypos(0, shuffle);
+      queue_item = db_queue_fetch_bypos(0, 0);
       if (!queue_item)
 	return COMMAND_END;
     }
@@ -2130,16 +2032,8 @@ playback_prev_bh(void *arg, int *retval)
       goto error;
     }
 
-  // Only add to history if playback started
-  if (pb_session.playing_now->pos_ms > 0)
-    history_add(pb_session.playing_now->id, pb_session.playing_now->item_id);
-
-  // Only skip to the previous song if the playing time is less than 3 seconds
-  if (pb_session.playing_now->pos_ms < 3000)
-    queue_item = queue_item_prev(pb_session.playing_now->item_id);
-  // If there is no previous item in the queue or playing time is greater than 3 seconds, restart the current item
-  if (!queue_item)
-    queue_item = db_queue_fetch_byitemid(pb_session.playing_now->item_id);
+  // Restart the current item (only one item in queue for a fifo source)
+  queue_item = db_queue_fetch_byitemid(pb_session.playing_now->item_id);
   if (!queue_item)
     {
       DPRINTF(E_DBG, L_PLAYER, "Error finding previous source, queue item has disappeared\n");
@@ -2169,46 +2063,8 @@ playback_prev_bh(void *arg, int *retval)
 static enum command_state
 playback_next_bh(void *arg, int *retval)
 {
-  struct db_queue_item *queue_item;
-  int ret;
-
-  // outputs_flush() in playback_pause() may have a caused a failure callback
-  // from the output, which in streaming_cb() can cause pb_abort()
-  if (player_state == PLAY_STOPPED)
-    {
-      goto error;
-    }
-
-  // Only add to history if playback started
-  if (pb_session.playing_now->pos_ms > 0)
-    history_add(pb_session.playing_now->id, pb_session.playing_now->item_id);
-
-  queue_item = queue_item_next(pb_session.playing_now->item_id);
-
-  if (consume)
-    db_queue_delete_byitemid(pb_session.playing_now->item_id);
-
-  if (!queue_item)
-    {
-      DPRINTF(E_DBG, L_PLAYER, "Error finding next source, end of queue reached or queue item has disappeared\n");
-      goto error;
-    }
-
-  ret = pb_session_start(queue_item, 0);
-  free_queue_item(queue_item, 0);
-  if (ret < 0)
-    {
-      DPRINTF(E_DBG, L_PLAYER, "Error skipping to next item, aborting playback\n");
-      goto error;
-    }
-
-  // Silent status change - playback_start() sends the real status update
-  player_state = PLAY_PAUSED;
-
-  *retval = 0;
-  return COMMAND_END;
-
- error:
+  // Single-item fifo queue: no next item — stop playback
+  DPRINTF(E_DBG, L_PLAYER, "No next source, end of queue reached\n");
   pb_abort();
   *retval = -1;
   return COMMAND_END;
@@ -2226,78 +2082,24 @@ playback_next_bh(void *arg, int *retval)
 static int
 seek_calc_position_ms(struct db_queue_item **queue_item, int *position_ms, struct player_seek_param *seek_param)
 {
-  struct db_queue_item *seek_queue_item = NULL;
-  int seek_ms = 0;
+  int seek_ms;
 
-  // Initialize out parameters
-  *queue_item = NULL;
-  *position_ms = 0;
-
-  // Calculate seek position
+  // Calculate seek position and clamp to [0, ...] for single-item fifo queue
   if (seek_param->mode == PLAYER_SEEK_POSITION)
     seek_ms = seek_param->ms;
   else
     seek_ms = pb_session.playing_now->pos_ms + seek_param->ms;
 
-  // Check if we need to switch to a previous track, this will be done if we are in the first 3 seconds
-  // of a track and we have a seek request for more than 3 seconds
   if (seek_ms < 0)
-    {
-      if (pb_session.playing_now->pos_ms < 3000)
-	{
-	  // We are in the first 3 seconds of the track, switch to the previous track and recalculate the absolute seek position
-	  seek_queue_item = queue_item_prev(pb_session.playing_now->item_id);
+    seek_ms = 0;
 
-	  if (seek_queue_item)
-	    {
-	      seek_ms = seek_queue_item->song_length + seek_ms;
-	      // Make sure to not try to seek behind the previous track (this is also the case if song_length is zero)
-	      seek_ms = (seek_ms < 0) ? 0 : seek_ms;
-	    }
-	  else
-	    {
-	      // There is no previous queue item, seek to the start of the current item
-	      seek_ms = 0;
-	    }
-	}
-      else
-	{
-	  // We are more than 3 seconds into the playing track, seek to beginning of current track
-	  seek_ms = 0;
-	}
-    }
-  else if (seek_ms > 0 && seek_ms > pb_session.playing_now->len_ms)
+  *queue_item = db_queue_fetch_byitemid(pb_session.playing_now->item_id);
+  if (!*queue_item)
     {
-      // We are seeking beyond the current track, play the next track from the beginning
-      seek_queue_item = queue_item_next(pb_session.playing_now->item_id);
-      if (seek_queue_item)
-	{
-	  seek_ms = 0;
-	}
-      else
-	{
-	  // There is no next queue item, we will seek beyond the length of the current track which will result in stopping playback
-	  DPRINTF(E_DBG, L_PLAYER, "Seeking beyond the last queue item (seek_ms=%d, seek_mode=%d)\n", seek_param->ms, seek_param->mode);
-	}
+      DPRINTF(E_LOG, L_PLAYER, "Error fetching queue item for seek (seek_ms=%d)\n", seek_ms);
+      return -1;
     }
 
-  if (!seek_queue_item)
-    {
-      // Seeking in the current queue item
-      seek_queue_item = db_queue_fetch_byitemid(pb_session.playing_now->item_id);
-
-      if (!seek_queue_item)
-	{
-	  DPRINTF(E_LOG, L_PLAYER, "Error fetching queue item for seek command (seek_ms=%d, seek_mode=%d)\n", seek_param->ms, seek_param->mode);
-	  return -1;
-	}
-    }
-
-
-  DPRINTF(E_DBG, L_PLAYER, "Seek position for seek command (seek_ms=%d, seek_mode=%d) is: seek_ms=%d, queue item id=%d\n",
-	  seek_param->ms, seek_param->mode, seek_ms, seek_queue_item->id);
-
-  *queue_item = seek_queue_item;
   *position_ms = seek_ms;
   return 0;
 }
@@ -3066,141 +2868,12 @@ volume_generic_bh(void *arg, int *retval)
 }
 
 static enum command_state
-consume_set(void *arg, int *retval);
-
-static enum command_state
-repeat_set(void *arg, int *retval)
-{
-  enum repeat_mode *mode = arg;
-  union player_arg consume_arg;
-
-  if (*mode == repeat)
-    {
-      *retval = 0;
-      return COMMAND_END;
-    }
-
-  switch (*mode)
-    {
-      case REPEAT_OFF:
-      case REPEAT_SONG:
-      case REPEAT_ALL:
-	repeat = *mode;
-	break;
-
-      default:
-	DPRINTF(E_LOG, L_PLAYER, "Invalid repeat mode: %d\n", *mode);
-	*retval = -1;
-	return COMMAND_END;
-    }
-
-  // Persist
-  SETTINGS_SETINT("player", PLAYER_SETTINGS_MODE_REPEAT, repeat);
-
-  if (repeat == REPEAT_ALL || repeat == REPEAT_SONG)
-    {
-      // Activating repeat requires repeat consume mode to be off
-      consume_arg.intval = 0;
-      consume_set(&consume_arg, retval);
-    }
-
-  *retval = 0;
-  return COMMAND_END;
-}
-
-static enum command_state
-shuffle_set(void *arg, int *retval)
-{
-  union player_arg *cmdarg = arg;
-  char new_shuffle;
-
-  new_shuffle = (cmdarg->intval == 0) ? 0 : 1;
-
-  // Ignore unchanged shuffle mode requests
-  if (new_shuffle == shuffle)
-    goto out;
-
-  // Update queue and notify listeners
-  if (new_shuffle)
-    {
-      if (pb_session.playing_now)
-	db_queue_reshuffle(pb_session.playing_now->item_id);
-      else
-	db_queue_reshuffle(0);
-    }
-  else
-    {
-      db_queue_inc_version();
-    }
-
-  // Update shuffle mode
-  shuffle = new_shuffle;
-
-  // Persist
-  SETTINGS_SETBOOL("player", PLAYER_SETTINGS_MODE_SHUFFLE, shuffle);
-
- out:
-  *retval = 0;
-  return COMMAND_END;
-}
-
-static enum command_state
-consume_set(void *arg, int *retval)
-{
-  enum repeat_mode repeat_mode;
-  union player_arg *cmdarg = arg;
-
-  consume = cmdarg->intval;
-
-  // Persist
-  SETTINGS_SETBOOL("player", PLAYER_SETTINGS_MODE_CONSUME, consume);
-
-  if (consume)
-    {
-      // Activating cosume mode requires repeat mode to be off
-      repeat_mode = REPEAT_OFF;
-      repeat_set(&repeat_mode, retval);
-    }
-
-  *retval = 0;
-  return COMMAND_END;
-}
-
-static enum command_state
-options_generic_bh(void *arg, int *retval)
-{
-  status_update(player_state, LISTENER_OPTIONS);
-  return COMMAND_END;
-}
-
-/*
- * Removes all items from the history
- */
-static enum command_state
-playerqueue_clear_history(void *arg, int *retval)
-{
-  memset(history, 0, sizeof(struct player_history));
-
-  cur_plversion++; // TODO [db_queue] need to update db queue version
-
-  *retval = 0;
-  return COMMAND_END;
-}
-
-static enum command_state
 playerqueue_plid(void *arg, int *retval)
 {
   union player_arg *cmdarg = arg;
   cur_plid = cmdarg->id;
 
   *retval = 0;
-  return COMMAND_END;
-}
-
-static enum command_state
-playerqueue_generic_bh(void *arg, int *retval)
-{
-  status_update(player_state, LISTENER_QUEUE);
   return COMMAND_END;
 }
 
@@ -3621,48 +3294,6 @@ player_volume_setraw_speaker(uint64_t id, const char *volstr)
   return ret;
 }
 
-int
-player_repeat_set(enum repeat_mode mode)
-{
-  int ret;
-
-  ret = commands_exec_sync(cmdbase, repeat_set, options_generic_bh, &mode);
-
-  return ret;
-}
-
-int
-player_shuffle_set(int enable)
-{
-  union player_arg cmdarg;
-  int ret;
-
-  cmdarg.intval = enable;
-
-  ret = commands_exec_sync(cmdbase, shuffle_set, options_generic_bh, &cmdarg);
-
-  return ret;
-}
-
-int
-player_consume_set(int enable)
-{
-  union player_arg cmdarg;
-  int ret;
-
-  cmdarg.intval = enable;
-
-  ret = commands_exec_sync(cmdbase, consume_set, options_generic_bh, &cmdarg);
-
-  return ret;
-}
-
-void
-player_queue_clear_history()
-{
-  commands_exec_sync(cmdbase, playerqueue_clear_history, playerqueue_generic_bh, NULL);
-}
-
 void
 player_queue_plid(uint32_t plid)
 {
@@ -3671,12 +3302,6 @@ player_queue_plid(uint32_t plid)
   cmdarg.id = plid;
 
   commands_exec_sync(cmdbase, playerqueue_plid, NULL, &cmdarg);
-}
-
-struct player_history *
-player_history_get(void)
-{
-  return history;
 }
 
 
@@ -3772,14 +3397,7 @@ player_init(void)
 
   db_queue_set_pipe(config_get_str("pipe_path", NULL));
 
-  ret = SETTINGS_GETINT("player", PLAYER_SETTINGS_MODE_REPEAT);
-  repeat = (ret > 0) ? ret : REPEAT_OFF;
-  shuffle = SETTINGS_GETBOOL("player", PLAYER_SETTINGS_MODE_SHUFFLE);
-  consume = SETTINGS_GETBOOL("player", PLAYER_SETTINGS_MODE_CONSUME);
-
   player_state = PLAY_STOPPED;
-
-  CHECK_NULL(L_PLAYER, history = calloc(1, sizeof(struct player_history)));
 
   // Determine if the resolution of the system timer is > or < the size
   // of an audio packet. NOTE: this assumes the system clock resolution
@@ -3787,7 +3405,7 @@ player_init(void)
   if (clock_getres(CLOCK_MONOTONIC, &player_timer_res) < 0)
     {
       DPRINTF(E_LOG, L_PLAYER, "Could not get the system timer resolution.\n");
-      goto error_history_free;
+      return -1;
     }
 
   if (!config_get_bool("high_resolution_clock", true))
@@ -3812,7 +3430,7 @@ player_init(void)
   if (ret < 0)
     {
       DPRINTF(E_LOG, L_PLAYER, "Could not create playback timer: %s\n", strerror(errno));
-      goto error_history_free;
+      return -1;
     }
 
   CHECK_NULL(L_PLAYER, evbase_player = event_base_new());
@@ -3859,9 +3477,6 @@ player_init(void)
 #else
   timer_delete(pb_timer);
 #endif
- error_history_free:
-  free(history);
-
   return -1;
 }
 
@@ -3892,8 +3507,6 @@ player_deinit(void)
 
       return;
     }
-
-  free(history);
 
   event_free(pb_timer_ev);
   event_base_free(evbase_player);

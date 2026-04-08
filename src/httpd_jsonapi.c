@@ -43,20 +43,14 @@
 
 #include "httpd_internal.h"
 #include "owntone_config.h"
-#include "db.h"
-#ifdef LASTFM
-# include "lastfm.h"
-#endif
+#include "queue.h"
 #include "logger.h"
 #include "misc.h"
 #include "misc_json.h"
 #include "player.h"
-#include "settings.h"
 
 
 
-static bool allow_modifying_stored_playlists;
-static char *default_playlist_directory;
 static inline void
 safe_json_add_string(json_object *obj, const char *key, const char *value)
 {
@@ -155,160 +149,116 @@ safe_json_add_date_from_string(json_object *obj, const char *key, const char *va
 
   json_object_object_add(obj, key, json_object_new_string(result));
 }
-/* --------------------------- REPLY HANDLERS ------------------------------- */
-static json_object *
-option_get_json(struct settings_option *option)
+/* ---- Flat settings table backed by owntone_config ---- */
+#define SETTING_TYPE_INT  0
+#define SETTING_TYPE_BOOL 1
+#define SETTING_TYPE_STR  2
+
+struct setting_entry {
+  const char *category;
+  const char *name;
+  int         type;
+  const char *config_key;
+};
+
+static const struct setting_entry settings_table[] = {
+  { "misc",   "loglevel",          SETTING_TYPE_INT,  "loglevel"          },
+  { "misc",   "pipe_autostart",    SETTING_TYPE_BOOL, "pipe_autostart"    },
+  { "misc",   "start_buffer_ms",   SETTING_TYPE_INT,  "start_buffer_ms"   },
+  { "player", "uncompressed_alac", SETTING_TYPE_BOOL, "uncompressed_alac" },
+};
+
+static const struct setting_entry *
+settings_entry_lookup(const char *category, const char *name)
 {
-  const char *optionname;
-  json_object *json_option;
-  int intval;
-  bool boolval;
-  char *strval;
+  size_t i;
 
-
-  optionname = option->name;
-
-  CHECK_NULL(L_WEB, json_option = json_object_new_object());
-  json_object_object_add(json_option, "name", json_object_new_string(option->name));
-  json_object_object_add(json_option, "type", json_object_new_int(option->type));
-
-  if (option->type == SETTINGS_TYPE_INT)
+  for (i = 0; i < ARRAY_SIZE(settings_table); i++)
     {
-      intval = settings_option_getint(option);
-      json_object_object_add(json_option, "value", json_object_new_int(intval));
+      if (strcasecmp(settings_table[i].category, category) == 0 &&
+          strcasecmp(settings_table[i].name, name) == 0)
+        return &settings_table[i];
     }
-  else if (option->type == SETTINGS_TYPE_BOOL)
-    {
-      boolval = settings_option_getbool(option);
-      json_object_object_add(json_option, "value", json_object_new_boolean(boolval));
-    }
-  else if (option->type == SETTINGS_TYPE_STR)
-    {
-      strval = settings_option_getstr(option);
-      if (strval)
-	{
-	  json_object_object_add(json_option, "value", json_object_new_string(strval));
-	  free(strval);
-	}
-    }
-  else
-    {
-      DPRINTF(E_LOG, L_WEB, "Option '%s' has unknown type %d\n", optionname, option->type);
-      jparse_free(json_option);
-      return NULL;
-    }
-
-  return json_option;
+  return NULL;
 }
+
+/* --------------------------- REPLY HANDLERS ------------------------------- */
 static int
 jsonapi_reply_settings_option_get(struct httpd_request *hreq)
 {
-  const char *categoryname;
-  const char *optionname;
-  struct settings_category *category;
-  struct settings_option *option;
+  const char *categoryname = hreq->path_parts[2];
+  const char *optionname   = hreq->path_parts[3];
+  const struct setting_entry *entry;
   json_object *jreply;
 
-
-  categoryname = hreq->path_parts[2];
-  optionname = hreq->path_parts[3];
-
-  category = settings_category_get(categoryname);
-  if (!category)
+  entry = settings_entry_lookup(categoryname, optionname);
+  if (!entry)
     {
-      DPRINTF(E_LOG, L_WEB, "Invalid category name '%s' given\n", categoryname);
+      DPRINTF(E_LOG, L_WEB, "Unknown setting '%s/%s'\n", categoryname, optionname);
       return HTTP_NOTFOUND;
     }
 
-  option = settings_option_get(category, optionname);
-  if (!option)
-    {
-      DPRINTF(E_LOG, L_WEB, "Invalid option name '%s' given\n", optionname);
-      return HTTP_NOTFOUND;
-    }
+  CHECK_NULL(L_WEB, jreply = json_object_new_object());
+  json_object_object_add(jreply, "name", json_object_new_string(entry->name));
+  json_object_object_add(jreply, "type", json_object_new_int(entry->type));
 
-  jreply = option_get_json(option);
-
-  if (!jreply)
-    {
-      DPRINTF(E_LOG, L_WEB, "Error getting value for option '%s'\n", optionname);
-      return HTTP_INTERNAL;
-    }
+  if (entry->type == SETTING_TYPE_INT)
+    json_object_object_add(jreply, "value", json_object_new_int(config_get_int(entry->config_key, 0)));
+  else if (entry->type == SETTING_TYPE_BOOL)
+    json_object_object_add(jreply, "value", json_object_new_boolean(config_get_bool(entry->config_key, false)));
+  else
+    json_object_object_add(jreply, "value", json_object_new_string(config_get_str(entry->config_key, "")));
 
   CHECK_ERRNO(L_WEB, evbuffer_add_printf(hreq->out_body, "%s", json_object_to_json_string(jreply)));
-
   jparse_free(jreply);
-
   return HTTP_OK;
 }
 
 static int
 jsonapi_reply_settings_option_put(struct httpd_request *hreq)
 {
-  const char *categoryname;
-  const char *optionname;
-  struct settings_category *category;
-  struct settings_option *option;
-  json_object* request;
-  int intval;
-  bool boolval;
-  const char *strval;
-  int ret;
+  const char *categoryname = hreq->path_parts[2];
+  const char *optionname   = hreq->path_parts[3];
+  const struct setting_entry *entry;
+  json_object *request;
+  int ret = 0;
 
-
-  categoryname = hreq->path_parts[2];
-  optionname = hreq->path_parts[3];
-
-  category = settings_category_get(categoryname);
-  if (!category)
+  entry = settings_entry_lookup(categoryname, optionname);
+  if (!entry)
     {
-      DPRINTF(E_LOG, L_WEB, "Invalid category name '%s' given\n", categoryname);
-      return HTTP_NOTFOUND;
-    }
-
-  option = settings_option_get(category, optionname);
-
-  if (!option)
-    {
-      DPRINTF(E_LOG, L_WEB, "Invalid option name '%s' given\n", optionname);
+      DPRINTF(E_LOG, L_WEB, "Unknown setting '%s/%s'\n", categoryname, optionname);
       return HTTP_NOTFOUND;
     }
 
   request = jparse_obj_from_evbuffer(hreq->in_body);
   if (!request)
     {
-      DPRINTF(E_LOG, L_WEB, "Missing request body for setting option '%s' (type %d)\n", optionname, option->type);
+      DPRINTF(E_LOG, L_WEB, "Missing request body for setting '%s/%s'\n", categoryname, optionname);
       return HTTP_BADREQUEST;
     }
 
-  if (option->type == SETTINGS_TYPE_INT && jparse_contains_key(request, "value", json_type_int))
-    {
-      intval = jparse_int_from_obj(request, "value");
-      ret = settings_option_setint(option, intval);
-    }
-  else if (option->type == SETTINGS_TYPE_BOOL && jparse_contains_key(request, "value", json_type_boolean))
-    {
-      boolval = jparse_bool_from_obj(request, "value");
-      ret = settings_option_setbool(option, boolval);
-    }
-  else if (option->type == SETTINGS_TYPE_STR && jparse_contains_key(request, "value", json_type_string))
-    {
-      strval = jparse_str_from_obj(request, "value");
-      ret = settings_option_setstr(option, strval);
-    }
+  if (entry->type == SETTING_TYPE_INT && jparse_contains_key(request, "value", json_type_int))
+    ret = config_set_int(entry->config_key, jparse_int_from_obj(request, "value"));
+  else if (entry->type == SETTING_TYPE_BOOL && jparse_contains_key(request, "value", json_type_boolean))
+    ret = config_set_bool(entry->config_key, jparse_bool_from_obj(request, "value"));
+  else if (entry->type == SETTING_TYPE_STR && jparse_contains_key(request, "value", json_type_string))
+    ret = config_set_str(entry->config_key, jparse_str_from_obj(request, "value"));
   else
     {
-      DPRINTF(E_LOG, L_WEB, "Invalid value given for option '%s' (type %d): '%s'\n", optionname, option->type, json_object_to_json_string(request));
+      DPRINTF(E_LOG, L_WEB, "Invalid value for setting '%s/%s': %s\n", categoryname, optionname, json_object_to_json_string(request));
+      jparse_free(request);
       return HTTP_BADREQUEST;
     }
 
   if (ret < 0)
     {
-      DPRINTF(E_LOG, L_WEB, "Error changing setting '%s' (type %d) to '%s'\n", optionname, option->type, json_object_to_json_string(request));
+      DPRINTF(E_LOG, L_WEB, "Error changing setting '%s/%s'\n", categoryname, optionname);
+      jparse_free(request);
       return HTTP_INTERNAL;
     }
 
-  DPRINTF(E_INFO, L_WEB, "Setting option '%s.%s' changed to '%s'\n", categoryname, optionname, json_object_to_json_string(request));
+  DPRINTF(E_INFO, L_WEB, "Setting '%s/%s' changed to '%s'\n", categoryname, optionname, json_object_to_json_string(request));
+  jparse_free(request);
   return HTTP_NOCONTENT;
 }
 /*
@@ -339,6 +289,20 @@ jsonapi_reply_library(struct httpd_request *hreq)
   jparse_free(jreply);
 
   return HTTP_OK;
+}
+
+
+/*
+ * Endpoint to reload config and re-populate the in-memory queue.
+ * Useful after changing pipe_path in the settings file.
+ * Returns 204 No Content on success.
+ */
+static int
+jsonapi_reply_update(struct httpd_request *hreq)
+{
+  config_reload();
+  db_queue_set_pipe(config_get_str("pipe_path", NULL));
+  return HTTP_NOCONTENT;
 }
 
 
@@ -707,8 +671,9 @@ static struct httpd_uri_map adm_handlers[] =
     { HTTPD_METHOD_PUT,    "^/api/player/stop$",                           jsonapi_reply_player_stop },
     { HTTPD_METHOD_PUT,    "^/api/player/play$",                           jsonapi_reply_player_play },
 
-    /* Library (health check) */
+    /* Library (health check) and update (config reload) */
     { HTTPD_METHOD_GET,    "^/api/library$",                               jsonapi_reply_library },
+    { HTTPD_METHOD_PUT,    "^/api/update$",                                jsonapi_reply_update },
 
     /* Settings */
     { HTTPD_METHOD_GET,    "^/api/settings/[A-Za-z0-9_]+/[A-Za-z0-9_]+$",  jsonapi_reply_settings_option_get },
@@ -776,16 +741,12 @@ jsonapi_request(struct httpd_request *hreq)
 static int
 jsonapi_init(void)
 {
-  default_playlist_directory = NULL;
-  allow_modifying_stored_playlists = false;
-
   return 0;
 }
 
 static void
 jsonapi_deinit(void)
 {
-  free(default_playlist_directory);
 }
 
 struct httpd_module httpd_jsonapi =

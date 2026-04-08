@@ -46,7 +46,6 @@ owntone_SOURCES = main.c \
 	misc_json.c misc_json.h \
 	player.c player.h \
 	worker.c worker.h \
-	settings.c settings.h \
 	input.h input.c \
 	inputs/pipe.c \
 	outputs.h outputs.c \

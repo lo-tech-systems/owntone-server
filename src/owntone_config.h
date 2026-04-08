@@ -55,6 +55,11 @@ extern gid_t    runas_gid;
 // Load settings from JSON file. Must be called before any config_get_* calls.
 // Returns 0 on success, -1 on error.
 int  config_load(const char *path);
+
+// Reload settings from the same file used by config_load().
+// Only refreshes the key/value store; does not re-derive uid/libhash.
+int  config_reload(void);
+
 void config_unload(void);
 
 // Read a string value. Returns fallback if the key is absent or null.

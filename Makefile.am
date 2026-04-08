@@ -24,29 +24,16 @@ nobase_dist_doc_DATA = \
 	docs/installation.md \
 	docs/configuration.md \
 	docs/building.md \
+	docs/development.md \
+	docs/changelog.md \
 	docs/library.md \
-	docs/control-clients/mobile.md \
-	docs/control-clients/desktop.md \
-	docs/control-clients/web.md \
 	docs/control-clients/cli-api.md \
 	docs/audio-outputs/airplay.md \
 	docs/audio-outputs/chromecast.md \
-	docs/audio-outputs/local-audio.md \
-	docs/audio-outputs/mobile.md \
-	docs/audio-outputs/web.md \
-	docs/audio-outputs/roku.md \
-	docs/audio-outputs/streaming.md \
 	docs/media-clients.md \
 	docs/artwork.md \
 	docs/playlists.md \
 	docs/smart-playlists.md \
-	docs/integrations/spotify.md \
-	docs/integrations/lastfm.md \
-	docs/advanced/radio-streams.md \
-	docs/advanced/multiple-instances.md \
-	docs/advanced/outputs-alsa.md \
-	docs/advanced/remote-access.md \
-	docs/advanced/outputs-pulse.md \
 	docs/json-api.md \
 	scripts/pairinghelper.sh
 

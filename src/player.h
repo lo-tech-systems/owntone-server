@@ -8,9 +8,6 @@
 #include "db.h"
 #include "misc.h" // for struct media_quality
 
-// Maximum number of previously played songs that are remembered
-#define MAX_HISTORY_COUNT 20
-
 enum play_status {
   PLAY_STOPPED = 2,
   PLAY_PAUSED  = 3,
@@ -73,19 +70,6 @@ struct player_status {
 };
 
 typedef void (*spk_enum_cb)(struct player_speaker_info *spk, void *arg);
-
-struct player_history
-{
-  /* Buffer index of the oldest remembered song */
-  unsigned int start_index;
-
-  /* Count of song ids in the buffer */
-  unsigned int count;
-
-  /* Circular buffer of song ids previously played */
-  uint32_t id[MAX_HISTORY_COUNT];
-  uint32_t item_id[MAX_HISTORY_COUNT];
-};
 
 int
 player_get_status(struct player_status *status);
@@ -175,23 +159,8 @@ player_volume_setabs_speaker(uint64_t id, int vol);
 int
 player_volume_setraw_speaker(uint64_t id, const char *volstr);
 
-int
-player_repeat_set(enum repeat_mode mode);
-
-int
-player_shuffle_set(int enable);
-
-int
-player_consume_set(int enable);
-
-void
-player_queue_clear_history(void);
-
 void
 player_queue_plid(uint32_t plid);
-
-struct player_history *
-player_history_get(void);
 
 int
 player_device_add(void *device);
