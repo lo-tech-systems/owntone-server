@@ -59,21 +59,18 @@
 #include <gcrypt.h>
 
 #include "evrtsp/evrtsp.h"
-#include "owntone_config.h"
+#include "conffile.h"
 #include "logger.h"
 #include "mdns.h"
 #include "misc.h"
 #include "player.h"
 #include "db.h"
-
+#include "artwork.h"
+#include "dmap_common.h"
 #include "rtp_common.h"
 #include "transcode.h"
 #include "outputs.h"
 #include "pair_ap/pair.h"
-
-// artwork.h was removed; define format constants locally
-#define ART_FMT_PNG  1
-#define ART_FMT_JPEG 2
 
 #define ALAC_HEADER_LEN                      3
 
@@ -1130,10 +1127,10 @@ raop_add_headers(struct raop_session *rs, struct evrtsp_request *req, enum evrts
 
   rs->cseq++;
 
-  user_agent = config_get_str("user_agent", PACKAGE_NAME "/" PACKAGE_VERSION);
+  user_agent = cfg_getstr(cfg_getsec(cfg, "general"), "user_agent");
   evrtsp_add_header(req->output_headers, "User-Agent", user_agent);
 
-  client_name = config_get_str("server_name", PACKAGE_NAME);
+  client_name = cfg_getstr(cfg_getsec(cfg, "library"), "name");
   evrtsp_add_header(req->output_headers, "X-Apple-Client-Name", client_name);
 
   /* Add Authorization header */
@@ -2319,6 +2316,7 @@ raop_metadata_prepare(struct output_metadata *metadata)
 {
   struct db_queue_item *queue_item;
   struct raop_metadata *rmd;
+  struct evbuffer *tmp;
   int ret;
 
   queue_item = db_queue_fetch_byitemid(metadata->item_id);
@@ -2330,8 +2328,10 @@ raop_metadata_prepare(struct output_metadata *metadata)
 
   CHECK_NULL(L_RAOP, rmd = calloc(1, sizeof(struct raop_metadata)));
   CHECK_NULL(L_RAOP, rmd->artwork = evbuffer_new());
+  CHECK_NULL(L_RAOP, rmd->metadata = evbuffer_new());
+  CHECK_NULL(L_RAOP, tmp = evbuffer_new());
 
-  ret = -1; // No artwork support
+  ret = artwork_get_by_queue_item_id(rmd->artwork, queue_item->id, ART_DEFAULT_WIDTH, ART_DEFAULT_HEIGHT, 0);
   if (ret < 0)
     {
       DPRINTF(E_INFO, L_RAOP, "Failed to retrieve artwork for file '%s'; no artwork will be sent\n", queue_item->path);
@@ -2341,7 +2341,15 @@ raop_metadata_prepare(struct output_metadata *metadata)
 
   rmd->artwork_fmt = ret;
 
+  ret = dmap_encode_queue_metadata(rmd->metadata, tmp, queue_item);
+  evbuffer_free(tmp);
   free_queue_item(queue_item, 0);
+  if (ret < 0)
+    {
+      DPRINTF(E_LOG, L_RAOP, "Could not encode file metadata; metadata will not be sent\n");
+      raop_metadata_free(rmd);
+      return NULL;
+    }
 
   return rmd;
 }
@@ -2535,7 +2543,7 @@ raop_metadata_send_generic(struct raop_session *rs, struct output_metadata *meta
 	goto error;
     }
 
-  if (!only_progress && (rs->wanted_metadata & RAOP_MD_WANTS_TEXT) && rmd->metadata)
+  if (!only_progress && (rs->wanted_metadata & RAOP_MD_WANTS_TEXT))
     {
       ret = raop_metadata_send_text(rs, evbuf, rmd, rtptime);
       if (ret < 0)
@@ -4048,6 +4056,9 @@ raop_cb_pair_setup_step3(struct evrtsp_request *req, void *arg)
   free(device->auth_key);
   device->auth_key = strdup(authorization_key);
 
+  // A blocking db call... :-~
+  db_speaker_save(device);
+
   // No longer RAOP_STATE_PASSWORD
   rs->state = RAOP_STATE_STOPPED;
 
@@ -4194,7 +4205,8 @@ raop_device_cb(const char *name, const char *type, const char *domain, const cha
 {
   struct output_device *rd;
   struct raop_extra *re;
-  int reconnect;
+  cfg_t *devcfg;
+  cfg_opt_t *cfgopt;
   const char *p;
   const char *device_name;
   char *password;
@@ -4224,26 +4236,35 @@ raop_device_cb(const char *name, const char *type, const char *domain, const cha
 
   DPRINTF(E_DBG, L_RAOP, "Event for AirPlay device '%s' (port %d, id %" PRIx64 ", Active-Remote %" PRIu32 ")\n", device_name, port, id, (uint32_t)id);
 
-  if (config_get_device_bool(device_name, "exclude", false))
+  devcfg = cfg_gettsec(cfg, "airplay", device_name);
+  if (devcfg && cfg_getbool(devcfg, "exclude"))
     {
       DPRINTF(E_LOG, L_RAOP, "Excluding AirPlay device '%s' as set in config\n", device_name);
+
       return;
     }
-  if (config_get_device_bool(device_name, "permanent", false) && (port < 0))
+  if (devcfg && cfg_getbool(devcfg, "permanent") && (port < 0))
     {
       DPRINTF(E_INFO, L_RAOP, "AirPlay device '%s' disappeared, but set as permanent in config\n", device_name);
+
       return;
     }
-  if (config_get_device_bool(device_name, "raop_disable", false))
+  if (outputs_exclusive_mode_get() && !(devcfg && cfg_getbool(devcfg, "exclusive")))
+    {
+      DPRINTF(E_INFO, L_RAOP, "AirPlay device '%s' ignored, other speaker(s) set as exclusive\n", device_name);
+
+      return;
+    }
+  if (devcfg && cfg_getbool(devcfg, "raop_disable"))
     {
       DPRINTF(E_INFO, L_RAOP, "Disabling AirPlay 1 (RAOP) for device '%s' as set in config\n", device_name);
+
       return;
     }
-  {
-    const char *nick = config_get_device_str(device_name, "nickname", NULL);
-    if (nick)
-      device_name = nick;
-  }
+  if (devcfg && cfg_getstr(devcfg, "nickname"))
+    {
+      device_name = cfg_getstr(devcfg, "nickname");
+    }
 
   CHECK_NULL(L_RAOP, rd = calloc(1, sizeof(struct output_device)));
   CHECK_NULL(L_RAOP, re = calloc(1, sizeof(struct raop_extra)));
@@ -4321,7 +4342,8 @@ raop_device_cb(const char *name, const char *type, const char *domain, const cha
     {
       DPRINTF(E_LOG, L_RAOP, "AirPlay device '%s' is password-protected\n", device_name);
 
-      password = (char *)config_get_device_str(device_name, "password", NULL);
+      if (devcfg)
+	password = cfg_getstr(devcfg, "password");
 
       if (!password)
 	DPRINTF(E_LOG, L_RAOP, "No password given in config for AirPlay device '%s'\n", device_name);
@@ -4357,7 +4379,7 @@ raop_device_cb(const char *name, const char *type, const char *domain, const cha
     DPRINTF(E_LOG, L_RAOP, "Device '%s' requested non-default audio quality (%d/%d/%d)\n", rd->name, rd->quality.sample_rate, rd->quality.bits_per_sample, rd->quality.channels);
 
   // Max volume
-  rd->max_volume = config_get_device_int(device_name, "max_volume", RAOP_CONFIG_MAX_VOLUME);
+  rd->max_volume = devcfg ? cfg_getint(devcfg, "max_volume") : RAOP_CONFIG_MAX_VOLUME;
   if ((rd->max_volume < 1) || (rd->max_volume > RAOP_CONFIG_MAX_VOLUME))
     {
       DPRINTF(E_LOG, L_RAOP, "Config has bad max_volume (%d) for device '%s', using default instead\n", rd->max_volume, device_name);
@@ -4385,9 +4407,9 @@ raop_device_cb(const char *name, const char *type, const char *domain, const cha
 
   // If the user didn't set any reconnect setting we enable for Apple TV and
   // HomePods due to https://github.com/owntone/owntone-server/issues/734
-  reconnect = config_get_device_reconnect(device_name);
-  if (reconnect >= 0)
-    rd->resurrect = (reconnect == 1);
+  cfgopt = devcfg ? cfg_getopt(devcfg, "reconnect") : NULL;
+  if (cfgopt && cfgopt->nvalues == 1)
+    rd->resurrect = cfg_opt_getnbool(cfgopt, 0);
   else
     rd->resurrect = (re->devtype == RAOP_DEV_APPLETV4) || (re->devtype == RAOP_DEV_HOMEPOD);
 
@@ -4691,7 +4713,7 @@ raop_init(void)
       goto out_stop_timing;
     }
 
-  raop_uncompressed_alac = config_get_bool("uncompressed_alac", false);
+  raop_uncompressed_alac = cfg_getbool(cfg_getsec(cfg, "airplay_shared"), "uncompressed_alac");
 
   ret = mdns_browse("_raop._tcp", raop_device_cb, MDNS_CONNECTION_TEST);
   if (ret < 0)

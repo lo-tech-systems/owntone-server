@@ -34,7 +34,6 @@
 #include "logger.h"
 #include "misc.h"
 #include "transcode.h"
-#include "player.h" //TODO remove me when player_pmap is removed again
 #include "worker.h"
 #include "outputs.h"
 #include "owntone_config.h"
@@ -129,7 +128,7 @@ callback_remove(struct output_device *device)
     {
       if (outputs_cb_register[callback_id].device == device)
 	{
-	  DPRINTF(E_DBG, L_PLAYER, "Removing callback to %s, id %d\n", player_pmap(outputs_cb_register[callback_id].cb), callback_id);
+	  DPRINTF(E_DBG, L_PLAYER, "Removing callback to %p, id %d\n", outputs_cb_register[callback_id].cb, callback_id);
 	  memset(&outputs_cb_register[callback_id], 0, sizeof(struct outputs_callback_register));
 	}
     }
@@ -163,7 +162,7 @@ callback_add(struct output_device *device, output_status_cb cb)
   outputs_cb_register[callback_id].cb = cb;
   outputs_cb_register[callback_id].device = device; // Don't dereference this later, it might become invalid!
 
-  DPRINTF(E_DBG, L_PLAYER, "Registered callback to %s with id %d (device %p, %s)\n", player_pmap(cb), callback_id, device, device->name);
+  DPRINTF(E_DBG, L_PLAYER, "Registered callback to %p with id %d (device %p, %s)\n", cb, callback_id, device, device->name);
 
   int active = 0;
   for (int i = 0; i < ARRAY_SIZE(outputs_cb_register); i++)
@@ -207,7 +206,7 @@ deferred_cb(int fd, short what, void *arg)
 	  else if (device)
 	    device->state = state;
 
-	  DPRINTF(E_DBG, L_PLAYER, "Making deferred callback to %s, id was %d\n", player_pmap(cb), callback_id);
+	  DPRINTF(E_DBG, L_PLAYER, "Making deferred callback to %p, id was %d\n", cb, callback_id);
 
 	  cb(device, state);
 	}
@@ -216,7 +215,7 @@ deferred_cb(int fd, short what, void *arg)
   for (int i = 0; i < ARRAY_SIZE(outputs_cb_register); i++)
     {
       if (outputs_cb_register[i].cb)
-	DPRINTF(E_DBG, L_PLAYER, "%d. Active callback: %s\n", i, player_pmap(outputs_cb_register[i].cb));
+	DPRINTF(E_DBG, L_PLAYER, "%d. Active callback: %p\n", i, outputs_cb_register[i].cb);
     }
 }
 
@@ -244,14 +243,11 @@ device_stop_cb(struct output_device *device, enum output_device_state state)
 static enum transcode_profile
 quality_to_xcode(struct media_quality *quality)
 {
-  if (quality->bits_per_sample == 16)
-    return XCODE_PCM16;
-  if (quality->bits_per_sample == 24)
-    return XCODE_PCM24;
-  if (quality->bits_per_sample == 32)
-    return XCODE_PCM32;
+  /* Pipe input is always 16-bit PCM; other depths are not supported. */
+  if (quality->bits_per_sample != 16)
+    DPRINTF(E_WARN, L_PLAYER, "Unsupported bit depth %d, falling back to 16-bit encoding\n", quality->bits_per_sample);
 
-  return XCODE_UNKNOWN;
+  return XCODE_PCM16;
 }
 
 static int
@@ -263,13 +259,6 @@ encoding_reset(struct media_quality *quality)
   int i;
 
   profile = quality_to_xcode(quality);
-  if  (profile == XCODE_UNKNOWN)
-    {
-      DPRINTF(E_LOG, L_PLAYER, "Could not create subscription decoding context, invalid quality (%d/%d/%d)\n",
-	quality->sample_rate, quality->bits_per_sample, quality->channels);
-      return -1;
-    }
-
   encode_args.src_ctx = transcode_decode_setup_raw(profile, quality);
   if (!encode_args.src_ctx)
     {
@@ -288,11 +277,7 @@ encoding_reset(struct media_quality *quality)
 
       encode_args.profile = quality_to_xcode(&subscription->quality);
       encode_args.quality = &subscription->quality;
-      if (encode_args.profile != XCODE_UNKNOWN)
-	subscription->encode_ctx = transcode_encode_setup(encode_args);
-      else
-	DPRINTF(E_LOG, L_PLAYER, "Could not setup resampling to %d/%d/%d for output\n",
-	  subscription->quality.sample_rate, subscription->quality.bits_per_sample, subscription->quality.channels);
+      subscription->encode_ctx = transcode_encode_setup(encode_args);
     }
 
   transcode_decode_cleanup(&encode_args.src_ctx);
@@ -787,6 +772,13 @@ outputs_device_add(struct output_device *add, bool new_deselect)
       /* No persistent speaker state — use defaults */
       device->selected = 0;
       device->volume = (outputs_master_volume >= 0) ? outputs_master_volume : OUTPUTS_DEFAULT_VOLUME;
+
+      /* Restore persisted AirPlay auth_key (HomeKit pairing) if available */
+      {
+        const char *saved_key = config_get_device_str(device->name, "auth_key", NULL);
+        if (saved_key)
+          device->auth_key = strdup(saved_key);
+      }
 
       free(device->name);
       device->name = keep_name;

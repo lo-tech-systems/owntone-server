@@ -75,6 +75,7 @@ static bool         restart_required_pending;
 
 static const char *api_settable_keys[] = {
   "loglevel",
+  "pipe_path",
   "pipe_autostart",
   "ipv6",
   "start_buffer_ms",
@@ -86,6 +87,7 @@ static bool
 config_key_requires_restart(const char *key)
 {
   return (strcmp(key, "pipe_autostart") == 0
+       || strcmp(key, "pipe_path") == 0
        || strcmp(key, "ipv6") == 0
        || strcmp(key, "start_buffer_ms") == 0
        || strcmp(key, "uncompressed_alac") == 0);
@@ -266,6 +268,38 @@ config_get_device_reconnect(const char *device)
   return json_object_get_boolean(val) ? 1 : 0;
 }
 
+static int config_write(void); /* forward declaration */
+
+int
+config_set_device_str(const char *device, const char *key, const char *value)
+{
+  json_object *devices;
+  json_object *dev;
+
+  if (!root || !device || !key)
+    return -1;
+
+  if (!json_object_object_get_ex(root, "airplay_devices", &devices))
+    {
+      devices = json_object_new_object();
+      if (!devices)
+        return -1;
+      json_object_object_add(root, "airplay_devices", devices);
+    }
+
+  if (!json_object_object_get_ex(devices, device, &dev))
+    {
+      dev = json_object_new_object();
+      if (!dev)
+        return -1;
+      json_object_object_add(devices, device, dev);
+    }
+
+  json_object_object_add(dev, key, value ? json_object_new_string(value) : NULL);
+
+  return config_write();
+}
+
 
 /* ----------------------- API write-back ----------------------------------- */
 
@@ -275,6 +309,7 @@ config_write(void)
   char tmppath[PATH_MAX];
   FILE *fp;
   const char *json_str;
+  bool direct_write = false;
   int ret;
 
   if (!root || !config_path)
@@ -292,12 +327,36 @@ config_write(void)
   fp = fopen(tmppath, "w");
   if (!fp)
     {
-      DPRINTF(E_LOG, L_CONF, "Could not open %s for writing: %s\n", tmppath, strerror(errno));
+      /* If the config lives in a root-owned directory like /etc, the runtime
+       * user may still have write access to the file itself but not be allowed
+       * to create a sibling temporary file for atomic replace. Fall back to an
+       * in-place overwrite in that case.
+       */
+      if (errno != EACCES && errno != EPERM)
+        {
+          DPRINTF(E_LOG, L_CONF, "Could not open %s for writing: %s\n", tmppath, strerror(errno));
+          return -1;
+        }
+
+      fp = fopen(config_path, "w");
+      if (!fp)
+        {
+          DPRINTF(E_LOG, L_CONF, "Could not open %s for writing: %s\n", config_path, strerror(errno));
+          return -1;
+        }
+
+      direct_write = true;
+    }
+
+  ret = fputs(json_str, fp);
+  if (ret < 0 || fclose(fp) != 0)
+    {
+      DPRINTF(E_LOG, L_CONF, "Could not write %s: %s\n", direct_write ? config_path : tmppath, strerror(errno));
       return -1;
     }
 
-  fputs(json_str, fp);
-  fclose(fp);
+  if (direct_write)
+    return 0;
 
   ret = rename(tmppath, config_path);
   if (ret < 0)

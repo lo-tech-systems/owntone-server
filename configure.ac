@@ -86,12 +86,7 @@ AC_SEARCH_LIBS([pthread_getthreadid_np], [pthread],
 AC_SEARCH_LIBS([uuid_generate_random], [uuid],
 	[AC_DEFINE([HAVE_UUID], 1,
 		[Define to 1 if you have uuid_generate_random])])
-AC_SEARCH_LIBS([copy_file_range], [c],
-	[AC_DEFINE([HAVE_COPY_FILE_RANGE], 1,
-		[Define to 1 if you have copy_file_range])])
-AC_SEARCH_LIBS([fcopyfile], [c],
-	[AC_DEFINE([HAVE_FCOPYFILE], 1,
-		[Define to 1 if you have fcopyfile])])
+
 
 AC_SEARCH_LIBS([log10], [m])
 AC_SEARCH_LIBS([lrint], [m])
@@ -110,15 +105,8 @@ AC_SUBST([OWNTONE_CPPFLAGS])
 AC_SUBST([OWNTONE_OPTS_LIBS])
 AC_SUBST([OWNTONE_OPTS_CPPFLAGS])
 
-AM_ICONV
+dnl libunistring removed: unicode_fixup_string was its only user and is now gone
 dnl All OWNTONE_ macros defined in m4/owntone_checks.m4
-OWNTONE_FUNC_REQUIRE([COMMON], [GNU libunistring], [LIBUNISTRING], [unistring],
-	[u8_strconv_from_locale], [uniconv.h], [],
-	[dnl Retry test with iconv library
-	 OWNTONE_VARS_PREPEND([COMMON], [LIBICONV], [INCICONV])
-	 OWNTONE_FUNC_REQUIRE([COMMON], [GNU libunistring], [LIBUNISTRING],
-		[unistring], [u8_strconv_from_locale], [uniconv.h])])
-
 OWNTONE_MODULES_CHECK([OWNTONE], [ZLIB], [zlib], [deflate], [zlib.h])
 dnl libconfuse removed: config is now JSON-based (see src/owntone_config.c)
 OWNTONE_MODULES_CHECK([OWNTONE], [LIBSODIUM], [libsodium], [sodium_init], [sodium.h])
@@ -248,29 +236,19 @@ AS_IF([[test "x$with_avahi" = "xno"]],
 		[AC_MSG_ERROR([[Avahi client or Bonjour DNS_SD required, please install one.]])])])
 AM_CONDITIONAL([COND_AVAHI], [[test "x$with_avahi" = "xyes"]])
 
-dnl Spotify support (disabled in minimal build)
-AM_CONDITIONAL([COND_SPOTIFY], [false])
-
-
 dnl Prefer AirPlay 2
 OWNTONE_ARG_DISABLE([preference for AirPlay 2 for devices that support both 1 and 2], [preferairplay2], [PREFER_AIRPLAY2])
 
-dnl DB profiling support
-OWNTONE_ARG_ENABLE([DB profiling support], [dbprofile], [DB_PROFILE])
-
-
 dnl Creating and defining users and groups
-OWNTONE_ARG_ENABLE([having 'make install' add user/group and 'make uninstall' delete], [install_user], [INSTALL_USER],
-	[AC_PATH_PROG([GETENT], [[getent]], [], [$PATH$PATH_SEPARATOR/usr/sbin])
-	 AC_PATH_PROG([USERADD], [[useradd]], [], [$PATH$PATH_SEPARATOR/usr/sbin])
-	 AC_PATH_PROG([USERDEL], [[userdel]], [], [$PATH$PATH_SEPARATOR/usr/sbin])
-	 AC_PATH_PROG([USERMOD], [[usermod]], [], [$PATH$PATH_SEPARATOR/usr/sbin])
-	 AC_PATH_PROG([GROUPADD], [[groupadd]], [], [$PATH$PATH_SEPARATOR/usr/sbin])
-	 AC_PATH_PROG([CHOWN], [[chown]], [], [$PATH$PATH_SEPARATOR/usr/sbin])
-	 AS_IF([[test -z "$GETENT" -o -z "$USERADD" -o -z "$USERDEL" -o -z "$USERMOD" -o -z "$GROUPADD" -o -z "$CHOWN"]],
-		[AC_MSG_ERROR([[Required program for --enable-install-user not found]])])
-	])
-AM_CONDITIONAL([COND_INSTALL_USER], [[test "x$enable_install_user" = "xyes"]])
+AC_PATH_PROG([GETENT], [[getent]], [], [$PATH$PATH_SEPARATOR/usr/sbin])
+AC_PATH_PROG([USERADD], [[useradd]], [], [$PATH$PATH_SEPARATOR/usr/sbin])
+AC_PATH_PROG([USERDEL], [[userdel]], [], [$PATH$PATH_SEPARATOR/usr/sbin])
+AC_PATH_PROG([USERMOD], [[usermod]], [], [$PATH$PATH_SEPARATOR/usr/sbin])
+AC_PATH_PROG([GROUPADD], [[groupadd]], [], [$PATH$PATH_SEPARATOR/usr/sbin])
+AC_PATH_PROG([CHOWN], [[chown]], [], [$PATH$PATH_SEPARATOR/usr/sbin])
+AC_PATH_PROG([CHMOD], [[chmod]], [], [$PATH$PATH_SEPARATOR/usr/sbin])
+AS_IF([[test -z "$GETENT" -o -z "$USERADD" -o -z "$USERDEL" -o -z "$USERMOD" -o -z "$GROUPADD" -o -z "$CHOWN" -o -z "$CHMOD"]],
+	[AC_MSG_ERROR([[Required program for install-time user/config setup not found]])])
 
 AC_ARG_WITH([owntone_user],
 	[AS_HELP_STRING([--with-user=USER], [User for running OwnTone (default=owntone)])],
@@ -310,7 +288,6 @@ AC_CONFIG_SUBDIRS([
 
 AC_CONFIG_FILES([
 	src/Makefile
-	sqlext/Makefile
 	Makefile
 	owntone.spec
 ])

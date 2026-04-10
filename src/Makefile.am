@@ -33,10 +33,13 @@ owntone_LDADD = \
 	$(COMMON_LIBS)
 
 owntone_SOURCES = main.c \
+	db.c db.h \
 	queue.c queue.h \
-	db.h \
 	logger.c logger.h \
 	owntone_config.c owntone_config.h \
+	conffile.c conffile.h \
+	artwork.c artwork.h \
+	dmap_common.c dmap_common.h \
 	$(MDNS_SRC) mdns.h \
 	httpd_libevhttp.c \
 	httpd.c httpd.h httpd_internal.h \

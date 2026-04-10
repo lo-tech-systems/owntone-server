@@ -32,7 +32,6 @@ db_queue_set_pipe(const char *path)
   if (!path)
     return;
 
-  /* Clean up any previous state */
   if (g_item_valid)
     free_queue_item(&g_item, 1);
 
@@ -40,7 +39,6 @@ db_queue_set_pipe(const char *path)
   g_item.id         = 1;
   g_item.file_id    = 1;
   g_item.pos        = 0;
-  g_item.shuffle_pos = 0;
   g_item.data_kind  = DATA_KIND_PIPE;
   g_item.media_kind = MEDIA_KIND_MUSIC;
   g_item.song_length = 0; /* endless */
@@ -49,12 +47,20 @@ db_queue_set_pipe(const char *path)
   g_item.title        = strdup("Pipe");
   g_item.artist       = strdup("");
   g_item.album        = strdup("");
-  g_item.album_artist = strdup("");
   g_item.genre        = strdup("");
 
   g_item_valid = 1;
 
   DPRINTF(E_DBG, L_PLAYER, "In-memory queue configured for pipe '%s'\n", path);
+}
+
+const char *
+db_queue_get_pipe_path(void)
+{
+  if (!g_item_valid)
+    return NULL;
+
+  return g_item.path;
 }
 
 /* Deep-copy the global item and return the copy. */
@@ -70,24 +76,15 @@ item_copy(void)
   if (!copy)
     return NULL;
 
-  /* Shallow copy of scalars */
   *copy = g_item;
 
-  /* Deep copy of string fields */
 #define DUP(f) copy->f = g_item.f ? strdup(g_item.f) : NULL
   DUP(path);
-  DUP(virtual_path);
   DUP(title);
   DUP(artist);
-  DUP(album_artist);
   DUP(album);
   DUP(genre);
-  DUP(artist_sort);
-  DUP(album_sort);
-  DUP(album_artist_sort);
   DUP(artwork_url);
-  DUP(composer);
-  DUP(type);
 #undef DUP
 
   return copy;
@@ -109,15 +106,9 @@ db_queue_fetch_bypos(int pos, char shuffle)
   return item_copy();
 }
 
-/* A single-item queue has no next or previous. */
+/* A single-item queue has no next. */
 struct db_queue_item *
 db_queue_fetch_next(uint32_t item_id, char shuffle)
-{
-  return NULL;
-}
-
-struct db_queue_item *
-db_queue_fetch_prev(uint32_t item_id, char shuffle)
 {
   return NULL;
 }
@@ -128,13 +119,11 @@ db_queue_item_update(struct db_queue_item *qi)
   if (!g_item_valid || !qi || qi->id != g_item.id)
     return -1;
 
-  /* Update metadata fields if provided */
 #define UPD_STR(f) \
   if (qi->f) { free(g_item.f); g_item.f = strdup(qi->f); }
   UPD_STR(title);
   UPD_STR(artist);
   UPD_STR(album);
-  UPD_STR(album_artist);
   UPD_STR(genre);
   UPD_STR(artwork_url);
 #undef UPD_STR
@@ -157,18 +146,6 @@ db_queue_clear(int id)
   return 0; /* no-op */
 }
 
-int
-db_queue_reshuffle(uint32_t item_id)
-{
-  return 0; /* no-op */
-}
-
-void
-db_queue_inc_version(void)
-{
-  /* no-op */
-}
-
 void
 free_queue_item(struct db_queue_item *qi, int content_only)
 {
@@ -176,18 +153,11 @@ free_queue_item(struct db_queue_item *qi, int content_only)
     return;
 
   free(qi->path);
-  free(qi->virtual_path);
   free(qi->title);
   free(qi->artist);
-  free(qi->album_artist);
   free(qi->album);
   free(qi->genre);
-  free(qi->artist_sort);
-  free(qi->album_sort);
-  free(qi->album_artist_sort);
   free(qi->artwork_url);
-  free(qi->composer);
-  free(qi->type);
 
   if (!content_only)
     free(qi);

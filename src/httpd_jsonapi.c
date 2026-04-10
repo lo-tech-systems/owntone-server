@@ -48,6 +48,7 @@
 #include "misc.h"
 #include "misc_json.h"
 #include "player.h"
+#include "outputs.h"
 
 
 
@@ -163,6 +164,7 @@ struct setting_entry {
 
 static const struct setting_entry settings_table[] = {
   { "misc",   "loglevel",          SETTING_TYPE_INT,  "loglevel"          },
+  { "misc",   "pipe_path",         SETTING_TYPE_STR,  "pipe_path"         },
   { "misc",   "pipe_autostart",    SETTING_TYPE_BOOL, "pipe_autostart"    },
   { "misc",   "ipv6",              SETTING_TYPE_BOOL, "ipv6"              },
   { "player", "start_buffer_ms",   SETTING_TYPE_INT,  "start_buffer_ms"   },
@@ -190,6 +192,7 @@ jsonapi_reply_settings_option_get(struct httpd_request *hreq)
   const char *categoryname = hreq->path_parts[2];
   const char *optionname   = hreq->path_parts[3];
   const struct setting_entry *entry;
+  const char *live_pipe_path;
   json_object *jreply;
 
   entry = settings_entry_lookup(categoryname, optionname);
@@ -207,6 +210,14 @@ jsonapi_reply_settings_option_get(struct httpd_request *hreq)
     json_object_object_add(jreply, "value", json_object_new_int(config_get_int(entry->config_key, 0)));
   else if (entry->type == SETTING_TYPE_BOOL)
     json_object_object_add(jreply, "value", json_object_new_boolean(config_get_bool(entry->config_key, false)));
+  else if (strcmp(entry->config_key, "pipe_path") == 0)
+    {
+      live_pipe_path = db_queue_get_pipe_path();
+      if (live_pipe_path)
+        json_object_object_add(jreply, "value", json_object_new_string(live_pipe_path));
+      else
+        json_object_object_add(jreply, "value", json_object_new_null());
+    }
   else
     json_object_object_add(jreply, "value", json_object_new_string(config_get_str(entry->config_key, "")));
 
@@ -223,6 +234,7 @@ jsonapi_reply_settings_option_put(struct httpd_request *hreq)
   const struct setting_entry *entry;
   json_object *request;
   json_object *jreply;
+  bool restart_required;
   int ret = 0;
 
   entry = settings_entry_lookup(categoryname, optionname);
@@ -259,8 +271,10 @@ jsonapi_reply_settings_option_put(struct httpd_request *hreq)
       return HTTP_INTERNAL;
     }
 
+  restart_required = config_restart_required_get() || (strcmp(entry->config_key, "pipe_path") == 0);
+
   CHECK_NULL(L_WEB, jreply = json_object_new_object());
-  json_object_object_add(jreply, "restart_required", json_object_new_boolean(config_restart_required_get()));
+  json_object_object_add(jreply, "restart_required", json_object_new_boolean(restart_required));
   CHECK_ERRNO(L_WEB, evbuffer_add_printf(hreq->out_body, "%s", json_object_to_json_string(jreply)));
 
   DPRINTF(E_INFO, L_WEB, "Setting '%s/%s' changed to '%s'\n", categoryname, optionname, json_object_to_json_string(request));
@@ -619,7 +633,6 @@ static int
 play_item_at_position(const char *param)
 {
   uint32_t position;
-  struct player_status status;
   struct db_queue_item *queue_item;
   int ret;
 
@@ -631,9 +644,7 @@ play_item_at_position(const char *param)
       return HTTP_BADREQUEST;
     }
 
-  player_get_status(&status);
-
-  queue_item = db_queue_fetch_bypos(position, status.shuffle);
+  queue_item = db_queue_fetch_bypos(position, 0);
   if (!queue_item)
     {
       DPRINTF(E_LOG, L_WEB, "No queue item at position '%d'\n", position);
@@ -693,6 +704,59 @@ jsonapi_reply_player_stop(struct httpd_request *hreq)
 
   return HTTP_NOCONTENT;
 }
+/*
+ * PUT /api/metadata
+ *
+ * Update the current track metadata and push it to all active AirPlay outputs.
+ * Body: {"title":"...", "artist":"...", "album":"...", "artwork_url":"file:/path"}
+ * All fields are optional.
+ */
+static int
+metadata_api_finalize_cb(struct output_metadata *metadata)
+{
+  // API-driven metadata push: no playback position context needed
+  (void)metadata;
+  return 0;
+}
+
+static int
+jsonapi_reply_metadata_put(struct httpd_request *hreq)
+{
+  json_object *request;
+  struct db_queue_item qi;
+  const char *title;
+  const char *artist;
+  const char *album;
+  const char *artwork_url;
+
+  request = jparse_obj_from_evbuffer(hreq->in_body);
+  if (!request)
+    {
+      DPRINTF(E_LOG, L_WEB, "PUT /api/metadata: failed to parse JSON body\n");
+      return HTTP_BADREQUEST;
+    }
+
+  memset(&qi, 0, sizeof(qi));
+  qi.id = 1; // single-pipe queue always has id 1
+
+  title       = jparse_str_from_obj(request, "title");
+  artist      = jparse_str_from_obj(request, "artist");
+  album       = jparse_str_from_obj(request, "album");
+  artwork_url = jparse_str_from_obj(request, "artwork_url");
+
+  qi.title       = title       ? (char *)title       : NULL;
+  qi.artist      = artist      ? (char *)artist      : NULL;
+  qi.album       = album       ? (char *)album       : NULL;
+  qi.artwork_url = artwork_url ? (char *)artwork_url : NULL;
+
+  db_queue_item_update(&qi);
+
+  outputs_metadata_send(1, false, metadata_api_finalize_cb);
+
+  jparse_free(request);
+  return HTTP_NOCONTENT;
+}
+
 static struct httpd_uri_map adm_handlers[] =
   {
     /* Outputs */
@@ -704,6 +768,9 @@ static struct httpd_uri_map adm_handlers[] =
     /* Player */
     { HTTPD_METHOD_PUT,    "^/api/player/stop$",                           jsonapi_reply_player_stop },
     { HTTPD_METHOD_PUT,    "^/api/player/play$",                           jsonapi_reply_player_play },
+
+    /* Metadata */
+    { HTTPD_METHOD_PUT,    "^/api/metadata$",                              jsonapi_reply_metadata_put },
 
     /* Server info, library (health check) and update (config reload) */
     { HTTPD_METHOD_GET,    "^/api/config$",                                jsonapi_reply_config },

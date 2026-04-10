@@ -139,16 +139,9 @@ safe_snprintf_cat(char *dst, size_t n, const char *fmt, ...) __attribute__ ((for
 int
 safe_snreplace(char *s, size_t sz, const char *pattern, const char *replacement);
 
-char *
-unicode_fixup_string(char *str, const char *fromcode);
-
 // Modifies str so it is trimmed. Returns pointer to str.
 char *
 trim(char *str);
-
-// Copies the trimmed part of str to a newly allocated string (caller must free)
-char *
-atrim(const char *str);
 
 // Safe against timing attacks (for comparing passwords)
 int
@@ -159,9 +152,6 @@ swap_pointers(char **a, char **b);
 
 uint32_t
 djb_hash(const void *data, size_t len);
-
-int64_t
-two_str_hash(const char *a, const char *b);
 
 uint8_t *
 b64_decode(int *dstlen, const char *src);
@@ -205,9 +195,6 @@ keyval_get(struct keyval *kv, const char *name);
 
 void
 keyval_clear(struct keyval *kv);
-
-void
-keyval_sort(struct keyval *kv);
 
 
 /* ------------------------------- Ringbuffer ------------------------------- */
@@ -359,12 +346,6 @@ thread_setname(const char *name);
 
 void
 uuid_make(char *str);
-
-int
-linear_regression(double *m, double *b, double *r, const double *x, const double *y, int n);
-
-char **
-m_readfile(const char *path, int num_lines);
 
 
 /* -------------------------------- Assertion ------------------------------- */

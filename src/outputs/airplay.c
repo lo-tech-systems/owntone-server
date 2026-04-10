@@ -42,13 +42,14 @@
 #include "plist_wrap.h"
 
 #include "evrtsp/evrtsp.h"
-#include "owntone_config.h"
+#include "conffile.h"
 #include "logger.h"
 #include "mdns.h"
 #include "misc.h"
 #include "player.h"
 #include "db.h"
-
+#include "artwork.h"
+#include "dmap_common.h"
 #include "rtp_common.h"
 #include "transcode.h"
 #include "ptpd.h"
@@ -56,10 +57,6 @@
 
 #include "airplay_events.h"
 #include "pair_ap/pair.h"
-
-// artwork.h was removed; define format constants locally
-#define ART_FMT_PNG  1
-#define ART_FMT_JPEG 2
 
 /* List of TODO's for AirPlay 2
  *
@@ -1684,6 +1681,7 @@ airplay_metadata_prepare(struct output_metadata *metadata)
 {
   struct db_queue_item *queue_item;
   struct airplay_metadata *rmd;
+  struct evbuffer *tmp;
   int ret;
 
   queue_item = db_queue_fetch_byitemid(metadata->item_id);
@@ -1695,8 +1693,10 @@ airplay_metadata_prepare(struct output_metadata *metadata)
 
   CHECK_NULL(L_AIRPLAY, rmd = calloc(1, sizeof(struct airplay_metadata)));
   CHECK_NULL(L_AIRPLAY, rmd->artwork = evbuffer_new());
+  CHECK_NULL(L_AIRPLAY, rmd->metadata = evbuffer_new());
+  CHECK_NULL(L_AIRPLAY, tmp = evbuffer_new());
 
-  ret = -1; // No artwork support
+  ret = artwork_get_by_queue_item_id(rmd->artwork, queue_item->id, ART_DEFAULT_WIDTH, ART_DEFAULT_HEIGHT, 0);
   if (ret < 0)
     {
       DPRINTF(E_INFO, L_AIRPLAY, "Failed to retrieve artwork for file '%s'; no artwork will be sent\n", queue_item->path);
@@ -1706,7 +1706,15 @@ airplay_metadata_prepare(struct output_metadata *metadata)
 
   rmd->artwork_fmt = ret;
 
+  ret = dmap_encode_queue_metadata(rmd->metadata, tmp, queue_item);
+  evbuffer_free(tmp);
   free_queue_item(queue_item, 0);
+  if (ret < 0)
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "Could not encode file metadata; metadata will not be sent\n");
+      airplay_metadata_free(rmd);
+      return NULL;
+    }
 
   return rmd;
 }
@@ -1719,7 +1727,7 @@ airplay_metadata_send_generic(struct airplay_session *session, struct output_met
   if (session->wanted_metadata & AIRPLAY_MD_WANTS_PROGRESS)
     sequence_start(AIRPLAY_SEQ_SEND_PROGRESS, session, metadata, "SET_PARAMETER (progress)");
 
-  if (!only_progress && (session->wanted_metadata & AIRPLAY_MD_WANTS_TEXT) && rmd->metadata)
+  if (!only_progress && (session->wanted_metadata & AIRPLAY_MD_WANTS_TEXT))
     sequence_start(AIRPLAY_SEQ_SEND_TEXT, session, metadata, "SET_PARAMETER (text)");
 
   if (!only_progress && (session->wanted_metadata & AIRPLAY_MD_WANTS_ARTWORK) && rmd->artwork)
@@ -1778,7 +1786,12 @@ airplay_metadata_send(struct output_metadata *metadata)
 static int
 volume_max_get(const char *name)
 {
-  int max_volume = config_get_device_int(name, "max_volume", AIRPLAY_CONFIG_MAX_VOLUME);
+  int max_volume = AIRPLAY_CONFIG_MAX_VOLUME;
+  cfg_t *airplay;
+
+  airplay = cfg_gettsec(cfg, "airplay", name);
+  if (airplay)
+    max_volume = cfg_getint(airplay, "max_volume");
 
   if ((max_volume < 1) || (max_volume > AIRPLAY_CONFIG_MAX_VOLUME))
     {
@@ -3496,6 +3509,9 @@ response_handler_pair_setup3(struct evrtsp_request *req, struct airplay_session 
   free(device->auth_key);
   device->auth_key = strdup(authorization_key);
 
+  // A blocking db call... :-~
+  db_speaker_save(device);
+
   // No longer AIRPLAY_STATE_AUTH
   session->state = AIRPLAY_STATE_STOPPED;
 
@@ -3907,7 +3923,8 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
   struct output_device *device;
   struct airplay_extra *extra;
   struct keyval features_kv = { 0 };
-  int reconnect;
+  cfg_t *devcfg;
+  cfg_opt_t *cfgopt;
   const char *p;
   const char *nickname = NULL;
   const char *password = NULL;
@@ -3943,18 +3960,30 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
 
   DPRINTF(E_DBG, L_AIRPLAY, "Event for AirPlay device '%s' (port %d, id %" PRIx64 ", Active-Remote %" PRIu32 ")\n", name, port, id, (uint32_t)id);
 
-  if (config_get_device_bool(name, "exclude", false))
+  devcfg = cfg_gettsec(cfg, "airplay", name);
+  if (devcfg && cfg_getbool(devcfg, "exclude"))
     {
       DPRINTF(E_LOG, L_AIRPLAY, "Excluding AirPlay device '%s' as set in config\n", name);
       return;
     }
-  if (config_get_device_bool(name, "permanent", false) && (port < 0))
+  if (devcfg && cfg_getbool(devcfg, "permanent") && (port < 0))
     {
       DPRINTF(E_INFO, L_AIRPLAY, "AirPlay device '%s' disappeared, but set as permanent in config\n", name);
       return;
     }
-  nickname = config_get_device_str(name, "nickname", NULL);
-  password = config_get_device_str(name, "password", NULL);
+  if (outputs_exclusive_mode_get() && !(devcfg && cfg_getbool(devcfg, "exclusive")))
+    {
+      DPRINTF(E_INFO, L_AIRPLAY, "AirPlay device '%s' ignored, other speaker(s) set as exclusive\n", name);
+      return;
+    }
+  if (devcfg && cfg_getstr(devcfg, "nickname"))
+    {
+      nickname = cfg_getstr(devcfg, "nickname");
+    }
+  if (devcfg && cfg_getstr(devcfg, "password"))
+    {
+      password = cfg_getstr(devcfg, "password");
+    }
 
   CHECK_NULL(L_AIRPLAY, device = calloc(1, sizeof(struct output_device)));
   CHECK_NULL(L_AIRPLAY, extra = calloc(1, sizeof(struct airplay_extra)));
@@ -4016,7 +4045,7 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
     extra->wanted_metadata |= AIRPLAY_MD_WANTS_TEXT;
   if (keyval_get(&features_kv, "Authentication_8"))
     extra->supports_auth_setup = 1;
-  if (keyval_get(&features_kv, "SupportsPTP") && !config_get_device_bool(name, "ptp_disable", false) && !airplay_ptp_is_disabled)
+  if (keyval_get(&features_kv, "SupportsPTP") && !(devcfg && cfg_getbool(devcfg, "ptp_disable")) && !airplay_ptp_is_disabled)
     extra->use_ptp = 1;
 
   extra->supports_encryption = (keyval_get(&features_kv, "SupportsCoreUtilsPairingAndEncryption") != NULL);
@@ -4057,9 +4086,9 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
 
   // If the user didn't set any reconnect setting we enable for Apple TV and
   // HomePods due to https://github.com/owntone/owntone-server/issues/734
-  reconnect = config_get_device_reconnect(name);
-  if (reconnect >= 0)
-    device->resurrect = (reconnect == 1);
+  cfgopt = devcfg ? cfg_getopt(devcfg, "reconnect") : NULL;
+  if (cfgopt && cfgopt->nvalues == 1)
+    device->resurrect = cfg_opt_getnbool(cfgopt, 0);
   else
     device->resurrect = (extra->devtype == AIRPLAY_DEV_APPLETV4) || (extra->devtype == AIRPLAY_DEV_HOMEPOD);
 
@@ -4263,10 +4292,10 @@ airplay_init(void)
 
   CHECK_NULL(L_AIRPLAY, keep_alive_timer = evtimer_new(evbase_player, airplay_keep_alive_timer_cb, NULL));
 
-  airplay_user_agent = config_get_str("user_agent", PACKAGE_NAME "/" PACKAGE_VERSION);
-  airplay_client_name = config_get_str("server_name", PACKAGE_NAME);
+  airplay_user_agent = cfg_getstr(cfg_getsec(cfg, "general"), "user_agent");
+  airplay_client_name = cfg_getstr(cfg_getsec(cfg, "library"), "name");
 
-  timing_port = config_get_int("airplay_timing_port", 0);
+  timing_port = cfg_getint(cfg_getsec(cfg, "airplay_shared"), "timing_port");
   ret = service_start(&airplay_timing_svc, timing_svc_cb, timing_port, "AirPlay timing");
   if (ret < 0)
     {
@@ -4274,7 +4303,7 @@ airplay_init(void)
       goto out_free_timer;
     }
 
-  control_port = config_get_int("airplay_control_port", 0);
+  control_port = cfg_getint(cfg_getsec(cfg, "airplay_shared"), "control_port");
   ret = service_start(&airplay_control_svc, control_svc_cb, control_port, "AirPlay control");
   if (ret < 0)
     {

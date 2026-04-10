@@ -14,16 +14,6 @@ enum play_status {
   PLAY_PLAYING = 4,
 };
 
-enum repeat_mode {
-  REPEAT_OFF  = 0,
-  REPEAT_SONG = 1,
-  REPEAT_ALL  = 2,
-};
-
-enum player_seek_mode {
-  PLAYER_SEEK_POSITION = 1,
-  PLAYER_SEEK_RELATIVE = 2,
-};
 
 struct player_speaker_info {
   uint64_t id;
@@ -51,14 +41,10 @@ struct player_speaker_info {
 
 struct player_status {
   enum play_status status;
-  enum repeat_mode repeat;
-  char shuffle;
   char consume;
 
   int volume;
 
-  /* Playlist id */
-  uint32_t plid;
   /* Id of the playing file/item in the files database */
   uint32_t id;
   /* Item-Id of the playing file/item in the queue */
@@ -73,9 +59,6 @@ typedef void (*spk_enum_cb)(struct player_speaker_info *spk, void *arg);
 
 int
 player_get_status(struct player_status *status);
-
-int
-player_playing_now(uint32_t *id);
 
 void
 player_speaker_enumerate(spk_enum_cb cb, void *arg);
@@ -100,12 +83,6 @@ player_speaker_enable(uint64_t id);
 
 int
 player_speaker_disable(uint64_t id);
-
-int
-player_speaker_prevent_playback_set(uint64_t id, bool prevent_playback);
-
-int
-player_speaker_busy_set(uint64_t id, bool busy);
 
 void
 player_speaker_resurrect(void *arg);
@@ -139,15 +116,6 @@ int
 player_playback_flush(void);
 
 int
-player_playback_seek(int seek_ms, enum player_seek_mode seek_mode);
-
-int
-player_playback_next(void);
-
-int
-player_playback_prev(void);
-
-int
 player_volume_set(int vol);
 
 int
@@ -159,20 +127,11 @@ player_volume_setabs_speaker(uint64_t id, int vol);
 int
 player_volume_setraw_speaker(uint64_t id, const char *volstr);
 
-void
-player_queue_plid(uint32_t plid);
-
 int
 player_device_add(void *device);
 
 int
 player_device_remove(void *device);
-
-void
-player_raop_verification_kickoff(char **arglist);
-
-const char *
-player_pmap(void *p);
 
 int
 player_init(void);

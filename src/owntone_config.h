@@ -25,7 +25,7 @@
 
 // Fallback package identity if autoconf config.h is not available
 #ifndef PACKAGE_NAME
-# define PACKAGE_NAME "owntone"
+# define PACKAGE_NAME "owntone-minimal"
 #endif
 #ifndef PACKAGE_VERSION
 # define PACKAGE_VERSION "0.0.0"
@@ -80,6 +80,10 @@ const char *config_get_strlist_item(const char *key, int index);
 const char *config_get_device_str(const char *device, const char *key, const char *fallback);
 int         config_get_device_int(const char *device, const char *key, int fallback);
 bool        config_get_device_bool(const char *device, const char *key, bool fallback);
+
+// Persist a per-device string value (e.g. auth_key) into the JSON file.
+// Creates the device entry and "airplay_devices" block if absent.
+int         config_set_device_str(const char *device, const char *key, const char *value);
 
 // Tri-state reconnect setting per device: -1=auto-detect, 0=disabled, 1=enabled.
 // Absent or null in JSON means -1 (auto).

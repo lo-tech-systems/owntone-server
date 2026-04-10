@@ -63,8 +63,6 @@
 
 #include <event2/http.h> // evhttp_bind
 
-#include <unistr.h>
-#include <uniconv.h>
 
 #include <libavutil/base64.h>
 
@@ -1061,42 +1059,6 @@ safe_snreplace(char *s, size_t sz, const char *pattern, const char *replacement)
   return 0;
 }
 
-
-char *
-unicode_fixup_string(char *str, const char *fromcode)
-{
-  uint8_t *ret;
-  size_t len;
-
-  if (!str)
-    return NULL;
-
-  len = strlen(str);
-
-  /* String is valid UTF-8 */
-  if (!u8_check((uint8_t *)str, len))
-    {
-      if (len >= 3)
-	{
-	  /* Check for and strip byte-order mark */
-	  if (memcmp("\xef\xbb\xbf", str, 3) == 0)
-	    memmove(str, str + 3, len - 3 + 1);
-	}
-
-      return str;
-    }
-
-  ret = u8_strconv_from_encoding(str, fromcode, iconveh_question_mark);
-  if (!ret)
-    {
-      DPRINTF(E_LOG, L_MISC, "Could not convert string '%s' to UTF-8: %s\n", str, strerror(errno));
-
-      return NULL;
-    }
-
-  return (char *)ret;
-}
-
 char *
 trim(char *str)
 {
@@ -1123,34 +1085,6 @@ trim(char *str)
   return str;
 }
 
-char *
-atrim(const char *str)
-{
-  size_t start; // Position of first non-space char
-  size_t term;  // Position of 0-terminator
-  size_t size;
-  char *result;
-
-  if (!str)
-    return NULL;
-
-  start = 0;
-  term  = strlen(str);
-
-  while ((start < term) && isspace(str[start]))
-    start++;
-  while ((term > start) && isspace(str[term - 1]))
-    term--;
-
-  size = term - start + 1;
-
-  result = malloc(size);
-
-  memcpy(result, str + start, size);
-  result[size - 1] = '\0';
-
-  return result;
-}
 
 int
 constant_time_strcmp(const char *a, const char *b)
@@ -1199,29 +1133,6 @@ djb_hash(const void *data, size_t len)
   return hash;
 }
 
-int64_t
-two_str_hash(const char *a, const char *b)
-{
-  char hashbuf[2048];
-  int64_t hash;
-  int i;
-  int ret;
-
-  ret = snprintf(hashbuf, sizeof(hashbuf), "%s==%s", (a) ? a : "", (b) ? b : "");
-  if (ret < 0 || ret == sizeof(hashbuf))
-    {
-      DPRINTF(E_LOG, L_MISC, "Buffer too large to calculate hash: '%s==%s'\n", a, b);
-      return 999999; // Stand-in hash...
-    }
-
-  for (i = 0; hashbuf[i]; i++)
-    hashbuf[i] = tolower(hashbuf[i]);
-
-  // Limit hash length to 63 bits, due to signed type in sqlite
-  hash = murmur_hash64(hashbuf, strlen(hashbuf), 0) >> 1;
-
-  return hash;
-}
 
 uint8_t *
 b64_decode(int *dstlen, const char *src)
@@ -1568,46 +1479,6 @@ keyval_clear(struct keyval *kv)
   kv->tail = NULL;
 }
 
-void
-keyval_sort(struct keyval *kv)
-{
-  struct onekeyval *head;
-  struct onekeyval *okv;
-  struct onekeyval *sokv;
-
-  if (!kv || !kv->head)
-    return;
-
-  head = kv->head;
-  for (okv = kv->head; okv; okv = okv->next)
-    {
-      okv->sort = NULL;
-      for (sokv = kv->head; sokv; sokv = sokv->next)
-	{
-	  // We try to find a name which is greater than okv->name
-	  // but less than our current candidate (okv->sort->name)
-	  if ( (strcmp(sokv->name, okv->name) > 0) &&
-	       ((okv->sort == NULL) || (strcmp(sokv->name, okv->sort->name) < 0)) )
-	    okv->sort = sokv;
-	}
-
-      // Find smallest name, which will be the new head
-      if (strcmp(okv->name, head->name) < 0)
-	head = okv;
-    }
-
-  while ((okv = kv->head))
-    {
-      kv->head  = okv->next;
-      okv->next = okv->sort;
-    }
-
-  kv->head = head;
-  for (okv = kv->head; okv; okv = okv->next)
-    kv->tail = okv;
-
-  DPRINTF(E_DBG, L_MISC, "Keyval sorted. New head: %s. New tail: %s.\n", kv->head->name, kv->tail->name);
-}
 
 
 /* ------------------------------- Ringbuffer ------------------------------- */
@@ -2065,91 +1936,6 @@ uuid_make(char *str)
 }
 #endif
 
-int
-linear_regression(double *m, double *b, double *r2, const double *x, const double *y, int n)
-{
-  double x_val;
-  double sum_x  = 0;
-  double sum_x2 = 0;
-  double sum_y  = 0;
-  double sum_y2 = 0;
-  double sum_xy = 0;
-  double denom;
-  int i;
-
-  for (i = 0; i < n; i++)
-    {
-      x_val   = x ? x[i] : (double)i;
-      sum_x  += x_val;
-      sum_x2 += x_val * x_val;
-      sum_y  += y[i];
-      sum_y2 += y[i] * y[i];
-      sum_xy += x_val * y[i];
-    }
-
-  denom = (n * sum_x2 - sum_x * sum_x);
-  if (denom == 0)
-    return -1;
-
-  *m = (n * sum_xy - sum_x * sum_y) / denom;
-  *b = (sum_y * sum_x2 - sum_x * sum_xy) / denom;
-  if (r2)
-    *r2 = (sum_xy - (sum_x * sum_y)/n) * (sum_xy - (sum_x * sum_y)/n) / ((sum_x2 - (sum_x * sum_x)/n) * (sum_y2 - (sum_y * sum_y)/n));
-
-  return 0;
-}
-
-char **
-m_readfile(const char *path, int num_lines)
-{
-  char buf[256];
-  FILE *fp;
-  char **lines;
-  char *line;
-  int i;
-
-  // Alloc array of char pointers
-  lines = calloc(num_lines, sizeof(char *));
-  if (!lines)
-    return NULL;
-
-  fp = fopen(path, "rb");
-  if (!fp)
-    {
-      DPRINTF(E_LOG, L_MISC, "Could not open file '%s' for reading: %s\n", path, strerror(errno));
-      free(lines);
-      return NULL;
-    }
-
-  for (i = 0; i < num_lines; i++)
-    {
-      line = fgets(buf, sizeof(buf), fp);
-      if (!line)
-	{
-	  DPRINTF(E_LOG, L_MISC, "File '%s' has fewer lines than expected (found %d, expected %d)\n", path, i, num_lines);
-	  goto error;
-	}
-
-      lines[i] = atrim(line);
-      if (!lines[i] || (strlen(lines[i]) == 0))
-	{
-	  DPRINTF(E_LOG, L_MISC, "Line %d in '%s' is invalid\n", i+1, path);
-	  goto error;
-	}
-    }
-
-  fclose(fp);
-
-  return lines;
-
- error:
-  for (i = 0; i < num_lines; i++)
-    free(lines[i]);
-
-  free(lines);
-  fclose(fp);
-  return NULL;
-}
 
 
 /* -------------------------------- Assertion ------------------------------- */

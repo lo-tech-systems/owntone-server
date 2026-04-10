@@ -58,7 +58,7 @@ static uint32_t logger_repeat_counter;
 static uint32_t logger_last_hash;
 static char *logfilename;
 static FILE *logfile;
-static char *labels[] = { "config", "daap", "db", "httpd", "http", "main", "mdns", "misc", "rsp", "scan", "xcode", "event", "remote", "dacp", "ffmpeg", "artwork", "player", "raop", "laudio", "dmap", "dbperf", "spotify", "scrobble", "cache", "mpd", "stream", "cast", "fifo", "lib", "web", "airplay", "rcp" };
+static char *labels[] = { "config", "-", "-", "httpd", "-", "main", "mdns", "misc", "-", "-", "xcode", "event", "-", "-", "ffmpeg", "-", "player", "raop", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "web", "airplay", "-" };
 static char *severities[] = { "FATAL", "LOG", "WARN", "INFO", "DEBUG", "SPAM" };
 static char *format_labels[] = { "default", "logfmt" };
 
@@ -383,18 +383,6 @@ logger_libevent(int severity, const char *msg)
 
   DPRINTF(severity, L_EVENT, "%s\n", msg);
 }
-
-#ifdef HAVE_ALSA
-void
-logger_alsa(const char *file, int line, const char *function, int err, const char *fmt, ...)
-{
-  va_list ap;
-
-  va_start(ap, fmt);
-  vlogger(E_LOG, L_LAUDIO, fmt, ap);
-  va_end(ap);
-}
-#endif /* HAVE_ALSA */
 
 void
 logger_reinit(void)

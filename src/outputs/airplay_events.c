@@ -345,12 +345,6 @@ handle_event(enum airplay_events event)
 	else
 	  player_playback_start();
 	break;
-      case AIRPLAY_EVENT_NEXT:
-	player_playback_next();
-	break;
-      case AIRPLAY_EVENT_PREV:
-	player_playback_prev();
-	break;
       default:
 	return;
     }

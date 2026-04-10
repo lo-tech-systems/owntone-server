@@ -45,13 +45,12 @@ Then run the following (adding configure arguments for optional features):
 git clone https://github.com/owntone/owntone-server.git
 cd owntone-server
 autoreconf -i
-./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var --enable-install-user
+./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var
 make
 sudo make install
 ```
 
-Using `--enable-install-user` means that `make install` will also add system
-user and group for owntone.
+`make install` will also add the system user and group for owntone.
 
 With the above configure arguments, a systemd service file will be installed to
 `/etc/systemd/system/owntone.service` so that the server will start on boot.
@@ -90,13 +89,12 @@ Then run the following:
 
 ```bash
 autoreconf -i
-./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var --enable-install-user
+./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var
 make
 sudo make install
 ```
 
-Using `--enable-install-user` means that `make install` will also add system
-user and group for owntone.
+`make install` will also add the system user and group for owntone.
 
 With the above configure arguments, a systemd service file will be installed to
 `/etc/systemd/system/owntone.service` so that the server will start on boot.
@@ -289,7 +287,7 @@ present (with headers). Use `--without-pulseaudio` to disable.
 Recommended build settings:
 
 ```bash
-./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var --enable-install-user
+./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var
 ```
 
 After configure run the usual make, and if that went well, `sudo make install`.
@@ -298,8 +296,7 @@ With the above configure arguments, a systemd service file will be installed to
 `/etc/systemd/system/owntone.service` so that the server will start on boot.
 Use `--disable-install-systemd` if you don't want that.
 
-Using `--enable-install-user` means that `make install` will also add a system
-user and group for owntone.
+`make install` will also add a system user and group for owntone.
 
 After installation:
 

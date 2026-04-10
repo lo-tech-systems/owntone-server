@@ -160,22 +160,9 @@ struct speaker_get_param
   struct player_speaker_info *spk_info;
 };
 
-struct speaker_auth_param
-{
-  enum output_types type;
-  char pin[5];
-};
-
-struct player_seek_param
-{
-  int ms;
-  enum player_seek_mode mode;
-};
-
 union player_arg
 {
   struct output_device *device;
-  struct speaker_auth_param auth;
   uint32_t id;
   int intval;
 };
@@ -321,9 +308,6 @@ static int pb_write_deficit_max;
 
 // True if we are trying to recover from a major playback timer overrun (write problems)
 static bool pb_write_recovery;
-
-// Audio source
-static uint32_t cur_plid;
 
 // When we receive track metadata from the input we have to wait until playback
 // has reached the position before using it. We use this to record the update.
@@ -1320,32 +1304,6 @@ device_remove_family(void *arg, int *retval)
   return COMMAND_END;
 }
 
-static enum command_state
-device_auth_kickoff(void *arg, int *retval)
-{
-  union player_arg *cmdarg = arg;
-  struct output_device *device;
-
-  // First find the device requiring verification
-  for (device = outputs_list(); device; device = device->next)
-    {
-      if (device->type == cmdarg->auth.type && device->state == OUTPUT_STATE_PASSWORD)
-	break;
-    }
-
-  if (!device)
-    {
-      *retval = -1;
-      return COMMAND_END;
-    }
-
-  // We're async, so we don't care about return values or callbacks with result
-  outputs_device_authorize(device, cmdarg->auth.pin, NULL);
-
-  *retval = 0;
-  return COMMAND_END;
-}
-
 
 /* -------- Output device callbacks executed in the player thread ----------- */
 
@@ -1515,23 +1473,6 @@ device_activate_cb(struct output_device *device, enum output_device_state status
 
  out:
   commands_exec_end(cmdbase, retval);
-}
-
-const char *
-player_pmap(void *p)
-{
-  if (p == device_activate_cb)
-    return "device_activate_cb";
-  else if (p == device_streaming_cb)
-    return "device_streaming_cb";
-  else if (p == device_volume_cb)
-    return "device_volume_cb";
-  else if (p == device_flush_cb)
-    return "device_flush_cb";
-  else if (p == device_shutdown_cb)
-    return "device_shutdown_cb";
-  else
-    return "unknown";
 }
 
 /* ------------------------- Internal playback routines --------------------- */
@@ -1758,13 +1699,9 @@ get_status(void *arg, int *retval)
 
   memset(status, 0, sizeof(struct player_status));
 
-  status->shuffle = 0;
   status->consume = 0;
-  status->repeat = REPEAT_OFF;
 
   status->volume = outputs_volume_get();
-
-  status->plid = cur_plid;
 
   switch (player_state)
     {
@@ -1808,23 +1745,6 @@ get_status(void *arg, int *retval)
 
 	break;
     }
-
-  *retval = 0;
-  return COMMAND_END;
-}
-
-static enum command_state
-playing_now(void *arg, int *retval)
-{
-  uint32_t *id = arg;
-
-  if (player_state == PLAY_STOPPED)
-    {
-      *retval = -1;
-      return COMMAND_END;
-    }
-
-  *id = pb_session.playing_now->id;
 
   *retval = 0;
   return COMMAND_END;
@@ -2019,132 +1939,6 @@ playback_start(void *arg, int *retval)
   return cmd_state;
 }
 
-static enum command_state
-playback_prev_bh(void *arg, int *retval)
-{
-  struct db_queue_item *queue_item = NULL;
-  int ret;
-
-  // outputs_flush() in playback_pause() may have a caused a failure callback
-  // from the output, which in streaming_cb() can cause pb_abort()
-  if (player_state == PLAY_STOPPED)
-    {
-      goto error;
-    }
-
-  // Restart the current item (only one item in queue for a fifo source)
-  queue_item = db_queue_fetch_byitemid(pb_session.playing_now->item_id);
-  if (!queue_item)
-    {
-      DPRINTF(E_DBG, L_PLAYER, "Error finding previous source, queue item has disappeared\n");
-      goto error;
-    }
-
-  ret = pb_session_start(queue_item, 0);
-  free_queue_item(queue_item, 0);
-  if (ret < 0)
-    {
-      DPRINTF(E_DBG, L_PLAYER, "Error skipping to previous item, aborting playback\n");
-      goto error;
-    }
-
-  // Silent status change - playback_start() sends the real status update
-  player_state = PLAY_PAUSED;
-
-  *retval = 0;
-  return COMMAND_END;
-
- error:
-  pb_abort();
-  *retval = -1;
-  return COMMAND_END;
-}
-
-static enum command_state
-playback_next_bh(void *arg, int *retval)
-{
-  // Single-item fifo queue: no next item — stop playback
-  DPRINTF(E_DBG, L_PLAYER, "No next source, end of queue reached\n");
-  pb_abort();
-  *retval = -1;
-  return COMMAND_END;
-}
-
-/**
- * Based on the given seek parameters "seek_param" and the current playing track, the queue item and the absolute
- * position in milliseconds are calculated.
- *
- * @param queue_item out: queue item to play after the seek
- * @param position_ms out: absolute position in milliseconds the queue_item shoud start playing after the seek
- * @param seek_param in: seek parameters
- * @return 0 on success, -1 on error
- */
-static int
-seek_calc_position_ms(struct db_queue_item **queue_item, int *position_ms, struct player_seek_param *seek_param)
-{
-  int seek_ms;
-
-  // Calculate seek position and clamp to [0, ...] for single-item fifo queue
-  if (seek_param->mode == PLAYER_SEEK_POSITION)
-    seek_ms = seek_param->ms;
-  else
-    seek_ms = pb_session.playing_now->pos_ms + seek_param->ms;
-
-  if (seek_ms < 0)
-    seek_ms = 0;
-
-  *queue_item = db_queue_fetch_byitemid(pb_session.playing_now->item_id);
-  if (!*queue_item)
-    {
-      DPRINTF(E_LOG, L_PLAYER, "Error fetching queue item for seek (seek_ms=%d)\n", seek_ms);
-      return -1;
-    }
-
-  *position_ms = seek_ms;
-  return 0;
-}
-
-static enum command_state
-playback_seek_bh(void *arg, int *retval)
-{
-  struct player_seek_param *seek_param = arg;
-  struct db_queue_item *queue_item;
-  int position_ms;
-  int ret;
-
-  // outputs_flush() in playback_pause() may have a caused a failure callback
-  // from the output, which in streaming_cb() can cause pb_abort()
-  if (player_state == PLAY_STOPPED)
-    {
-      goto error;
-    }
-
-  ret = seek_calc_position_ms(&queue_item, &position_ms, seek_param);
-  if (ret < 0)
-    {
-      DPRINTF(E_LOG, L_PLAYER, "Error calculating new seek position\n");
-      goto error;
-    }
-
-  ret = pb_session_start(queue_item, position_ms);
-  free_queue_item(queue_item, 0);
-  if (ret < 0)
-    {
-      DPRINTF(E_LOG, L_PLAYER, "Error seeking to %d, aborting playback\n", position_ms);
-      goto error;
-    }
-
-  // Silent status change - playback_start() sends the real status update
-  player_state = PLAY_PAUSED;
-
-  *retval = 0;
-  return COMMAND_END;
-
- error:
-  pb_abort();
-  *retval = -1;
-  return COMMAND_END;
-}
 
 static enum command_state
 playback_pause_bh(void *arg, int *retval)
@@ -2238,21 +2032,6 @@ playback_flush(void *arg, int *retval)
 
   // Otherwise we are done
   return COMMAND_END;
-}
-
-static enum command_state
-playback_seek(void *arg, int *retval)
-{
-  // Only check if the current playing track is seekable, other checks will be done in playback_pause()
-  if (pb_session.playing_now && !pb_session.playing_now->is_seekable)
-    {
-      DPRINTF(E_WARN, L_PLAYER, "Failed to seek, track is not seekable\n");
-
-      *retval = -1;
-      return COMMAND_END;
-    }
-
-  return playback_pause(arg, retval);
 }
 
 static void
@@ -2529,88 +2308,6 @@ speaker_generic_bh(void *arg, int *retval)
  *     sends prevent-playback=1 and then shortly after prevent-play-playback=0.
  *     In this case we never want to resume playback.
  */
-static enum command_state
-speaker_prevent_playback_set(void *arg, int *retval)
-{
-  struct speaker_attr_param *param = arg;
-  struct output_device *device;
-
-  *retval = -1;
-
-  device = outputs_device_get(param->spk_id);
-  if (!device)
-    return COMMAND_END;
-
-  DPRINTF(E_DBG, L_PLAYER, "Speaker prevent playback change %u -> %u: '%s' (id=%" PRIu64 ")\n",
-    device->prevent_playback, param->prevent_playback, device->name, device->id);
-
-  if (param->prevent_playback && device->state == OUTPUT_STATE_STOPPED)
-    *retval = -1; // Means we won't set device->prevent_playback below, so that special case a) will work
-  else if (param->prevent_playback)
-    *retval = outputs_device_stop(device, device_shutdown_cb);
-  else if (!device->busy && device->prevent_playback) // Only start if previously prevented
-    *retval = outputs_device_start(device, device_activate_cb, PLAYER_ONLY_PROBE);
-  else
-    *retval = 0;
-
-  if (*retval >= 0)
-    device->prevent_playback = param->prevent_playback;
-
-  if (*retval > 0)
-    return COMMAND_PENDING; // async
-
-  return COMMAND_END;
-}
-
-static enum command_state
-speaker_prevent_playback_set_bh(void *arg, int *retval)
-{
-  struct speaker_attr_param *param = arg;
-
-  if (player_state == PLAY_PLAYING && outputs_sessions_count() == 0)
-    {
-      DPRINTF(E_INFO, L_PLAYER, "Suspending playback, speaker (id=%" PRIu64 ") set 'busy' or 'prevent-playback' flag\n", param->spk_id);
-      pb_suspend(); // Don't want to use pb_abort here, since that may clear the queue
-    }
-  else
-    status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
-
-  *retval = 0;
-  return COMMAND_END;
-}
-
-static enum command_state
-speaker_busy_set(void *arg, int *retval)
-{
-  struct speaker_attr_param *param = arg;
-  struct output_device *device;
-
-  *retval = -1;
-
-  device = outputs_device_get(param->spk_id);
-  if (!device)
-    return COMMAND_END;
-
-  DPRINTF(E_DBG, L_PLAYER, "Speaker busy change %u -> %u: '%s' (id=%" PRIu64 ")\n",
-    device->busy, param->busy, device->name, device->id);
-
-  if (param->busy && device->state == OUTPUT_STATE_STOPPED)
-    *retval = -1; // Means we won't set device->busy below, so that special case a) will work
-  else if (param->busy)
-    *retval = outputs_device_stop(device, device_shutdown_cb);
-  else if (!device->prevent_playback && device->busy) // Only start if previously busy
-    *retval = outputs_device_start(device, device_activate_cb, PLAYER_ONLY_PROBE);
-  else
-    *retval = 0;
-
-  if (*retval >= 0)
-    device->busy = param->busy;
-
-  if (*retval > 0)
-    return COMMAND_PENDING; // async
-
-  return COMMAND_END;
-}
 
 static enum command_state
 speaker_format_set(void *arg, int *retval)
@@ -2867,16 +2564,6 @@ volume_generic_bh(void *arg, int *retval)
   return COMMAND_END;
 }
 
-static enum command_state
-playerqueue_plid(void *arg, int *retval)
-{
-  union player_arg *cmdarg = arg;
-  cur_plid = cmdarg->id;
-
-  *retval = 0;
-  return COMMAND_END;
-}
-
 /* ------------------------------- Player API ------------------------------- */
 
 int
@@ -2890,21 +2577,6 @@ player_get_status(struct player_status *status)
 
 
 /* ------------------------------ Thread: httpd ----------------------------- */
-
-/*
- * Stores the now playing media item dbmfi-id in the given id pointer.
- *
- * @param id Pointer will hold the playing item (dbmfi) id if the function returns 0
- * @return 0 on success, -1 on failure (e. g. no playing item found)
- */
-int
-player_playing_now(uint32_t *id)
-{
-  int ret;
-
-  ret = commands_exec_sync(cmdbase, playing_now, NULL, id);
-  return ret;
-}
 
 /*
  * Starts/resumes playback
@@ -3007,52 +2679,6 @@ player_playback_flush(void)
   return ret;
 }
 
-/**
- * Seeks to the position "seek_ms", depending on the given "seek_mode" seek_ms is
- * either the new position in the current track (seek_mode == PLAYER_SEEK_POSITION)
- * or a relative amount of milliseconds from the current playing position
- * (seek_mode == PLAYER_SEEK_RELATIVE).
- *
- * Relative seeking switches tracks, if:
- * - seeking behind the the current track and current playing position is not more than 3 seconds
- * - seeking beyond the current track
- *
- * @param seek_ms Position or relative amount of milliseconds to seek to
- * @param seek_mode If PLAYER_SEEK_POSITION seek_ms is a position in milliseconds,
- * 		if PLAYER_SEEK_RELATIVE seek_ms is the relative amount of milliseconds
- * @return Returns 0 on success and a negative value on error
- */
-int
-player_playback_seek(int seek_ms, enum player_seek_mode seek_mode)
-{
-  struct player_seek_param seek_param;
-  int ret;
-
-  seek_param.ms = seek_ms;
-  seek_param.mode = seek_mode;
-
-  ret = commands_exec_sync(cmdbase, playback_seek, playback_seek_bh, &seek_param);
-  return ret;
-}
-
-int
-player_playback_next(void)
-{
-  int ret;
-
-  ret = commands_exec_sync(cmdbase, playback_pause, playback_next_bh, NULL);
-  return ret;
-}
-
-int
-player_playback_prev(void)
-{
-  int ret;
-
-  ret = commands_exec_sync(cmdbase, playback_pause, playback_prev_bh, NULL);
-  return ret;
-}
-
 void
 player_speaker_enumerate(spk_enum_cb cb, void *arg)
 {
@@ -3145,34 +2771,6 @@ player_speaker_disable(uint64_t id)
   int ret;
 
   ret = commands_exec_sync(cmdbase, speaker_disable, speaker_generic_bh, &id);
-
-  return ret;
-}
-
-int
-player_speaker_prevent_playback_set(uint64_t id, bool prevent_playback)
-{
-  struct speaker_attr_param param;
-  int ret;
-
-  param.spk_id = id;
-  param.prevent_playback = prevent_playback;
-
-  ret = commands_exec_sync(cmdbase, speaker_prevent_playback_set, speaker_prevent_playback_set_bh, &param);
-
-  return ret;
-}
-
-int
-player_speaker_busy_set(uint64_t id, bool busy)
-{
-  struct speaker_attr_param param;
-  int ret;
-
-  param.spk_id = id;
-  param.busy = busy;
-
-  ret = commands_exec_sync(cmdbase, speaker_busy_set, speaker_prevent_playback_set_bh, &param);
 
   return ret;
 }
@@ -3294,17 +2892,6 @@ player_volume_setraw_speaker(uint64_t id, const char *volstr)
   return ret;
 }
 
-void
-player_queue_plid(uint32_t plid)
-{
-  union player_arg cmdarg;
-
-  cmdarg.id = plid;
-
-  commands_exec_sync(cmdbase, playerqueue_plid, NULL, &cmdarg);
-}
-
-
 /* ------------------- Non-blocking commands used by mDNS ------------------- */
 
 int
@@ -3343,28 +2930,6 @@ player_device_remove(void *device)
 
   ret = commands_exec_async(cmdbase, device_remove_family, cmdarg);
   return ret;
-}
-
-
-/* ----------------------- Thread: filescanner/httpd ------------------------ */
-
-void
-player_raop_verification_kickoff(char **arglist)
-{
-  union player_arg *cmdarg;
-
-  cmdarg = calloc(1, sizeof(union player_arg));
-  if (!cmdarg)
-    {
-      DPRINTF(E_LOG, L_PLAYER, "Could not allocate player_command\n");
-      return;
-    }
-
-  cmdarg->auth.type = OUTPUT_TYPE_RAOP;
-  memcpy(cmdarg->auth.pin, arglist[0], 4);
-
-  commands_exec_async(cmdbase, device_auth_kickoff, cmdarg);
-
 }
 
 

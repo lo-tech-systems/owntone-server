@@ -66,6 +66,40 @@ Returns HTTP `204 No Content` on success.
 curl -X PUT "http://localhost:3689/api/player/stop"
 ```
 
+## Metadata
+
+Push track metadata (title, artist, album, artwork) to all active AirPlay outputs.
+This is useful when the audio source does not embed metadata (e.g. raw PCM on a pipe).
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| PUT | `/api/metadata` | Push track metadata to all active outputs |
+
+### Example: push text metadata
+
+```
+PUT /api/metadata
+```
+
+**Body parameters**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| title | string | Track title |
+| artist | string | Artist name |
+| album | string | Album name |
+| artwork_url | string | Local artwork path as `file:/absolute/path.jpg` or `.png` |
+
+All fields are optional; omitted fields are not changed.
+
+**Example**
+
+```shell
+curl -X PUT "http://localhost:3689/api/metadata" \
+     -H "Content-Type: application/json" \
+     -d '{"title":"My Track","artist":"My Artist","album":"My Album","artwork_url":"file:/var/music/cover.jpg"}'
+```
+
 ## Outputs
 
 | Method | Endpoint | Description |
@@ -312,13 +346,14 @@ There are no category-listing or option-listing endpoints in this build.
 | --- | ---- | ----- |
 | `name` | string | Option name |
 | `type` | integer | `0` = integer, `1` = boolean, `2` = string |
-| `value` | varies | Current value |
+| `value` | varies | Current value in use. For `misc/pipe_path` this is the live path currently used by the running server, which may differ from the pending on-disk value after a restart-required PUT. |
 
 ### Supported settings
 
 | Endpoint | Type | Notes |
 | -------- | ---- | ----- |
 | `/api/settings/misc/loglevel` | integer | Log level |
+| `/api/settings/misc/pipe_path` | string | Pipe/FIFO path, persisted immediately but not applied until restart. GET returns the live path currently in use. |
 | `/api/settings/misc/pipe_autostart` | boolean | Whether the pipe input autostarts |
 | `/api/settings/misc/ipv6` | boolean | IPv6 enable/disable, restart required |
 | `/api/settings/player/start_buffer_ms` | integer | Start buffer in milliseconds, valid range `300` to `3500`, restart required |
@@ -345,6 +380,8 @@ curl -X GET "http://localhost:3689/api/settings/player/start_buffer_ms"
   "value": 2250
 }
 ```
+
+For `misc/pipe_path`, the response reflects the current live pipe path in use by the running process. If a new value has been written but the service has not yet been restarted, GET continues to return the old live value.
 
 ### Change a setting
 
@@ -375,6 +412,8 @@ On success returns HTTP `200 OK` with:
 
 `restart_required` reflects whether the server currently has any pending restart-required configuration changes.
 
+`PUT /api/settings/misc/pipe_path` is restart-only in this build. The JSON settings file is updated immediately, but the running pipe input is not reloaded or switched over until the service restarts.
+
 **Examples**
 
 ```shell
@@ -387,4 +426,10 @@ curl -X PUT "http://localhost:3689/api/settings/misc/ipv6" \
 curl -X PUT "http://localhost:3689/api/settings/player/start_buffer_ms" \
   -H "Content-Type: application/json" \
   -d "{\"value\":1500}"
+```
+
+```shell
+curl -X PUT "http://localhost:3689/api/settings/misc/pipe_path" \
+  -H "Content-Type: application/json" \
+  -d "{\"value\":\"/tmp/autostream-pipes/autostream.fifo\"}"
 ```
