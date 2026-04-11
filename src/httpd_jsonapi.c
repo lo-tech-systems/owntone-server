@@ -328,6 +328,7 @@ jsonapi_reply_config(struct httpd_request *hreq)
   for (i = 0; buildopts[i]; i++)
     json_object_array_add(jbuildopts, json_object_new_string(buildopts[i]));
 
+  json_object_object_add(jreply, "product_name", json_object_new_string(PACKAGE_NAME));
   json_object_object_add(jreply, "version", json_object_new_string(PACKAGE_VERSION));
   json_object_object_add(jreply, "websocket_port", json_object_new_int(0));
   json_object_object_add(jreply, "buildoptions", jbuildopts);

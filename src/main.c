@@ -450,7 +450,7 @@ main(int argc, char **argv)
   /* Set up libevent logging callback */
   event_set_log_callback(logger_libevent);
 
-  DPRINTF(E_LOG, L_MAIN, "OwnTone version %s taking off\n", VERSION);
+  DPRINTF(E_LOG, L_MAIN, "%s version %s taking off\n", PACKAGE_NAME, VERSION);
 
   DPRINTF(E_LOG, L_MAIN, "Built with:\n");
   buildopts = buildopts_get();

@@ -25,7 +25,7 @@
 
 // Fallback package identity if autoconf config.h is not available
 #ifndef PACKAGE_NAME
-# define PACKAGE_NAME "owntone-minimal"
+# define PACKAGE_NAME "owntone-mini"
 #endif
 #ifndef PACKAGE_VERSION
 # define PACKAGE_VERSION "0.0.0"

@@ -257,6 +257,7 @@ GET /api/config
 
 | Key | Type | Value |
 | --- | ---- | ----- |
+| `product_name` | string | Product/package name compiled into the server |
 | `version` | string | Server version |
 | `websocket_port` | integer | Always `0` in this build |
 | `buildoptions` | array | Array of server feature strings |
@@ -270,6 +271,7 @@ curl -X GET "http://localhost:3689/api/config"
 
 ```json
 {
+  "product_name": "owntone-mini",
   "websocket_port": 0,
   "version": "0.0.0",
   "buildoptions": [
