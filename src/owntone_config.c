@@ -48,6 +48,7 @@
 #include <limits.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <pwd.h>
 
 #include <json.h>
@@ -69,6 +70,48 @@ gid_t    runas_gid;
 static json_object *root;
 static char        *config_path;
 static bool         restart_required_pending;
+
+
+/* ----------------------- Built-in default config ------------------------- */
+
+static json_object *
+config_defaults_build(void)
+{
+  json_object *defaults;
+  json_object *trusted_networks;
+
+  defaults = json_object_new_object();
+  if (!defaults)
+    return NULL;
+
+  trusted_networks = json_object_new_array();
+  if (!trusted_networks)
+    {
+      json_object_put(defaults);
+      return NULL;
+    }
+
+  json_object_array_add(trusted_networks, json_object_new_string("lan"));
+
+  json_object_object_add(defaults, "uid", json_object_new_string("owntone"));
+  json_object_object_add(defaults, "server_name", json_object_new_string("owntone-mini"));
+  json_object_object_add(defaults, "user_agent", json_object_new_string(PACKAGE_NAME "/" PACKAGE_VERSION));
+  json_object_object_add(defaults, "loglevel", json_object_new_int(3));
+  json_object_object_add(defaults, "logfile", json_object_new_string("/var/log/owntone.log"));
+  json_object_object_add(defaults, "pipe_path", json_object_new_string("/tmp/owntone.fifo"));
+  json_object_object_add(defaults, "pipe_autostart", json_object_new_boolean(true));
+  json_object_object_add(defaults, "pipe_sample_rate", json_object_new_int(44100));
+  json_object_object_add(defaults, "pipe_bits_per_sample", json_object_new_int(16));
+  json_object_object_add(defaults, "ipv6", json_object_new_boolean(true));
+  json_object_object_add(defaults, "start_buffer_ms", json_object_new_int(2250));
+  json_object_object_add(defaults, "uncompressed_alac", json_object_new_boolean(false));
+  json_object_object_add(defaults, "airplay_timing_port", json_object_new_int(0));
+  json_object_object_add(defaults, "airplay_control_port", json_object_new_int(0));
+  json_object_object_add(defaults, "trusted_networks", trusted_networks);
+  json_object_object_add(defaults, "airplay_devices", json_object_new_object());
+
+  return defaults;
+}
 
 
 /* -------------------- API-settable key registry --------------------------- */
@@ -269,6 +312,48 @@ config_get_device_reconnect(const char *device)
 }
 
 static int config_write(void); /* forward declaration */
+static int config_write_json_to_path(const char *path, json_object *obj);
+
+int
+config_ensure_exists(const char *path)
+{
+  struct stat sb;
+  json_object *defaults;
+  int ret;
+
+  DPRINTF(E_DBG, L_CONF, "Checking for settings file '%s'\n", path);
+
+  ret = stat(path, &sb);
+  if (ret == 0)
+    {
+      DPRINTF(E_DBG, L_CONF, "Settings file already exists: '%s'\n", path);
+      return 0;
+    }
+
+  if (errno != ENOENT)
+    {
+      DPRINTF(E_LOG, L_CONF, "Could not stat settings file '%s': %s\n", path, strerror(errno));
+      return -1;
+    }
+
+  DPRINTF(E_WARN, L_CONF, "Settings file missing, creating defaults at '%s'\n", path);
+
+  defaults = config_defaults_build();
+  if (!defaults)
+    {
+      DPRINTF(E_LOG, L_CONF, "Could not build default settings for '%s'\n", path);
+      return -1;
+    }
+
+  ret = config_write_json_to_path(path, defaults);
+  json_object_put(defaults);
+  if (ret < 0)
+    return -1;
+
+  DPRINTF(E_INFO, L_CONF, "Created default settings file '%s'\n", path);
+
+  return 0;
+}
 
 int
 config_set_device_str(const char *device, const char *key, const char *value)
@@ -304,7 +389,7 @@ config_set_device_str(const char *device, const char *key, const char *value)
 /* ----------------------- API write-back ----------------------------------- */
 
 static int
-config_write(void)
+config_write_json_to_path(const char *path, json_object *obj)
 {
   char tmppath[PATH_MAX];
   FILE *fp;
@@ -312,17 +397,19 @@ config_write(void)
   bool direct_write = false;
   int ret;
 
-  if (!root || !config_path)
+  if (!path || !obj)
     return -1;
 
-  snprintf(tmppath, sizeof(tmppath), "%s.tmp", config_path);
+  snprintf(tmppath, sizeof(tmppath), "%s.tmp", path);
 
-  json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PRETTY);
+  json_str = json_object_to_json_string_ext(obj, JSON_C_TO_STRING_PRETTY | JSON_C_TO_STRING_NOSLASHESCAPE);
   if (!json_str)
     {
       DPRINTF(E_LOG, L_CONF, "Failed to serialise settings to JSON\n");
       return -1;
     }
+
+  DPRINTF(E_DBG, L_CONF, "Writing settings file '%s'\n", path);
 
   fp = fopen(tmppath, "w");
   if (!fp)
@@ -338,34 +425,46 @@ config_write(void)
           return -1;
         }
 
-      fp = fopen(config_path, "w");
+      fp = fopen(path, "w");
       if (!fp)
         {
-          DPRINTF(E_LOG, L_CONF, "Could not open %s for writing: %s\n", config_path, strerror(errno));
+          DPRINTF(E_LOG, L_CONF, "Could not open %s for writing: %s\n", path, strerror(errno));
           return -1;
         }
 
       direct_write = true;
+      DPRINTF(E_DBG, L_CONF, "Falling back to direct settings write for '%s'\n", path);
     }
 
   ret = fputs(json_str, fp);
+  if (ret >= 0)
+    ret = fputc('\n', fp);
   if (ret < 0 || fclose(fp) != 0)
     {
-      DPRINTF(E_LOG, L_CONF, "Could not write %s: %s\n", direct_write ? config_path : tmppath, strerror(errno));
+      DPRINTF(E_LOG, L_CONF, "Could not write %s: %s\n", direct_write ? path : tmppath, strerror(errno));
       return -1;
     }
 
   if (direct_write)
     return 0;
 
-  ret = rename(tmppath, config_path);
+  ret = rename(tmppath, path);
   if (ret < 0)
     {
-      DPRINTF(E_LOG, L_CONF, "Could not rename %s to %s: %s\n", tmppath, config_path, strerror(errno));
+      DPRINTF(E_LOG, L_CONF, "Could not rename %s to %s: %s\n", tmppath, path, strerror(errno));
       return -1;
     }
 
   return 0;
+}
+
+static int
+config_write(void)
+{
+  if (!root || !config_path)
+    return -1;
+
+  return config_write_json_to_path(config_path, root);
 }
 
 int
@@ -471,7 +570,7 @@ config_load(const char *path)
   libhash = murmur_hash64(hostname, strlen(hostname), 0);
 
   // Resolve the uid to run as
-  uid = config_get_str("uid", "nobody");
+  uid = config_get_str("uid", "owntone");
   pw = getpwnam(uid);
   if (!pw)
     {

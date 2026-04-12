@@ -420,6 +420,15 @@ main(int argc, char **argv)
       return EXIT_FAILURE;
     }
 
+  ret = config_ensure_exists(settings_file);
+  if (ret != 0)
+    {
+      DPRINTF(E_FATAL, L_MAIN, "Could not prepare settings file %s\n", settings_file);
+
+      logger_deinit();
+      return EXIT_FAILURE;
+    }
+
   ret = config_load(settings_file);
   if (ret != 0)
     {

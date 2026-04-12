@@ -52,6 +52,10 @@ extern uint64_t libhash;
 extern uid_t    runas_uid;
 extern gid_t    runas_gid;
 
+// Ensure the settings file exists. If it is missing with ENOENT, create it
+// with built-in safe defaults. Returns 0 on success, -1 on error.
+int  config_ensure_exists(const char *path);
+
 // Load settings from JSON file. Must be called before any config_get_* calls.
 // Returns 0 on success, -1 on error.
 int  config_load(const char *path);
