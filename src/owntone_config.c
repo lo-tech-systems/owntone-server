@@ -314,6 +314,17 @@ config_get_device_reconnect(const char *device)
 static int config_write(void); /* forward declaration */
 static int config_write_json_to_path(const char *path, json_object *obj);
 
+static void
+config_log_file_state(const char *path, const struct stat *sb)
+{
+  DPRINTF(E_DBG, L_CONF,
+          "Settings file state for '%s': uid=%lu gid=%lu mode=%04o\n",
+          path,
+          (unsigned long)sb->st_uid,
+          (unsigned long)sb->st_gid,
+          (unsigned int)(sb->st_mode & 07777));
+}
+
 int
 config_ensure_exists(const char *path)
 {
@@ -351,6 +362,109 @@ config_ensure_exists(const char *path)
     return -1;
 
   DPRINTF(E_INFO, L_CONF, "Created default settings file '%s'\n", path);
+
+  return 0;
+}
+
+int
+config_ensure_access(void)
+{
+  struct stat sb;
+  mode_t desired_mode = 0644;
+  bool owner_mismatch;
+  bool mode_mismatch;
+  bool need_repair;
+  bool attempted_repair = false;
+  int ret;
+
+  if (!config_path)
+    return -1;
+
+  ret = stat(config_path, &sb);
+  if (ret < 0)
+    {
+      DPRINTF(E_WARN, L_CONF, "Could not stat settings file '%s' for access check: %s\n", config_path, strerror(errno));
+      return 0;
+    }
+
+  if (!S_ISREG(sb.st_mode))
+    {
+      DPRINTF(E_WARN, L_CONF, "Settings path is not a regular file, skipping access self-heal: '%s'\n", config_path);
+      return 0;
+    }
+
+  config_log_file_state(config_path, &sb);
+
+  owner_mismatch = (sb.st_uid != runas_uid || sb.st_gid != runas_gid);
+  mode_mismatch = ((sb.st_mode & 0777) != desired_mode);
+  need_repair = owner_mismatch || mode_mismatch;
+
+  if (!need_repair)
+    {
+      DPRINTF(E_INFO, L_CONF, "Settings file access already matches runtime user for '%s'\n", config_path);
+      return 0;
+    }
+
+  if (owner_mismatch)
+    {
+      DPRINTF(E_WARN, L_CONF,
+              "Settings file owner/group does not match runtime user for '%s' (found %lu:%lu, expected %lu:%lu)\n",
+              config_path,
+              (unsigned long)sb.st_uid,
+              (unsigned long)sb.st_gid,
+              (unsigned long)runas_uid,
+              (unsigned long)runas_gid);
+    }
+
+  if (mode_mismatch)
+    {
+      DPRINTF(E_WARN, L_CONF,
+              "Settings file mode for '%s' is %04o, expected %04o\n",
+              config_path,
+              (unsigned int)(sb.st_mode & 0777),
+              (unsigned int)desired_mode);
+    }
+
+  if (geteuid() != (uid_t)0)
+    {
+      DPRINTF(E_WARN, L_CONF, "Settings file access needs repair but process is not running as root; continuing\n");
+      return 0;
+    }
+
+  if (owner_mismatch)
+    {
+      ret = chown(config_path, runas_uid, runas_gid);
+      attempted_repair = true;
+      if (ret < 0)
+        DPRINTF(E_WARN, L_CONF, "Could not change owner/group of settings file '%s': %s\n", config_path, strerror(errno));
+    }
+
+  if (mode_mismatch)
+    {
+      ret = chmod(config_path, desired_mode);
+      attempted_repair = true;
+      if (ret < 0)
+        DPRINTF(E_WARN, L_CONF, "Could not change mode of settings file '%s' to %04o: %s\n",
+                config_path, (unsigned int)desired_mode, strerror(errno));
+    }
+
+  if (attempted_repair)
+    {
+      ret = stat(config_path, &sb);
+      if (ret == 0)
+        {
+          config_log_file_state(config_path, &sb);
+
+          owner_mismatch = (sb.st_uid != runas_uid || sb.st_gid != runas_gid);
+          mode_mismatch = ((sb.st_mode & 0777) != desired_mode);
+          if (!owner_mismatch && !mode_mismatch)
+            DPRINTF(E_INFO, L_CONF, "Settings file access self-heal completed for '%s'\n", config_path);
+          else
+            DPRINTF(E_WARN, L_CONF, "Settings file access still differs from the expected runtime user for '%s'; continuing\n", config_path);
+        }
+      else
+        DPRINTF(E_WARN, L_CONF, "Could not re-stat settings file '%s' after access self-heal: %s\n", config_path, strerror(errno));
+    }
 
   return 0;
 }

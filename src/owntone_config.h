@@ -56,6 +56,10 @@ extern gid_t    runas_gid;
 // with built-in safe defaults. Returns 0 on success, -1 on error.
 int  config_ensure_exists(const char *path);
 
+// Check ownership and mode of the loaded settings file against the configured
+// runtime user, and attempt non-fatal self-healing when started as root.
+int  config_ensure_access(void);
+
 // Load settings from JSON file. Must be called before any config_get_* calls.
 // Returns 0 on success, -1 on error.
 int  config_load(const char *path);

@@ -438,6 +438,12 @@ main(int argc, char **argv)
       return EXIT_FAILURE;
     }
 
+  ret = config_ensure_access();
+  if (ret != 0)
+    {
+      DPRINTF(E_WARN, L_MAIN, "Settings file access check reported an unexpected error for %s\n", settings_file);
+    }
+
   logger_deinit();
 
   /* Reinit log facility with settings values */
