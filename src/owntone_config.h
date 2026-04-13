@@ -52,6 +52,13 @@ extern uint64_t libhash;
 extern uid_t    runas_uid;
 extern gid_t    runas_gid;
 
+enum config_startup_actions
+  {
+    CONFIG_STARTUP_UNCHANGED = 0,
+    CONFIG_STARTUP_BOOTSTRAPPED = (1 << 0),
+    CONFIG_STARTUP_ACCESS_SELF_HEAL = (1 << 1),
+  };
+
 // Ensure the settings file exists. If it is missing with ENOENT, create it
 // with built-in safe defaults. Returns 0 on success, -1 on error.
 int  config_ensure_exists(const char *path);
@@ -59,6 +66,10 @@ int  config_ensure_exists(const char *path);
 // Check ownership and mode of the loaded settings file against the configured
 // runtime user, and attempt non-fatal self-healing when started as root.
 int  config_ensure_access(void);
+
+// Returns a bitmask describing whether startup had to bootstrap or self-heal
+// the settings file before normal operation began.
+enum config_startup_actions config_startup_actions_get(void);
 
 // Load settings from JSON file. Must be called before any config_get_* calls.
 // Returns 0 on success, -1 on error.

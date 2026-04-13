@@ -70,6 +70,7 @@ gid_t    runas_gid;
 static json_object *root;
 static char        *config_path;
 static bool         restart_required_pending;
+static enum config_startup_actions config_startup_actions;
 
 
 /* ----------------------- Built-in default config ------------------------- */
@@ -332,6 +333,7 @@ config_ensure_exists(const char *path)
   json_object *defaults;
   int ret;
 
+  config_startup_actions = CONFIG_STARTUP_UNCHANGED;
   DPRINTF(E_DBG, L_CONF, "Checking for settings file '%s'\n", path);
 
   ret = stat(path, &sb);
@@ -361,6 +363,7 @@ config_ensure_exists(const char *path)
   if (ret < 0)
     return -1;
 
+  config_startup_actions |= CONFIG_STARTUP_BOOTSTRAPPED;
   DPRINTF(E_INFO, L_CONF, "Created default settings file '%s'\n", path);
 
   return 0;
@@ -435,6 +438,7 @@ config_ensure_access(void)
     {
       ret = chown(config_path, runas_uid, runas_gid);
       attempted_repair = true;
+      config_startup_actions |= CONFIG_STARTUP_ACCESS_SELF_HEAL;
       if (ret < 0)
         DPRINTF(E_WARN, L_CONF, "Could not change owner/group of settings file '%s': %s\n", config_path, strerror(errno));
     }
@@ -443,6 +447,7 @@ config_ensure_access(void)
     {
       ret = chmod(config_path, desired_mode);
       attempted_repair = true;
+      config_startup_actions |= CONFIG_STARTUP_ACCESS_SELF_HEAL;
       if (ret < 0)
         DPRINTF(E_WARN, L_CONF, "Could not change mode of settings file '%s' to %04o: %s\n",
                 config_path, (unsigned int)desired_mode, strerror(errno));
@@ -467,6 +472,12 @@ config_ensure_access(void)
     }
 
   return 0;
+}
+
+enum config_startup_actions
+config_startup_actions_get(void)
+{
+  return config_startup_actions;
 }
 
 int
@@ -676,6 +687,7 @@ config_load(const char *path)
     }
 
   restart_required_pending = false;
+  config_startup_actions &= ~CONFIG_STARTUP_ACCESS_SELF_HEAL;
 
   // libhash: stable 64-bit identity derived from hostname, used as the
   // AirPlay device ID (Client-Instance / DACP-ID headers, PTP clock seed).
@@ -739,4 +751,5 @@ config_unload(void)
   free(config_path);
   config_path = NULL;
   restart_required_pending = false;
+  config_startup_actions = CONFIG_STARTUP_UNCHANGED;
 }

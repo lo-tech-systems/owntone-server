@@ -465,6 +465,13 @@ main(int argc, char **argv)
   /* Set up libevent logging callback */
   event_set_log_callback(logger_libevent);
 
+  if (config_startup_actions_get() != CONFIG_STARTUP_UNCHANGED)
+    DPRINTF(E_INFO, L_MAIN,
+            "Settings file startup bootstrap/self-heal ran for %s. Details available using `journalctl -xeu owntone.service`\n",
+            settings_file);
+
+  DPRINTF(E_INFO, L_MAIN, "Settings loaded successfully from %s\n", settings_file);
+
   DPRINTF(E_LOG, L_MAIN, "%s version %s taking off\n", PACKAGE_NAME, VERSION);
 
   DPRINTF(E_LOG, L_MAIN, "Built with:\n");
