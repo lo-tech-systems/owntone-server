@@ -1,6 +1,10 @@
 # Configuration
 
-The configuration of OwnTone is usually located in `/etc/owntone.conf`.
+In this fork, the configuration is stored as JSON in `/etc/owntone-settings.json`
+by default.
+
+If the file is missing, the daemon will create it with safe defaults on startup.
+The repository copy of `owntone-settings.json` is kept as a reference template.
 
 ## Format
 
@@ -46,4 +50,5 @@ Path to the directory or directories containing the media to index (your library
 
 ## Other settings
 
-See the [template configuration file](https://raw.githubusercontent.com/owntone/owntone-server/refs/heads/master/owntone.conf.in) for a description of all the settings.
+See the repository `owntone-settings.json` file for the current reference
+defaults used by this fork.

@@ -13,7 +13,8 @@ speakers, and is controlled entirely via an HTTP JSON API.
 * FIFO (named pipe) audio input — compatible with Shairport-Sync and similar tools
 * AirPlay 1 (RAOP) and AirPlay 2 output to multiple simultaneous speakers
 * Metadata forwarding — title/artist/album/artwork pushed to AirPlay speakers
-* JSON config file (`owntone-settings.json`) — no SQLite database
+* JSON config file (`owntone-settings.json`) — auto-created at startup if missing
+  and self-healed for the configured runtime user
 * HTTP JSON API for all control and settings
 * No web UI, no library scanning, no external service integrations
 

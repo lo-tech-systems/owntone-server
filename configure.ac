@@ -262,10 +262,6 @@ AC_ARG_WITH([owntone_group],
 OWNTONE_GROUP=${withval:-$OWNTONE_USER}
 AC_SUBST([OWNTONE_GROUP])
 
-dnl Install config file
-OWNTONE_ARG_DISABLE([install configuration file], [install_conf_file], [INSTALL_CONF_FILE])
-AM_CONDITIONAL([COND_INSTALL_CONF_FILE], [[test "x$enable_install_conf_file" = "xyes"]])
-
 # Service files are not installed like https://www.freedesktop.org/software/systemd/man/daemon.html
 # instructs, because that means they go to /lib/systemd/system (the destination
 # for package service files!) instead of /usr/local/etc/systemd/system with a

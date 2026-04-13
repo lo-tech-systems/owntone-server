@@ -45,22 +45,15 @@ install-data-hook:
 	( $(GETENT) passwd $(OWNTONE_USER) &> /dev/null || $(USERADD) --system --no-create-home --gid $(OWNTONE_GROUP) --groups audio --shell /usr/sbin/nologin $(OWNTONE_USER) )
 	( ! $(GETENT) group pulse-access &> /dev/null || $(USERMOD) --append --groups pulse-access $(OWNTONE_USER) )
 	$(CHOWN) $(OWNTONE_USER):$(OWNTONE_GROUP) "$(DESTDIR)$(localstatedir)/cache/$(PACKAGE)"
-# we do this manually instead of using sysconf_DATA because it overwrites existing config
-if COND_INSTALL_CONF_FILE
-	$(MKDIR_P) "$(DESTDIR)$(sysconfdir)"
-	[ -f $(DESTDIR)$(sysconfdir)/$(CONF_FILE) ] || $(INSTALL_DATA) $(CONF_FILE) $(DESTDIR)$(sysconfdir)/$(CONF_FILE)
-	$(CHOWN) $(OWNTONE_USER):$(OWNTONE_GROUP) "$(DESTDIR)$(sysconfdir)/$(CONF_FILE)"
-	$(CHMOD) 0644 "$(DESTDIR)$(sysconfdir)/$(CONF_FILE)"
-endif
+# The settings file is now created and self-healed by the daemon at runtime.
+# Keep the repository template for reference/documentation, but do not seed
+# $(sysconfdir) during install.
 
 uninstall-hook:
 	( cd "$(DESTDIR)$(localstatedir)/cache" && rm -rf $(PACKAGE) )
 	( cd "$(DESTDIR)$(localstatedir)/log" && rm -f "$(PACKAGE).log*" )
 	( cd "$(DESTDIR)$(localstatedir)/run" && rm -f "$(PACKAGE).pid" )
 	( ! $(GETENT) passwd $(OWNTONE_USER) &> /dev/null || $(USERDEL) $(OWNTONE_USER) )
-if COND_INSTALL_CONF_FILE
-	( cd "$(DESTDIR)$(sysconfdir)" && rm -f $(CONF_FILE) )
-endif
 
 CLEANFILES = $(BUILT_SOURCES)
 
