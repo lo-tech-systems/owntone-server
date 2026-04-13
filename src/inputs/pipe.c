@@ -142,7 +142,7 @@ static struct commands_base *cmdbase;
 static int pipe_sample_rate;
 static int pipe_bits_per_sample;
 // From config - path to the named pipe/FIFO
-static const char *pipe_path;
+static char *pipe_path;
 // From config - should we watch the pipe for data or only start on request
 static int pipe_autostart;
 // The synthetic id used for the config-driven pipe (fixed)
@@ -713,6 +713,7 @@ pipe_watch_update(void *arg, int *retval)
   struct pipe *pipelist;
   struct pipe *pipe;
   struct pipe *next;
+  struct pipe *wanted;
   int count;
 
   if (cmdarg)
@@ -725,9 +726,17 @@ pipe_watch_update(void *arg, int *retval)
     {
       next = pipe->next;
 
-      if (!pipelist_find(pipelist, pipe->id))
+      wanted = pipelist_find(pipelist, pipe->id);
+
+      if (!wanted)
 	{
 	  DPRINTF(E_DBG, L_PLAYER, "Pipe watch deleted: '%s'\n", pipe->path);
+	  watch_del(pipe);
+	  pipelist_remove(&pipe_watch_list, pipe); // Will free pipe
+	}
+      else if (strcmp(pipe->path, wanted->path) != 0)
+	{
+	  DPRINTF(E_DBG, L_PLAYER, "Pipe watch path changed: '%s' -> '%s'\n", pipe->path, wanted->path);
 	  watch_del(pipe);
 	  pipelist_remove(&pipe_watch_list, pipe); // Will free pipe
 	}
@@ -908,20 +917,146 @@ pipe_thread_stop(void)
 // Makes a pipelist from the configured pipe_path. Uses a fixed synthetic id=1.
 // Returns NULL if no pipe_path is configured.
 static struct pipe *
-pipelist_create(void)
+pipelist_create_path(const char *path)
 {
   struct pipe *head;
   struct pipe *pipe;
 
-  if (!pipe_path)
+  if (!path)
     return NULL;
 
-  pipe = pipe_create(pipe_path, 1, PIPE_PCM, pipe_read_cb);
+  pipe = pipe_create(path, 1, PIPE_PCM, pipe_read_cb);
 
   head = NULL;
   pipelist_add(&head, pipe);
 
   return head;
+}
+
+static struct pipe *
+pipelist_create(void)
+{
+  return pipelist_create_path(pipe_path);
+}
+
+static int
+pipe_path_update(const char *path)
+{
+  char *new_path;
+
+  new_path = path ? strdup(path) : NULL;
+  if (path && !new_path)
+    return -1;
+
+  free(pipe_path);
+  pipe_path = new_path;
+
+  return 0;
+}
+
+int
+pipe_path_validate(const char *path)
+{
+  int fd;
+
+  if (!path)
+    return 0;
+
+  fd = pipe_open(path, true);
+  if (fd < 0)
+    return -1;
+
+  pipe_close(fd);
+  return 0;
+}
+
+static int
+pipe_runtime_watch_update(const char *path, int autostart)
+{
+  union pipe_arg cmdarg;
+  struct pipe *new_pipelist;
+  bool watch_before;
+  bool watch_after;
+  int ret;
+
+  watch_before = (pipe_autostart && pipe_path);
+  watch_after = (autostart && path);
+
+  if (!watch_before && !watch_after)
+    return 0;
+
+  new_pipelist = watch_after ? pipelist_create_path(path) : NULL;
+  if (watch_after && !new_pipelist)
+    return -1;
+
+  if (!watch_before && watch_after)
+    pipe_thread_start();
+
+  cmdarg.pipelist = new_pipelist;
+  ret = commands_exec_sync(cmdbase, pipe_watch_update, NULL, &cmdarg);
+  if (ret < 0)
+    {
+      if (new_pipelist)
+	pipe_free(new_pipelist);
+
+      if (!watch_before && watch_after)
+	{
+	  DPRINTF(E_LOG, L_PLAYER, "Pipe watch command failed after thread start; stopping pipe thread\n");
+	  if (cmdbase)
+	    pipe_thread_stop();
+	}
+      return -1;
+    }
+
+  if (watch_before && !watch_after)
+    pipe_thread_stop();
+
+  return 0;
+}
+
+static int
+pipe_config_reload(void)
+{
+  const char *new_pipe_path;
+  char *new_pipe_path_copy;
+  int new_pipe_autostart;
+  bool path_changed;
+  bool autostart_changed;
+  int ret;
+
+  new_pipe_path = config_get_str("pipe_path", NULL);
+  new_pipe_autostart = config_get_bool("pipe_autostart", true);
+
+  path_changed = ((pipe_path == NULL && new_pipe_path != NULL)
+               || (pipe_path != NULL && new_pipe_path == NULL)
+               || (pipe_path && new_pipe_path && strcmp(pipe_path, new_pipe_path) != 0));
+  autostart_changed = (pipe_autostart != new_pipe_autostart);
+  if (!path_changed && !autostart_changed)
+    return 0;
+
+  ret = pipe_path_validate(new_pipe_path);
+  if (ret < 0)
+    return -1;
+
+  new_pipe_path_copy = new_pipe_path ? strdup(new_pipe_path) : NULL;
+  if (new_pipe_path && !new_pipe_path_copy)
+    return -1;
+
+  ret = pipe_runtime_watch_update(new_pipe_path, new_pipe_autostart);
+  if (ret < 0)
+    {
+      free(new_pipe_path_copy);
+      return -1;
+    }
+
+  free(pipe_path);
+  pipe_path = new_pipe_path_copy;
+
+  pipe_autostart = new_pipe_autostart;
+  if (path_changed)
+    pipe_autostart_id = 0;
+
+  return path_changed ? 1 : 0;
 }
 
 
@@ -1042,11 +1177,17 @@ metadata_get(struct input_metadata *metadata, struct input_source *source)
 static int
 init(void)
 {
+  const char *configured_pipe_path;
+  int ret;
+
   CHECK_ERR(L_PLAYER, mutex_init(&pipe_metadata.prepared.lock));
 
   pipe_metadata.prepared.pict_tmpfile_fd = -1;
 
-  pipe_path = config_get_str("pipe_path", NULL);
+  configured_pipe_path = config_get_str("pipe_path", NULL);
+  ret = pipe_path_update(configured_pipe_path);
+  if (ret < 0)
+    return -1;
 
   pipe_autostart = config_get_bool("pipe_autostart", true);
   if (pipe_autostart && pipe_path)
@@ -1092,6 +1233,10 @@ deinit(void)
   if (pipe_autostart && pipe_path)
     pipe_thread_stop();
 
+  free(pipe_path);
+  pipe_path = NULL;
+  pipe_autostart_id = 0;
+
   CHECK_ERR(L_PLAYER, pthread_mutex_destroy(&pipe_metadata.prepared.lock));
 }
 
@@ -1105,5 +1250,6 @@ struct input_definition input_pipe =
   .stop = stop,
   .metadata_get = metadata_get,
   .init = init,
+  .config_reload = pipe_config_reload,
   .deinit = deinit,
 };

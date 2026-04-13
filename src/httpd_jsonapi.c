@@ -31,8 +31,6 @@
 #endif
 
 #include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -49,6 +47,7 @@
 #include "misc_json.h"
 #include "player.h"
 #include "outputs.h"
+#include "input.h"
 
 
 
@@ -150,6 +149,25 @@ safe_json_add_date_from_string(json_object *obj, const char *key, const char *va
 
   json_object_object_add(obj, key, json_object_new_string(result));
 }
+
+static int
+jsonapi_reply_error(struct httpd_request *hreq, int status_code, const char *message)
+{
+  json_object *jreply;
+  int ret;
+
+  CHECK_NULL(L_WEB, jreply = json_object_new_object());
+  safe_json_add_string(jreply, "error", message);
+
+  httpd_header_add(hreq->out_headers, "Content-Type", "application/json");
+  ret = evbuffer_add_printf(hreq->out_body, "%s", json_object_to_json_string(jreply));
+  if (ret < 0)
+    DPRINTF(E_WARN, L_WEB, "Failed to write error response body\n");
+
+  jparse_free(jreply);
+  return status_code;
+}
+
 /* ---- Flat settings table backed by owntone_config ---- */
 #define SETTING_TYPE_INT  0
 #define SETTING_TYPE_BOOL 1
@@ -232,6 +250,8 @@ jsonapi_reply_settings_option_put(struct httpd_request *hreq)
   const char *categoryname = hreq->path_parts[2];
   const char *optionname   = hreq->path_parts[3];
   const struct setting_entry *entry;
+  const char *value;
+  char errmsg[256];
   json_object *request;
   json_object *jreply;
   bool restart_required;
@@ -256,7 +276,22 @@ jsonapi_reply_settings_option_put(struct httpd_request *hreq)
   else if (entry->type == SETTING_TYPE_BOOL && jparse_contains_key(request, "value", json_type_boolean))
     ret = config_set_bool(entry->config_key, jparse_bool_from_obj(request, "value"));
   else if (entry->type == SETTING_TYPE_STR && jparse_contains_key(request, "value", json_type_string))
-    ret = config_set_str(entry->config_key, jparse_str_from_obj(request, "value"));
+    {
+      value = jparse_str_from_obj(request, "value");
+      if (strcmp(entry->config_key, "pipe_path") == 0)
+        {
+          ret = pipe_path_validate(value);
+          if (ret < 0)
+            {
+              snprintf(errmsg, sizeof(errmsg), "Invalid pipe_path: '%s' does not exist, is not a FIFO, or is not accessible", value);
+              DPRINTF(E_LOG, L_WEB, "%s\n", errmsg);
+              jparse_free(request);
+              return jsonapi_reply_error(hreq, HTTP_BADREQUEST, errmsg);
+            }
+        }
+
+      ret = config_set_str(entry->config_key, value);
+    }
   else
     {
       DPRINTF(E_LOG, L_WEB, "Invalid value for setting '%s/%s': %s\n", categoryname, optionname, json_object_to_json_string(request));
@@ -271,13 +306,16 @@ jsonapi_reply_settings_option_put(struct httpd_request *hreq)
       return HTTP_INTERNAL;
     }
 
-  restart_required = config_restart_required_get() || (strcmp(entry->config_key, "pipe_path") == 0);
+  restart_required = config_restart_required_get();
 
   CHECK_NULL(L_WEB, jreply = json_object_new_object());
   json_object_object_add(jreply, "restart_required", json_object_new_boolean(restart_required));
   CHECK_ERRNO(L_WEB, evbuffer_add_printf(hreq->out_body, "%s", json_object_to_json_string(jreply)));
 
-  DPRINTF(E_INFO, L_WEB, "Setting '%s/%s' changed to '%s'\n", categoryname, optionname, json_object_to_json_string(request));
+  DPRINTF(E_INFO, L_WEB, "Setting '%s/%s' changed to '%s'\n",
+          categoryname,
+          optionname,
+          json_object_to_json_string_ext(request, JSON_C_TO_STRING_NOSLASHESCAPE));
   jparse_free(jreply);
   jparse_free(request);
   return HTTP_OK;
@@ -343,14 +381,44 @@ jsonapi_reply_config(struct httpd_request *hreq)
 
 /*
  * Endpoint to reload config and re-populate the in-memory queue.
- * Useful after changing pipe_path in the settings file.
+ * Applies live pipe configuration changes (pipe_path, pipe_autostart).
  * Returns 204 No Content on success.
  */
 static int
 jsonapi_reply_update(struct httpd_request *hreq)
 {
-  config_reload();
-  db_queue_set_pipe(config_get_str("pipe_path", NULL));
+  const char *old_pipe_path;
+  char *old_pipe_path_saved;
+  int ret;
+
+  /* Save the current live pipe_path before reloading, so we can roll back
+   * the config if the input module rejects the new value. */
+  old_pipe_path = db_queue_get_pipe_path();
+  old_pipe_path_saved = old_pipe_path ? strdup(old_pipe_path) : NULL;
+
+  if (config_reload() < 0)
+    {
+      free(old_pipe_path_saved);
+      return jsonapi_reply_error(hreq, HTTP_INTERNAL, "Failed to reload configuration");
+    }
+
+  ret = player_input_config_reload();
+  if (ret < 0)
+    {
+      /* Roll back the in-memory config to the previously live path so
+       * GET /api/settings/misc/pipe_path continues to report what is
+       * actually running. */
+      if (old_pipe_path_saved)
+        config_set_str("pipe_path", old_pipe_path_saved);
+      free(old_pipe_path_saved);
+      return jsonapi_reply_error(hreq, HTTP_INTERNAL, "Failed to apply updated input configuration");
+    }
+
+  /* If pipe_path changed (ret > 0), update the queue item to match. */
+  if (ret > 0)
+    db_queue_set_pipe(config_get_str("pipe_path", NULL));
+
+  free(old_pipe_path_saved);
   return HTTP_NOCONTENT;
 }
 
@@ -823,7 +891,10 @@ jsonapi_request(struct httpd_request *hreq)
 	httpd_send_reply(hreq, HTTP_NOTMODIFIED, NULL, HTTPD_SEND_NO_GZIP);
 	break;
       case HTTP_BADREQUEST:          /* 400 Bad Request */
-	httpd_send_error(hreq, status_code, "Bad Request");
+	if (evbuffer_get_length(hreq->out_body) > 0)
+	  httpd_send_reply(hreq, status_code, "Bad Request", HTTPD_SEND_NO_GZIP);
+	else
+	  httpd_send_error(hreq, status_code, "Bad Request");
 	break;
       case 403:
 	httpd_send_error(hreq, status_code, "Forbidden");
@@ -835,6 +906,11 @@ jsonapi_request(struct httpd_request *hreq)
         httpd_send_error(hreq, status_code, "Service Unavailable");
         break;
       case HTTP_INTERNAL:            /* 500 Internal Server Error */
+	if (evbuffer_get_length(hreq->out_body) > 0)
+	  httpd_send_reply(hreq, status_code, "Internal Server Error", HTTPD_SEND_NO_GZIP);
+	else
+	  httpd_send_error(hreq, HTTP_INTERNAL, "Internal Server Error");
+	break;
       default:
 	httpd_send_error(hreq, HTTP_INTERNAL, "Internal Server Error");
 	break;

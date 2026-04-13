@@ -929,6 +929,31 @@ input_init(void)
   return -1;
 }
 
+int
+input_config_reload(void)
+{
+  int changed = 0;
+  int ret;
+  int i;
+
+  for (i = 0; inputs[i]; i++)
+    {
+      if (inputs[i]->disabled)
+	continue;
+
+      if (!inputs[i]->config_reload)
+	continue;
+
+      ret = inputs[i]->config_reload();
+      if (ret < 0)
+	return -1;
+      if (ret > 0)
+	changed = 1;
+    }
+
+  return changed;
+}
+
 void
 input_deinit(void)
 {

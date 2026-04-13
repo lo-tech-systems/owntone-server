@@ -243,7 +243,7 @@ curl -X PUT "http://localhost:3689/api/outputs/set" \
 | ------ | -------- | ----------- |
 | GET | `/api/config` | Get configuration information |
 | GET | `/api/library` | Get basic health/status information |
-| PUT | `/api/update` | Reload configuration and refresh the in-memory pipe item |
+| PUT | `/api/update` | Reload configuration, apply any changed pipe settings live, and refresh the in-memory pipe item |
 
 ### Config
 
@@ -321,7 +321,10 @@ GET /api/library
 
 ### Update
 
-Reloads configuration and refreshes the in-memory synthetic pipe queue item.
+Reloads configuration, applies any changed pipe settings live, and refreshes the in-memory synthetic pipe queue item.
+
+If `misc/pipe_path` or `misc/pipe_autostart` changed on disk, the running pipe input is reconfigured immediately.
+If there is no relevant change, this endpoint is effectively a no-op for the pipe runtime.
 
 **Endpoint**
 
@@ -332,6 +335,8 @@ PUT /api/update
 **Response**
 
 Returns HTTP `204 No Content` on success.
+
+Returns HTTP `500 Internal Server Error` with a JSON error object if the updated pipe configuration cannot be applied.
 
 ## Settings
 
@@ -348,15 +353,15 @@ There are no category-listing or option-listing endpoints in this build.
 | --- | ---- | ----- |
 | `name` | string | Option name |
 | `type` | integer | `0` = integer, `1` = boolean, `2` = string |
-| `value` | varies | Current value in use. For `misc/pipe_path` this is the live path currently used by the running server, which may differ from the pending on-disk value after a restart-required PUT. |
+| `value` | varies | Current value in use. For `misc/pipe_path` this is the live path currently used by the running server, which may differ from the persisted on-disk value until `PUT /api/update` applies the change. |
 
 ### Supported settings
 
 | Endpoint | Type | Notes |
 | -------- | ---- | ----- |
 | `/api/settings/misc/loglevel` | integer | Log level |
-| `/api/settings/misc/pipe_path` | string | Pipe/FIFO path, persisted immediately but not applied until restart. GET returns the live path currently in use. |
-| `/api/settings/misc/pipe_autostart` | boolean | Whether the pipe input autostarts |
+| `/api/settings/misc/pipe_path` | string | Pipe/FIFO path. The provided path must already exist, be a FIFO, and be readable by the server. A successful PUT persists the value immediately; `PUT /api/update` makes it live. GET returns the live path currently in use. |
+| `/api/settings/misc/pipe_autostart` | boolean | Whether the pipe input autostarts. Changes become live on `PUT /api/update`. |
 | `/api/settings/misc/ipv6` | boolean | IPv6 enable/disable, restart required |
 | `/api/settings/player/start_buffer_ms` | integer | Start buffer in milliseconds, valid range `300` to `3500`, restart required |
 | `/api/settings/player/uncompressed_alac` | boolean | ALAC output preference, restart required |
@@ -383,7 +388,7 @@ curl -X GET "http://localhost:3689/api/settings/player/start_buffer_ms"
 }
 ```
 
-For `misc/pipe_path`, the response reflects the current live pipe path in use by the running process. If a new value has been written but the service has not yet been restarted, GET continues to return the old live value.
+For `misc/pipe_path`, the response reflects the current live pipe path in use by the running process. If a new value has been written but `PUT /api/update` has not yet been called, GET continues to return the old live value.
 
 ### Change a setting
 
@@ -414,7 +419,19 @@ On success returns HTTP `200 OK` with:
 
 `restart_required` reflects whether the server currently has any pending restart-required configuration changes.
 
-`PUT /api/settings/misc/pipe_path` is restart-only in this build. The JSON settings file is updated immediately, but the running pipe input is not reloaded or switched over until the service restarts.
+For settings that can be applied live, such as `misc/pipe_path`, this field may still be `false` if there are no other pending restart-required changes.
+
+For `misc/pipe_path`, the server validates the provided path before persisting it. The path must exist, be a FIFO, and be accessible to the server process.
+
+`PUT /api/settings/misc/pipe_path` does not switch the running pipe immediately. The new value is persisted, and `PUT /api/update` applies it to the live runtime.
+
+If validation fails, the endpoint returns HTTP `400 Bad Request` with a JSON body like:
+
+```json
+{
+  "error": "Invalid pipe_path: '/tmp/example.fifo' does not exist, is not a FIFO, or is not accessible"
+}
+```
 
 **Examples**
 

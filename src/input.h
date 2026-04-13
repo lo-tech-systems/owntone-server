@@ -125,6 +125,9 @@ struct input_definition
   // Initialization function called during startup
   int (*init)(void);
 
+  // Reload runtime configuration after config_reload()
+  int (*config_reload)(void);
+
   // Deinitialization function called at shutdown
   void (*deinit)(void);
 };
@@ -233,6 +236,19 @@ input_metadata_free(struct input_metadata *metadata, int content_only);
  */
 int
 input_init(void);
+
+/*
+ * Reload runtime input configuration after config_reload().
+ */
+int
+input_config_reload(void);
+
+/*
+ * Validate that path exists, is a FIFO, and is accessible.
+ * Returns 0 if valid (or path is NULL), -1 if not.
+ */
+int
+pipe_path_validate(const char *path);
 
 /*
  * Called by player_deinit (so will run in main thread)

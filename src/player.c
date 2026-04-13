@@ -2564,6 +2564,13 @@ volume_generic_bh(void *arg, int *retval)
   return COMMAND_END;
 }
 
+static enum command_state
+input_config_reload_cmd(void *arg, int *retval)
+{
+  *retval = input_config_reload();
+  return COMMAND_END;
+}
+
 /* ------------------------------- Player API ------------------------------- */
 
 int
@@ -2573,6 +2580,12 @@ player_get_status(struct player_status *status)
 
   ret = commands_exec_sync(cmdbase, get_status, NULL, status);
   return ret;
+}
+
+int
+player_input_config_reload(void)
+{
+  return commands_exec_sync(cmdbase, input_config_reload_cmd, NULL, NULL);
 }
 
 

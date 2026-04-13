@@ -130,9 +130,7 @@ static const char *api_settable_keys[] = {
 static bool
 config_key_requires_restart(const char *key)
 {
-  return (strcmp(key, "pipe_autostart") == 0
-       || strcmp(key, "pipe_path") == 0
-       || strcmp(key, "ipv6") == 0
+  return (strcmp(key, "ipv6") == 0
        || strcmp(key, "start_buffer_ms") == 0
        || strcmp(key, "uncompressed_alac") == 0);
 }

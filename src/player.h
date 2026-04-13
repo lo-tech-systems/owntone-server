@@ -60,6 +60,9 @@ typedef void (*spk_enum_cb)(struct player_speaker_info *spk, void *arg);
 int
 player_get_status(struct player_status *status);
 
+int
+player_input_config_reload(void);
+
 void
 player_speaker_enumerate(spk_enum_cb cb, void *arg);
 
