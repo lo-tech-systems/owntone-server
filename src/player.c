@@ -143,6 +143,7 @@ struct speaker_attr_param
 
   struct media_quality quality;
   enum media_format format;
+  enum output_mode mode;
   int offset_ms;
 
   int audio_fd;
@@ -1256,6 +1257,7 @@ device_remove_family(void *arg, int *retval)
   union player_arg *cmdarg = arg;
   struct output_device *remove;
   struct output_device *device;
+  int ret;
 
   remove = cmdarg->device;
 
@@ -1269,31 +1271,39 @@ device_remove_family(void *arg, int *retval)
       return COMMAND_END;
     }
 
-  // v{4,6}_port non-zero indicates the address family stopped advertising
-  if (remove->v4_port && device->v4_address)
+  // Delegate to outputs.c which understands the candidate model. A return
+  // value of 1 means the canonical device has no remaining candidates and
+  // no active session; we must remove it.
+  ret = outputs_device_protocol_remove(device, remove);
+  if (ret < 0)
     {
-      free(device->v4_address);
-      device->v4_address = NULL;
-      device->v4_port = 0;
+      // Not a known multi-protocol type (e.g. legacy local audio):
+      // fall back to the direct address-removal path.
+      if (remove->v4_port && device->v4_address)
+        {
+          free(device->v4_address);
+          device->v4_address = NULL;
+          device->v4_port = 0;
+        }
+      if (remove->v6_port && device->v6_address)
+        {
+          free(device->v6_address);
+          device->v6_address = NULL;
+          device->v6_port = 0;
+        }
+      if (!device->v4_address && !device->v6_address)
+        {
+          device->advertised = 0;
+          // If there is a session we keep the device until the backend gives
+          // us a failure callback; outputs.c will then remove it.
+          if (!device->session)
+            outputs_device_remove(device);
+        }
     }
-
-  if (remove->v6_port && device->v6_address)
+  else if (ret == 1)
     {
-      free(device->v6_address);
-      device->v6_address = NULL;
-      device->v6_port = 0;
-    }
-
-  if (!device->v4_address && !device->v6_address)
-    {
-      device->advertised = 0;
-
-      // If there is a session we will keep the device in the list until the
-      // backend gives us a callback with a failure. Then outputs.c will remove
-      // the device. If the output backend never gives a callback (can that
-      // happen?) then the device will never be removed.
-      if (!device->session)
-	outputs_device_remove(device);
+      // All candidates gone, no active session: remove canonical device
+      outputs_device_remove(device);
     }
 
   outputs_device_free(remove);
@@ -2058,6 +2068,10 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
   else
     spk->format = device->supported_formats;
 
+  strncpy(spk->mode, output_mode_to_string(device->preferred_mode), sizeof(spk->mode) - 1);
+  spk->mode[sizeof(spk->mode) - 1] = '\0';
+  spk->supported_modes = device->supported_modes;
+
   spk->selected = OUTPUTS_DEVICE_DISPLAY_SELECTED(device);
 
   spk->has_password = device->has_password;
@@ -2365,6 +2379,66 @@ speaker_offset_ms_set(void *arg, int *retval)
 
  error:
   DPRINTF(E_LOG, L_PLAYER, "Error setting offset_ms %d, outside of supported range -2000 to 2000\n", param->offset_ms);
+  *retval = -1;
+  return COMMAND_END;
+}
+
+// Callback fired after a forced stop for a protocol mode switch. Applies the
+// newly selected candidate then restarts playback on the device if appropriate.
+static void
+mode_switch_cb(struct output_device *device, enum output_device_state status)
+{
+  if (!device)
+    {
+      DPRINTF(E_WARN, L_PLAYER, "Output device disappeared before mode switch completion\n");
+      commands_exec_end(cmdbase, -1);
+      return;
+    }
+
+  DPRINTF(E_DBG, L_PLAYER, "Mode switch stop complete for '%s', applying new candidate\n", device->name);
+
+  // Now safe: session is NULL so effective_candidate_apply will update extra_device_info
+  outputs_device_candidate_apply(device);
+
+  // Restart if the device is still selected and playback is running
+  if (device->selected && player_state == PLAY_PLAYING)
+    outputs_device_start(device, device_streaming_cb, false);
+
+  commands_exec_end(cmdbase, 0);
+}
+
+static enum command_state
+speaker_mode_set(void *arg, int *retval)
+{
+  struct speaker_attr_param *param = arg;
+  struct output_device *device;
+  int ret;
+
+  device = outputs_device_get(param->spk_id);
+  if (!device)
+    goto error;
+
+  ret = outputs_device_mode_set(device, param->mode);
+  if (ret < 0)
+    goto error; // Invalid mode value
+
+  if (ret == 1)
+    {
+      // Active session, backend would change: stop first, restart in callback
+      *retval = outputs_device_stop(device, mode_switch_cb);
+      if (*retval > 0)
+        return COMMAND_PENDING;
+
+      // Stop returned 0 (already stopped, race) or -1 (error): apply now
+      outputs_device_candidate_apply(device);
+    }
+
+  *retval = 0;
+  return COMMAND_END;
+
+ error:
+  DPRINTF(E_LOG, L_PLAYER, "Error setting mode '%s', device unknown or mode invalid\n",
+          output_mode_to_string(param->mode));
   *retval = -1;
   return COMMAND_END;
 }
@@ -2829,6 +2903,17 @@ player_speaker_offset_ms_set(uint64_t id, int offset_ms)
   param.offset_ms = offset_ms;
 
   return commands_exec_sync(cmdbase, speaker_offset_ms_set, speaker_generic_bh, &param);
+}
+
+int
+player_speaker_mode_set(uint64_t id, enum output_mode mode)
+{
+  struct speaker_attr_param param;
+
+  param.spk_id = id;
+  param.mode   = mode;
+
+  return commands_exec_sync(cmdbase, speaker_mode_set, speaker_generic_bh, &param);
 }
 
 

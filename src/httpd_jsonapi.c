@@ -435,6 +435,7 @@ speaker_to_json(struct player_speaker_info *spk)
 {
   json_object *output;
   json_object *supported_formats;
+  json_object *supported_modes;
   char output_id[21];
   enum media_format format;
 
@@ -446,6 +447,14 @@ speaker_to_json(struct player_speaker_info *spk)
       if (format & spk->supported_formats)
 	json_object_array_add(supported_formats, json_object_new_string(media_format_to_string(format)));
     }
+
+  // supported_modes lists concrete protocols (not "auto"); auto is always
+  // a valid preference regardless and is omitted from the capability list.
+  supported_modes = json_object_new_array();
+  if (spk->supported_modes & OUTPUT_MODE_RAOP)
+    json_object_array_add(supported_modes, json_object_new_string("raop"));
+  if (spk->supported_modes & OUTPUT_MODE_AIRPLAY2)
+    json_object_array_add(supported_modes, json_object_new_string("airplay2"));
 
   snprintf(output_id, sizeof(output_id), "%" PRIu64, spk->id);
   json_object_object_add(output, "id", json_object_new_string(output_id));
@@ -459,6 +468,8 @@ speaker_to_json(struct player_speaker_info *spk)
   json_object_object_add(output, "offset_ms", json_object_new_int(spk->offset_ms));
   json_object_object_add(output, "format", json_object_new_string(media_format_to_string(spk->format)));
   json_object_object_add(output, "supported_formats", supported_formats);
+  json_object_object_add(output, "mode", json_object_new_string(spk->mode));
+  json_object_object_add(output, "supported_modes", supported_modes);
 
   return output;
 }
@@ -579,6 +590,25 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
       ret = format ? player_speaker_format_set(output_id, media_format_from_string(format)) : 0;
       if (ret < 0)
 	goto error;
+    }
+
+  if (jparse_contains_key(request, "mode", json_type_string))
+    {
+      const char *mode_str = jparse_str_from_obj(request, "mode");
+      enum output_mode mode;
+
+      // Unknown mode strings are a bad request; unsupported-but-valid modes
+      // are handled inside player_speaker_mode_set (warn + no-op).
+      if (!mode_str ||
+          (strcmp(mode_str, "auto") != 0 &&
+           strcmp(mode_str, "raop") != 0 &&
+           strcmp(mode_str, "airplay2") != 0))
+        goto error;
+
+      mode = output_mode_from_string(mode_str);
+      ret = player_speaker_mode_set(output_id, mode);
+      if (ret < 0)
+        goto error;
     }
 
   jparse_free(request);

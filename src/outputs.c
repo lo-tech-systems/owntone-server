@@ -100,7 +100,203 @@ static struct output_quality_subscription output_quality_subscriptions[OUTPUTS_M
 static bool outputs_got_new_subscription;
 
 
+/* ----------------------------- Mode helpers ------------------------------- */
+
+const char *
+output_mode_to_string(enum output_mode mode)
+{
+  switch (mode)
+    {
+      case OUTPUT_MODE_RAOP:     return "raop";
+      case OUTPUT_MODE_AIRPLAY2: return "airplay2";
+      default:                   return "auto";
+    }
+}
+
+enum output_mode
+output_mode_from_string(const char *str)
+{
+  if (!str)
+    return OUTPUT_MODE_AUTO;
+  if (strcmp(str, "raop") == 0)
+    return OUTPUT_MODE_RAOP;
+  if (strcmp(str, "airplay2") == 0)
+    return OUTPUT_MODE_AIRPLAY2;
+  return OUTPUT_MODE_AUTO;
+}
+
 /* ------------------------------- MISC HELPERS ----------------------------- */
+
+// Frees a candidate device struct and its backend-specific data. Candidates
+// own their extra_device_info; canonical devices borrow it.
+static void
+candidate_free(struct output_device *candidate)
+{
+  if (!candidate)
+    return;
+
+  if (candidate->extra_device_info && outputs[candidate->type]->device_free_extra)
+    outputs[candidate->type]->device_free_extra(candidate);
+
+  free(candidate->name);
+  free(candidate->auth_key);
+  free(candidate->v4_address);
+  free(candidate->v6_address);
+  free(candidate);
+}
+
+// Returns a pointer to the candidate slot for the given output type, or NULL
+// for types that have no dedicated slot.
+static struct output_device **
+candidate_slot(struct output_device *canonical, enum output_types type)
+{
+  if (type == OUTPUT_TYPE_RAOP)
+    return &canonical->candidate_raop;
+  if (type == OUTPUT_TYPE_AIRPLAY)
+    return &canonical->candidate_airplay2;
+  return NULL;
+}
+
+// Recomputes supported_modes from whichever candidate slots are populated.
+static void
+supported_modes_recompute(struct output_device *device)
+{
+  device->supported_modes = 0;
+  if (device->candidate_raop)
+    device->supported_modes |= OUTPUT_MODE_RAOP;
+  if (device->candidate_airplay2)
+    device->supported_modes |= OUTPUT_MODE_AIRPLAY2;
+}
+
+// Resolves the effective output type from preferred_mode and available
+// candidates, falling back to priority-based selection for AUTO.
+static enum output_types
+effective_type_resolve(struct output_device *device)
+{
+  if (device->preferred_mode == OUTPUT_MODE_RAOP && device->candidate_raop)
+    return OUTPUT_TYPE_RAOP;
+  if (device->preferred_mode == OUTPUT_MODE_AIRPLAY2 && device->candidate_airplay2)
+    return OUTPUT_TYPE_AIRPLAY;
+
+  // AUTO or preferred protocol unavailable: highest priority wins
+  if (device->candidate_airplay2 &&
+      (!device->candidate_raop ||
+       outputs[OUTPUT_TYPE_AIRPLAY]->priority <= outputs[OUTPUT_TYPE_RAOP]->priority))
+    return OUTPUT_TYPE_AIRPLAY;
+
+  return OUTPUT_TYPE_RAOP;
+}
+
+// Copies the active candidate's transport fields into the canonical device.
+// extra_device_info is borrowed (not owned) by the canonical device and is
+// only updated when there is no active session.
+static void
+effective_candidate_apply(struct output_device *canonical)
+{
+  struct output_device *candidate;
+  enum output_types etype;
+
+  etype = effective_type_resolve(canonical);
+  candidate = (etype == OUTPUT_TYPE_RAOP) ? canonical->candidate_raop
+                                          : canonical->candidate_airplay2;
+  if (!candidate)
+    return;
+
+  // Log backend switches before overwriting canonical->type (skip on first apply
+  // where canonical->name is NULL because it has not been set yet)
+  if (canonical->name && canonical->type != etype)
+    DPRINTF(E_INFO, L_PLAYER, "Switching '%s' output backend: %s -> %s\n",
+            canonical->name, outputs_name(canonical->type), candidate->type_name);
+
+  // Log when the user's preferred protocol is unavailable and we fall back
+  if (canonical->preferred_mode != OUTPUT_MODE_AUTO)
+    {
+      bool preferred_unavailable =
+        (canonical->preferred_mode == OUTPUT_MODE_RAOP    && !canonical->candidate_raop) ||
+        (canonical->preferred_mode == OUTPUT_MODE_AIRPLAY2 && !canonical->candidate_airplay2);
+      if (preferred_unavailable)
+        DPRINTF(E_DBG, L_PLAYER, "Preferred protocol for '%s' unavailable, using %s\n",
+                candidate->name, candidate->type_name);
+    }
+
+  canonical->type      = candidate->type;
+  canonical->type_name = candidate->type_name;
+
+  canonical->has_password  = candidate->has_password;
+  canonical->password      = candidate->password;
+  canonical->has_video     = candidate->has_video;
+  canonical->requires_auth = candidate->requires_auth;
+  canonical->v6_disabled   = candidate->v6_disabled;
+  canonical->quality       = candidate->quality;
+  canonical->selected_format = candidate->selected_format;
+  canonical->default_format  = candidate->default_format;
+  canonical->supported_formats = candidate->supported_formats;
+  canonical->max_volume    = candidate->max_volume;
+  canonical->relvol        = candidate->relvol;
+  canonical->resurrect     = candidate->resurrect;
+
+  // Borrow extra_device_info only when the session is gone (safe to switch)
+  if (!canonical->session)
+    canonical->extra_device_info = candidate->extra_device_info;
+
+  // Update canonical's own address copies
+  free(canonical->v4_address);
+  canonical->v4_address = candidate->v4_address ? strdup(candidate->v4_address) : NULL;
+  canonical->v4_port    = candidate->v4_port;
+
+  free(canonical->v6_address);
+  canonical->v6_address = candidate->v6_address ? strdup(candidate->v6_address) : NULL;
+  canonical->v6_port    = candidate->v6_port;
+
+  // Keep name in sync with active candidate
+  free(canonical->name);
+  canonical->name = strdup(candidate->name);
+}
+
+// Stores a new candidate in the canonical device's appropriate slot. For a
+// same-type re-advertisement while a session is active the existing candidate
+// is updated in-place (so extra_device_info remains valid for the session);
+// otherwise the old candidate is replaced.
+static void
+candidate_store(struct output_device *canonical, struct output_device *new_cand)
+{
+  struct output_device **slot = candidate_slot(canonical, new_cand->type);
+  if (!slot)
+    {
+      DPRINTF(E_LOG, L_PLAYER, "Bug! candidate_store called for unsupported type %d\n", new_cand->type);
+      candidate_free(new_cand);
+      return;
+    }
+
+  if (*slot && canonical->session && canonical->type == new_cand->type)
+    {
+      // Active session is using this candidate's extra_device_info. Update
+      // the existing candidate in-place and discard the new one.
+      struct output_device *existing = *slot;
+
+      if (new_cand->v4_address)
+        {
+          free(existing->v4_address);
+          existing->v4_address = strdup(new_cand->v4_address);
+          existing->v4_port    = new_cand->v4_port;
+        }
+      if (new_cand->v6_address)
+        {
+          free(existing->v6_address);
+          existing->v6_address = strdup(new_cand->v6_address);
+          existing->v6_port    = new_cand->v6_port;
+        }
+      existing->has_password       = new_cand->has_password;
+      existing->password           = new_cand->password;
+      existing->supported_formats  = new_cand->supported_formats;
+
+      candidate_free(new_cand);
+      return;
+    }
+
+  candidate_free(*slot); // Free old candidate if any (no-op when NULL)
+  *slot = new_cand;
+}
 
 static output_status_cb
 callback_get(struct output_device *device)
@@ -204,7 +400,41 @@ deferred_cb(int fd, short what, void *arg)
 	      device = NULL;
 	    }
 	  else if (device)
-	    device->state = state;
+	    {
+	      device->state = state;
+
+	      // Handle deferred candidate cleanup after a session ends.
+	      if (!device->session)
+		{
+		  struct output_device **active_slot =
+		    (device->type == OUTPUT_TYPE_RAOP) ? &device->candidate_raop
+		                                       : &device->candidate_airplay2;
+		  struct output_device *active_cand = *active_slot;
+
+		  // Case 1: The active candidate disappeared while a session was
+		  // running. Its slot is still set (kept alive for extra_device_info)
+		  // but the candidate has no addresses. Free it and switch now.
+		  if (active_cand && !active_cand->v4_address && !active_cand->v6_address)
+		    {
+		      DPRINTF(E_INFO, L_PLAYER, "Freeing gone %s candidate for '%s' after session end\n",
+			      active_cand->type_name, device->name);
+		      device->extra_device_info = NULL; // borrowed reference; candidate owns it
+		      candidate_free(active_cand);
+		      *active_slot = NULL;
+		      supported_modes_recompute(device);
+		      if (device->candidate_raop || device->candidate_airplay2)
+			effective_candidate_apply(device);
+		      else
+			device->advertised = 0;
+		    }
+		  // Case 2: The active slot was already cleared through another path.
+		  else if (!active_cand && (device->candidate_raop || device->candidate_airplay2))
+		    {
+		      DPRINTF(E_INFO, L_PLAYER, "Switching '%s' to available protocol after previous backend disappeared\n", device->name);
+		      effective_candidate_apply(device);
+		    }
+		}
+	    }
 
 	  DPRINTF(E_DBG, L_PLAYER, "Making deferred callback to %p, id was %d\n", cb, callback_id);
 
@@ -735,7 +965,6 @@ struct output_device *
 outputs_device_add(struct output_device *add, bool new_deselect)
 {
   struct output_device *device;
-  char *keep_name;
   int keep_offset_ms;
 
   for (device = outputs_device_list; device; device = device->next)
@@ -744,44 +973,41 @@ outputs_device_add(struct output_device *add, bool new_deselect)
 	break;
     }
 
-  // This is relevant for Airplay 1 and 2 where the same device can support both
-  if (device && device->type != add->type)
+  if (device)
     {
-      if (outputs_priority(device) < outputs_priority(add))
-	{
-	  DPRINTF(E_DBG, L_PLAYER, "Ignoring type %s for device '%s', will use type %s\n", add->type_name, add->name, device->type_name);
-	  outputs_device_free(add);
-	  return NULL;
-	}
+      // Known device: store or refresh the arriving protocol candidate.
+      // candidate_store() handles in-place update if a session is active.
+      const char *add_type_name = add->type_name; // save before ownership transfer
+      candidate_store(device, add); // takes ownership of add; add may be freed
+      supported_modes_recompute(device);
+      effective_candidate_apply(device);
 
-      // Remove existing device, higher priority device will be added below
-      outputs_device_remove(device);
-      device = NULL;
+      DPRINTF(E_DBG, L_PLAYER, "Updated %s candidate for device '%s', supported modes: 0x%x\n",
+              add_type_name, device->name, device->supported_modes);
     }
-
-  // New device
-  if (!device)
+  else
     {
-      device = add;
+      // New device: allocate a canonical shell and store add as first candidate.
+      // The canonical struct holds stable user-facing state (volume, selection,
+      // preferred_mode, auth_key); transport fields are populated by
+      // effective_candidate_apply() below.
+      CHECK_NULL(L_PLAYER, device = calloc(1, sizeof(struct output_device)));
 
+      device->id         = add->id;
       device->stop_timer = evtimer_new(evbase_player, stop_timer_cb, device);
 
-      keep_name = strdup(device->name);
-      keep_offset_ms = device->offset_ms; // For legacy local audio and Chromecast where offset could come from config file
+      keep_offset_ms = add->offset_ms; // For legacy local audio and Chromecast where offset could come from config file
 
-      /* No persistent speaker state — use defaults */
-      device->selected = 0;
-      device->volume = (outputs_master_volume >= 0) ? outputs_master_volume : OUTPUTS_DEFAULT_VOLUME;
+      device->selected       = 0;
+      device->preferred_mode = OUTPUT_MODE_AUTO;
+      device->volume         = (outputs_master_volume >= 0) ? outputs_master_volume : OUTPUTS_DEFAULT_VOLUME;
 
       /* Restore persisted AirPlay auth_key (HomeKit pairing) if available */
       {
-        const char *saved_key = config_get_device_str(device->name, "auth_key", NULL);
+        const char *saved_key = config_get_device_str(add->name, "auth_key", NULL);
         if (saved_key)
           device->auth_key = strdup(saved_key);
       }
-
-      free(device->name);
-      device->name = keep_name;
 
       if (keep_offset_ms != 0)
 	device->offset_ms = keep_offset_ms;
@@ -789,42 +1015,12 @@ outputs_device_add(struct output_device *add, bool new_deselect)
       if (new_deselect)
 	device->selected = 0;
 
+      candidate_store(device, add); // takes ownership of add
+      supported_modes_recompute(device);
+      effective_candidate_apply(device); // populates name, type, addresses, etc.
+
       device->next = outputs_device_list;
       outputs_device_list = device;
-    }
-  // Update to a device already in the list
-  else
-    {
-      if (add->v4_address)
-	{
-	  free(device->v4_address);
-
-	  device->v4_address = add->v4_address;
-	  device->v4_port = add->v4_port;
-
-	  // Address is ours now
-	  add->v4_address = NULL;
-	}
-
-      if (add->v6_address)
-	{
-	  free(device->v6_address);
-
-	  device->v6_address = add->v6_address;
-	  device->v6_port = add->v6_port;
-
-	  // Address is ours now
-	  add->v6_address = NULL;
-	}
-
-      free(device->name);
-      device->name = add->name;
-      add->name = NULL;
-
-      device->has_password = add->has_password;
-      device->password = add->password;
-
-      outputs_device_free(add);
     }
 
   device_list_sort();
@@ -1057,7 +1253,13 @@ outputs_device_free(struct output_device *device)
   if (device->session)
     DPRINTF(E_LOG, L_PLAYER, "BUG! Freeing device with active session?\n");
 
-  if (outputs[device->type]->device_free_extra)
+  // Canonical devices borrow extra_device_info from their active candidate.
+  // Null it out so device_free_extra is a no-op on the canonical; the
+  // real cleanup happens via candidate_free() on each candidate slot below.
+  if (device->candidate_raop || device->candidate_airplay2)
+    device->extra_device_info = NULL;
+
+  if (device->extra_device_info && outputs[device->type]->device_free_extra)
     outputs[device->type]->device_free_extra(device);
 
   if (device->stop_timer)
@@ -1068,7 +1270,124 @@ outputs_device_free(struct output_device *device)
   free(device->v4_address);
   free(device->v6_address);
 
+  // Free protocol candidates (each owns its own extra_device_info)
+  candidate_free(device->candidate_raop);
+  candidate_free(device->candidate_airplay2);
+
   free(device);
+}
+
+void
+outputs_device_candidate_apply(struct output_device *device)
+{
+  effective_candidate_apply(device);
+}
+
+int
+outputs_device_mode_set(struct output_device *device, enum output_mode mode)
+{
+  uint32_t mode_bit;
+
+  // Validate: only enumerated values are accepted
+  if (mode != OUTPUT_MODE_AUTO && mode != OUTPUT_MODE_RAOP && mode != OUTPUT_MODE_AIRPLAY2)
+    return -1;
+
+  // For a concrete protocol check that the device actually supports it
+  if (mode != OUTPUT_MODE_AUTO)
+    {
+      mode_bit = (uint32_t)mode;
+      if (!(device->supported_modes & mode_bit))
+        {
+          DPRINTF(E_WARN, L_PLAYER, "Ignoring requested mode '%s' for output '%s': protocol not available\n",
+                  output_mode_to_string(mode), device->name);
+          return 0; // Warn and ignore; not an error from the API's perspective
+        }
+    }
+
+  device->preferred_mode = mode;
+
+  // If no session is active apply immediately; otherwise the caller must stop
+  // the session first and call outputs_device_candidate_apply() in the callback.
+  if (!device->session)
+    {
+      effective_candidate_apply(device);
+      return 0;
+    }
+
+  // Return 1 only when the effective backend would actually change
+  return (effective_type_resolve(device) != device->type) ? 1 : 0;
+}
+
+int
+outputs_device_protocol_remove(struct output_device *canonical, struct output_device *remove)
+{
+  struct output_device **slot;
+  struct output_device *candidate;
+
+  slot = candidate_slot(canonical, remove->type);
+  if (!slot)
+    return -1; // Not a known multi-protocol type; caller uses legacy path
+
+  candidate = *slot;
+  if (!candidate)
+    return 0; // Already gone
+
+  // Remove the departing address family from the candidate
+  if (remove->v4_port && candidate->v4_address)
+    {
+      free(candidate->v4_address);
+      candidate->v4_address = NULL;
+      candidate->v4_port    = 0;
+    }
+  if (remove->v6_port && candidate->v6_address)
+    {
+      free(candidate->v6_address);
+      candidate->v6_address = NULL;
+      candidate->v6_port    = 0;
+    }
+
+  // If the candidate still has at least one address it is still reachable
+  if (candidate->v4_address || candidate->v6_address)
+    {
+      // If this is the active backend, refresh canonical's address fields
+      if (canonical->type == candidate->type)
+        effective_candidate_apply(canonical);
+      return 0;
+    }
+
+  // Candidate has no addresses left
+  DPRINTF(E_INFO, L_PLAYER, "Protocol %s no longer available for device '%s'\n",
+          candidate->type_name, canonical->name);
+
+  if (canonical->session && canonical->type == candidate->type)
+    {
+      // Active session is using this candidate's extra_device_info. Keep the
+      // candidate alive so the session can finish cleanly; the session will
+      // fail, and deferred_cb will switch to the remaining protocol after
+      // device->session is cleared.
+      uint32_t gone_bit = (remove->type == OUTPUT_TYPE_RAOP) ? OUTPUT_MODE_RAOP
+                                                              : OUTPUT_MODE_AIRPLAY2;
+      canonical->supported_modes &= ~gone_bit;
+      // Mark as unadvertised only when no other protocol remains
+      if (!canonical->supported_modes)
+        canonical->advertised = 0;
+      return 0;
+    }
+
+  // Safe to free the candidate now
+  candidate_free(*slot);
+  *slot = NULL;
+  supported_modes_recompute(canonical);
+
+  if (!canonical->candidate_raop && !canonical->candidate_airplay2)
+    {
+      canonical->advertised = 0;
+      return canonical->session ? 0 : 1; // 1 = caller should remove canonical
+    }
+
+  // Another protocol is available: switch to it
+  effective_candidate_apply(canonical);
+  return 0;
 }
 
 // The return value will be the number of devices we need to wait for, either

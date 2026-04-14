@@ -124,6 +124,8 @@ curl -X PUT "http://localhost:3689/api/metadata" \
 | `offset_ms` | integer | Timing offset in milliseconds |
 | `format` | string | Active audio format |
 | `supported_formats` | array | Supported audio format strings |
+| `mode` | string | Active protocol mode preference: `"auto"`, `"raop"`, or `"airplay2"` |
+| `supported_modes` | array | Concrete protocol modes available for this output (subset of `["raop", "airplay2"]`); absent or empty means only one protocol is available |
 
 ### List outputs
 
@@ -159,7 +161,9 @@ curl -X GET "http://localhost:3689/api/outputs"
       "volume": 50,
       "offset_ms": 0,
       "format": "alac",
-      "supported_formats": ["pcm", "alac"]
+      "supported_formats": ["pcm", "alac"],
+      "mode": "auto",
+      "supported_modes": ["raop", "airplay2"]
     }
   ]
 }
@@ -197,6 +201,7 @@ All fields are optional. Any combination may be supplied in one request.
 | `pin` | string | Submit a PIN for authorization |
 | `format` | string | Set the output audio format |
 | `offset_ms` | integer | Set timing offset in milliseconds |
+| `mode` | string | Set the protocol mode preference: `"auto"`, `"raop"`, or `"airplay2"` |
 
 **Response**
 

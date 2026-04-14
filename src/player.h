@@ -6,7 +6,8 @@
 #include <stdint.h>
 
 #include "db.h"
-#include "misc.h" // for struct media_quality
+#include "misc.h"    // for struct media_quality
+#include "outputs.h" // for enum output_mode
 
 enum play_status {
   PLAY_STOPPED = 2,
@@ -27,6 +28,10 @@ struct player_speaker_info {
 
   enum media_format format;
   uint32_t supported_formats;
+
+  // Protocol mode preference and availability (see enum output_mode)
+  char mode[16];
+  uint32_t supported_modes;
 
   bool selected;
   bool has_password;
@@ -98,6 +103,9 @@ player_speaker_format_set(uint64_t id, enum media_format format);
 
 int
 player_speaker_offset_ms_set(uint64_t id, int offset_ms);
+
+int
+player_speaker_mode_set(uint64_t id, enum output_mode mode);
 
 
 int

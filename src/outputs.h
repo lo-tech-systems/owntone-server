@@ -56,6 +56,16 @@ enum output_types
   OUTPUT_TYPE_AIRPLAY,
 };
 
+// User preference for which protocol to use when a device supports more than one.
+// AUTO = 0 is the default. RAOP and AIRPLAY2 double as bitmask values for
+// the supported_modes field on struct output_device.
+enum output_mode
+{
+  OUTPUT_MODE_AUTO     = 0,
+  OUTPUT_MODE_RAOP     = (1 << 0),
+  OUTPUT_MODE_AIRPLAY2 = (1 << 1),
+};
+
 /* Output session state */
 enum output_device_state
 {
@@ -120,6 +130,16 @@ struct output_device
   enum media_format selected_format;
   enum media_format default_format;
   uint32_t supported_formats;
+
+  // Protocol mode preference and availability. supported_modes is a bitmask of
+  // OUTPUT_MODE_RAOP / OUTPUT_MODE_AIRPLAY2, set when the device supports more
+  // than one protocol. preferred_mode is the user preference (AUTO by default).
+  // candidate_raop / candidate_airplay2 hold the per-protocol discovery data;
+  // the canonical device borrows extra_device_info from whichever is active.
+  enum output_mode preferred_mode;
+  uint32_t supported_modes;
+  struct output_device *candidate_raop;
+  struct output_device *candidate_airplay2;
 
   // For user config of speaker start
   int offset_ms;
@@ -260,6 +280,13 @@ struct output_definition
 
 /* ------------------------------- General use ------------------------------ */
 
+// String conversion for output_mode enum values
+const char *
+output_mode_to_string(enum output_mode mode);
+
+enum output_mode
+output_mode_from_string(const char *str);
+
 struct output_device *
 outputs_device_get(uint64_t device_id);
 
@@ -344,6 +371,33 @@ outputs_device_cb_set(struct output_device *device, output_status_cb cb);
 
 void
 outputs_device_free(struct output_device *device);
+
+// Sets the preferred mode on a canonical device. Returns -1 if the mode value
+// is not a valid enum member. Returns 0 if the mode is accepted. If the mode
+// names a concrete protocol (RAOP or AIRPLAY2) that this device does not
+// support, a WARN is logged and the existing mode is kept unchanged (the API
+// treats this as a no-op, not an error). If no session is active, the effective
+// backend is recomputed and applied immediately; the function then returns 0.
+// If a session IS active and the preferred backend would change, the function
+// returns 1 to signal that the caller must stop the session and call
+// outputs_device_candidate_apply() once the stop completes.
+int
+outputs_device_mode_set(struct output_device *device, enum output_mode mode);
+
+// Applies the effective protocol candidate to the canonical device. This
+// updates device->type, type_name, addresses, and extra_device_info. Must
+// only be called when device->session is NULL (i.e. after a stop completes).
+void
+outputs_device_candidate_apply(struct output_device *device);
+
+// Called when a backend advertisement disappears for one address family.
+// Locates the matching candidate by type and removes the gone address. If the
+// candidate has no addresses left it is freed and, if another protocol is
+// available, the effective backend is switched. Returns 1 when the canonical
+// device has no remaining candidates and no active session so the caller
+// should call outputs_device_remove(); returns 0 otherwise.
+int
+outputs_device_protocol_remove(struct output_device *canonical, struct output_device *remove);
 
 int
 outputs_start(output_status_cb started_cb, output_status_cb stopped_cb, bool only_probe);
