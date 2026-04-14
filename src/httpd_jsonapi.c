@@ -540,6 +540,14 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
       goto error;
     }
 
+  if (jparse_contains_key(request, "offset_ms", json_type_int))
+    {
+      offset_ms = jparse_int_from_obj(request, "offset_ms");
+      ret = player_speaker_offset_ms_set(output_id, offset_ms);
+      if (ret < 0)
+	goto error;
+    }
+
   if (jparse_contains_key(request, "selected", json_type_boolean))
     {
       selected = jparse_bool_from_obj(request, "selected");
@@ -569,14 +577,6 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
     {
       format = jparse_str_from_obj(request, "format");
       ret = format ? player_speaker_format_set(output_id, media_format_from_string(format)) : 0;
-      if (ret < 0)
-	goto error;
-    }
-
-  if (jparse_contains_key(request, "offset_ms", json_type_int))
-    {
-      offset_ms = jparse_int_from_obj(request, "offset_ms");
-      ret = player_speaker_offset_ms_set(output_id, offset_ms);
       if (ret < 0)
 	goto error;
     }
