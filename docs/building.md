@@ -56,6 +56,10 @@ With the above configure arguments, a systemd service file will be installed to
 `/etc/systemd/system/owntone.service` so that the server will start on boot.
 Use `--disable-install-systemd` if you don't want that.
 
+`make install` will also install a daily logrotate policy at
+`/etc/logrotate.d/owntone` for the default logfile
+`/var/log/owntone.log`.
+
 Now edit `/etc/owntone.conf`. Note the guide at the top highlighting which
 settings that normally require modification.
 
@@ -99,6 +103,10 @@ sudo make install
 With the above configure arguments, a systemd service file will be installed to
 `/etc/systemd/system/owntone.service` so that the server will start on boot.
 Use `--disable-install-systemd` if you don't want that.
+
+`make install` will also install a daily logrotate policy at
+`/etc/logrotate.d/owntone` for the default logfile
+`/var/log/owntone.log`.
 
 Now edit `/etc/owntone.conf`. Note the guide at the top highlighting which
 settings that normally require modification.

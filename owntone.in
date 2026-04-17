@@ -1,0 +1,17 @@
+/var/log/owntone.log {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0644 @OWNTONE_USER@ root
+    sharedscripts
+    postrotate
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl kill -s HUP owntone.service >/dev/null 2>&1 || true
+        elif [ -s @localstatedir@/run/owntone.pid ]; then
+            kill -HUP "$(cat @localstatedir@/run/owntone.pid)" >/dev/null 2>&1 || true
+        fi
+    endscript
+}

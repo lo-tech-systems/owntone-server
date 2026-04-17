@@ -3,13 +3,17 @@ ACLOCAL_AMFLAGS = -I m4
 RPM_SPEC_FILE = owntone.spec
 CONF_FILE = owntone-settings.json
 SYSTEMD_SERVICE_FILE = owntone.service
+LOGROTATE_CONFIG_FILE = owntone
 
 if COND_INSTALL_SYSTEMD
 systemddir = $(SYSTEMD_DIR)
 systemd_DATA = $(SYSTEMD_SERVICE_FILE)
 endif
 
-BUILT_SOURCES = $(SYSTEMD_SERVICE_FILE)
+logrotatedir = $(sysconfdir)/logrotate.d
+dist_logrotate_DATA = $(LOGROTATE_CONFIG_FILE)
+
+BUILT_SOURCES = $(SYSTEMD_SERVICE_FILE) $(LOGROTATE_CONFIG_FILE)
 
 SUBDIRS = src
 
@@ -34,6 +38,7 @@ nobase_dist_doc_DATA = \
 
 EXTRA_DIST = \
 	$(CONF_FILE) \
+	$(LOGROTATE_CONFIG_FILE).in \
 	$(SYSTEMD_SERVICE_FILE).in \
 	$(RPM_SPEC_FILE)
 
@@ -69,3 +74,10 @@ $(SYSTEMD_SERVICE_FILE): Makefile
 	$(AM_V_at)mv $@-t $@
 
 $(SYSTEMD_SERVICE_FILE): $(srcdir)/$(SYSTEMD_SERVICE_FILE).in
+
+$(LOGROTATE_CONFIG_FILE): Makefile
+	$(AM_V_at)rm -f $@ $@-t
+	$(AM_V_GEN)$(do_subst) "$(srcdir)/$@.in" > $@-t
+	$(AM_V_at)mv $@-t $@
+
+$(LOGROTATE_CONFIG_FILE): $(srcdir)/$(LOGROTATE_CONFIG_FILE).in

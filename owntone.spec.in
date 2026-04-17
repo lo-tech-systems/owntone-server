@@ -98,6 +98,7 @@ exit 0
 %license COPYING
 %{_pkgdocdir}
 %config(noreplace) %{_sysconfdir}/owntone.conf
+%config(noreplace) %{_sysconfdir}/logrotate.d/owntone
 %{_sbindir}/owntone
 %{_libdir}/%{name}/
 %{_datarootdir}/%{name}/
