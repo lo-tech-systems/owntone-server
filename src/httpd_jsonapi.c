@@ -659,33 +659,33 @@ jsonapi_reply_outputs_set(struct httpd_request *hreq)
   DPRINTF(E_DBG, L_WEB, "Received select-outputs post request: %s\n", json_object_to_json_string(request));
 
   ret = jparse_array_from_obj(request, "outputs", &outputs);
-  if (ret == 0)
+  if (ret < 0)
     {
-      nspk = json_object_array_length(outputs);
-
-      CHECK_NULL(L_WEB, ids = calloc((nspk + 1), sizeof(uint64_t)));
-      ids[0] = nspk;
-
-      ret = 0;
-      for (i = 0; i < nspk; i++)
-	{
-	  output_id = json_object_array_get_idx(outputs, i);
-	  ret = safe_atou64(json_object_get_string(output_id), &ids[i + 1]);
-	  if (ret < 0)
-	    {
-	      DPRINTF(E_LOG, L_WEB, "Failed to convert output id: %s\n", json_object_to_json_string(request));
-	      break;
-	    }
-	}
-
-      if (ret == 0)
-	player_speaker_set(ids);
-
-      free(ids);
+      DPRINTF(E_LOG, L_WEB, "Missing outputs in request body: %s\n", json_object_to_json_string(request));
+      jparse_free(request);
+      return HTTP_BADREQUEST;
     }
-  else
-    DPRINTF(E_LOG, L_WEB, "Missing outputs in request body: %s\n", json_object_to_json_string(request));
 
+  nspk = json_object_array_length(outputs);
+
+  CHECK_NULL(L_WEB, ids = calloc((nspk + 1), sizeof(uint64_t)));
+  ids[0] = nspk;
+
+  for (i = 0; i < nspk; i++)
+    {
+      output_id = json_object_array_get_idx(outputs, i);
+      ret = safe_atou64(json_object_get_string(output_id), &ids[i + 1]);
+      if (ret < 0)
+	{
+	  DPRINTF(E_LOG, L_WEB, "Failed to convert output id: %s\n", json_object_to_json_string(request));
+	  free(ids);
+	  jparse_free(request);
+	  return HTTP_BADREQUEST;
+	}
+    }
+
+  player_speaker_set(ids);
+  free(ids);
   jparse_free(request);
 
   return HTTP_NOCONTENT;
