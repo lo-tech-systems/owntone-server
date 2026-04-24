@@ -1134,8 +1134,9 @@ playback_cb(int fd, short what, void *arg)
     overrun = ret;
 #endif /* HAVE_TIMERFD */
 
-  // We are too delayed, probably some output blocked: reset if first overrun or abort if second overrun
-  if (overrun > pb_write_deficit_max)
+  // We are too delayed, probably some output blocked: reset if first overrun or abort if second overrun.
+  // Pipe sources with no active outputs will appear to overrun (nothing to write to), so skip this.
+  if (overrun > pb_write_deficit_max && pb_session.playing_now->data_kind != DATA_KIND_PIPE)
     {
       if (pb_write_recovery)
 	{
@@ -1212,7 +1213,8 @@ playback_cb(int fd, short what, void *arg)
 	}
     }
 
-  if (pb_session.read_deficit_max && pb_session.read_deficit > pb_session.read_deficit_max)
+  if (pb_session.read_deficit_max && pb_session.read_deficit > pb_session.read_deficit_max
+      && pb_session.playing_now->data_kind != DATA_KIND_PIPE)
     {
       DPRINTF(E_LOG, L_PLAYER, "Source is not providing sufficient data, temporarily suspending playback (deficit=%zu/%zu bytes)\n",
 	pb_session.read_deficit, pb_session.read_deficit_max);
@@ -1333,7 +1335,9 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
       if (player_state != PLAY_PLAYING)
 	goto out;
 
-      if (outputs_sessions_count() == 0)
+      // For live pipe sources keep playing even with no outputs, so that a
+      // client enabling an output gets a real stream start instead of a probe.
+      if (outputs_sessions_count() == 0 && pb_session.playing_now->data_kind != DATA_KIND_PIPE)
 	pb_suspend();
 
       if (!device->resurrect)
@@ -1381,8 +1385,9 @@ device_volume_cb(struct output_device *device, enum output_device_state status)
 
  out:
   // If a failure occurred when setting the volume, and we also don't have other
-  // active sessions, then we suspend playback
-  if (outputs_sessions_count() == 0)
+  // active sessions, then we suspend playback (but not for live pipe sources)
+  if (outputs_sessions_count() == 0
+      && (!pb_session.playing_now || pb_session.playing_now->data_kind != DATA_KIND_PIPE))
     pb_suspend();
 
   commands_exec_end(cmdbase, 0);
