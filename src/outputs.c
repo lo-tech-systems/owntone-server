@@ -99,6 +99,19 @@ static struct timeval outputs_stop_timeout = { OUTPUTS_STOP_TIMEOUT, 0 };
 static struct output_quality_subscription output_quality_subscriptions[OUTPUTS_MAX_QUALITY_SUBSCRIPTIONS + 1];
 static bool outputs_got_new_subscription;
 
+struct output_group
+{
+  char *id;
+  char *name;
+  uint64_t leader_id;
+  uint64_t *member_ids;
+  size_t members_count;
+  bool leader_known;
+  struct output_group *next;
+};
+
+static struct output_group *outputs_group_list;
+
 
 /* ----------------------------- Mode helpers ------------------------------- */
 
@@ -127,6 +140,148 @@ output_mode_from_string(const char *str)
 
 /* ------------------------------- MISC HELPERS ----------------------------- */
 
+static void
+output_group_free_all(void)
+{
+  struct output_group *group;
+  struct output_group *next;
+
+  for (group = outputs_group_list; group; group = next)
+    {
+      next = group->next;
+      free(group->id);
+      free(group->name);
+      free(group->member_ids);
+      free(group);
+    }
+
+  outputs_group_list = NULL;
+}
+
+static struct output_group *
+output_group_find_or_add(const char *group_id)
+{
+  struct output_group *group;
+
+  for (group = outputs_group_list; group; group = group->next)
+    {
+      if (strcmp(group->id, group_id) == 0)
+        return group;
+    }
+
+  CHECK_NULL(L_PLAYER, group = calloc(1, sizeof(struct output_group)));
+  group->id = safe_strdup(group_id);
+  group->next = outputs_group_list;
+  outputs_group_list = group;
+
+  return group;
+}
+
+static void
+output_group_member_add(struct output_group *group, uint64_t device_id)
+{
+  uint64_t *member_ids;
+
+  CHECK_NULL(L_PLAYER, member_ids = realloc(group->member_ids, (group->members_count + 1) * sizeof(uint64_t)));
+  group->member_ids = member_ids;
+  group->member_ids[group->members_count++] = device_id;
+}
+
+static void
+device_group_fields_clear(struct output_device *device)
+{
+  free(device->display_name);
+  device->display_name = NULL;
+
+  free(device->group_id);
+  device->group_id = NULL;
+
+  free(device->group_name);
+  device->group_name = NULL;
+
+  device->group_leader_id = 0;
+  device->is_grouped = 0;
+  device->is_group_leader = 0;
+  device->is_group_hidden = 0;
+  device->leader_hint_gcgl = 0;
+  device->leader_hint_igl = 0;
+}
+
+static void
+device_group_fields_copy(struct output_device *dst, struct output_device *src)
+{
+  device_group_fields_clear(dst);
+
+  dst->display_name = safe_strdup(src->display_name);
+  dst->group_id = safe_strdup(src->group_id);
+  dst->group_name = safe_strdup(src->group_name);
+  dst->group_leader_id = src->group_leader_id;
+  dst->is_grouped = src->is_grouped;
+  dst->is_group_leader = src->is_group_leader;
+  dst->is_group_hidden = src->is_group_hidden;
+  dst->leader_hint_gcgl = src->leader_hint_gcgl;
+  dst->leader_hint_igl = src->leader_hint_igl;
+}
+
+static void
+output_group_refresh(void)
+{
+  struct output_device *device;
+  struct output_device *candidate;
+  struct output_group *group;
+  const char *log_name;
+  int leaders;
+
+  output_group_free_all();
+
+  for (device = outputs_device_list; device; device = device->next)
+    {
+      candidate = device->candidate_airplay2;
+
+      // Stereo/group discovery is only tracked for AirPlay 2-capable devices.
+      if (!candidate || !candidate->group_id)
+        continue;
+
+      group = output_group_find_or_add(candidate->group_id);
+      if (!group->name && candidate->group_name)
+        group->name = safe_strdup(candidate->group_name);
+      if (candidate->is_group_leader && !group->leader_known)
+        {
+          group->leader_id = device->id;
+          group->leader_known = true;
+        }
+
+      output_group_member_add(group, device->id);
+    }
+
+  for (group = outputs_group_list; group; group = group->next)
+    {
+      leaders = 0;
+      for (device = outputs_device_list; device; device = device->next)
+        {
+          candidate = device->candidate_airplay2;
+          if (!candidate || !candidate->group_id || strcmp(candidate->group_id, group->id) != 0)
+            continue;
+          if (candidate->is_group_leader)
+            leaders++;
+        }
+
+      if (leaders > 1)
+        DPRINTF(E_WARN, L_PLAYER, "AirPlay stereo group gid=%s has multiple leader candidates (%d)\n",
+                group->id, leaders);
+      else if (!group->leader_known)
+        DPRINTF(E_WARN, L_PLAYER, "AirPlay stereo group gid=%s has no leader candidate\n", group->id);
+
+      if (group->members_count < 2)
+        DPRINTF(E_WARN, L_PLAYER, "AirPlay stereo group gid=%s is incomplete: %zu member(s) currently present\n",
+                group->id, group->members_count);
+
+      log_name = group->name ? group->name : "(unknown)";
+      DPRINTF(E_INFO, L_PLAYER, "AirPlay stereo group state updated: gid=%s, name='%s', members=%zu, leader_id=%" PRIu64 "\n",
+              group->id, log_name, group->members_count, group->leader_known ? group->leader_id : 0);
+    }
+}
+
 // Frees a candidate device struct and its backend-specific data. Candidates
 // own their extra_device_info; canonical devices borrow it.
 static void
@@ -139,6 +294,9 @@ candidate_free(struct output_device *candidate)
     outputs[candidate->type]->device_free_extra(candidate);
 
   free(candidate->name);
+  free(candidate->display_name);
+  free(candidate->group_id);
+  free(candidate->group_name);
   free(candidate->auth_key);
   free(candidate->v4_address);
   free(candidate->v6_address);
@@ -251,6 +409,7 @@ effective_candidate_apply(struct output_device *canonical)
   // Keep name in sync with active candidate
   free(canonical->name);
   canonical->name = strdup(candidate->name);
+  device_group_fields_copy(canonical, candidate);
 }
 
 // Stores a new candidate in the canonical device's appropriate slot. For a
@@ -289,6 +448,7 @@ candidate_store(struct output_device *canonical, struct output_device *new_cand)
       existing->has_password       = new_cand->has_password;
       existing->password           = new_cand->password;
       existing->supported_formats  = new_cand->supported_formats;
+      device_group_fields_copy(existing, new_cand);
 
       candidate_free(new_cand);
       return;
@@ -1028,6 +1188,7 @@ outputs_device_add(struct output_device *add, bool new_deselect)
   vol_adjust();
 
   device->advertised = 1;
+  output_group_refresh();
 
   return device;
 }
@@ -1066,6 +1227,7 @@ outputs_device_remove(struct output_device *remove)
   outputs_device_free(remove);
 
   vol_adjust();
+  output_group_refresh();
 }
 
 void
@@ -1266,6 +1428,9 @@ outputs_device_free(struct output_device *device)
     event_free(device->stop_timer);
 
   free(device->name);
+  free(device->display_name);
+  free(device->group_id);
+  free(device->group_name);
   free(device->auth_key);
   free(device->v4_address);
   free(device->v6_address);
@@ -1359,6 +1524,10 @@ outputs_device_protocol_remove(struct output_device *canonical, struct output_de
   DPRINTF(E_INFO, L_PLAYER, "Protocol %s no longer available for device '%s'\n",
           candidate->type_name, canonical->name);
 
+  if (remove->type == OUTPUT_TYPE_AIRPLAY && candidate->group_id)
+    DPRINTF(E_INFO, L_PLAYER, "AirPlay stereo member disappeared: device '%s', gid=%s, leader=%u\n",
+            canonical->name, candidate->group_id, candidate->is_group_leader);
+
   if (canonical->session && canonical->type == candidate->type)
     {
       // Active session is using this candidate's extra_device_info. Keep the
@@ -1371,6 +1540,7 @@ outputs_device_protocol_remove(struct output_device *canonical, struct output_de
       // Mark as unadvertised only when no other protocol remains
       if (!canonical->supported_modes)
         canonical->advertised = 0;
+      output_group_refresh();
       return 0;
     }
 
@@ -1382,11 +1552,13 @@ outputs_device_protocol_remove(struct output_device *canonical, struct output_de
   if (!canonical->candidate_raop && !canonical->candidate_airplay2)
     {
       canonical->advertised = 0;
+      output_group_refresh();
       return canonical->session ? 0 : 1; // 1 = caller should remove canonical
     }
 
   // Another protocol is available: switch to it
   effective_candidate_apply(canonical);
+  output_group_refresh();
   return 0;
 }
 

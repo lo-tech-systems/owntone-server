@@ -30,6 +30,7 @@
 #include <netdb.h>
 #include <fcntl.h>
 #include <time.h>
+#include <strings.h>
 
 #include <arpa/inet.h>
 #include <net/if.h>
@@ -201,11 +202,16 @@ struct airplay_extra
   enum airplay_devtype devtype;
 
   char *mdns_name;
+  char *gid;
+  char *gpn;
+  char *tsid;
 
   uint16_t wanted_metadata;
   bool supports_auth_setup;
   bool supports_encryption;
   bool use_ptp;
+  bool gcgl;
+  bool igl;
 };
 
 struct airplay_master_session
@@ -3901,6 +3907,87 @@ features_parse(struct keyval *features_kv, const char *features_txt, const char 
   return 0;
 }
 
+static bool
+txt_flag_is_true(const char *value)
+{
+  if (!value)
+    return false;
+
+  return (strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 || strcasecmp(value, "yes") == 0);
+}
+
+static void
+airplay_stereo_state_set(struct output_device *device, struct airplay_extra *extra)
+{
+  bool grouped;
+
+  // Based on observed HomePod stereo-pair advertisements we only treat a
+  // speaker as stereo-grouped when:
+  //  - it is a HomePod-class device
+  //  - gid is present and shared
+  //  - gpn is present (pair name in Home)
+  // The igl flag is the strongest observed signal for the visible leader.
+  grouped = (extra->devtype == AIRPLAY_DEV_HOMEPOD && extra->gid && extra->gpn);
+
+  device->leader_hint_gcgl = extra->gcgl;
+  device->leader_hint_igl = extra->igl;
+
+  if (!grouped)
+    {
+      device->display_name = safe_strdup(device->name);
+      return;
+    }
+
+  device->group_id = safe_strdup(extra->gid);
+  device->group_name = safe_strdup(extra->gpn);
+  device->is_grouped = 1;
+  device->is_group_leader = extra->igl;
+  device->is_group_hidden = !device->is_group_leader;
+  device->group_leader_id = device->is_group_leader ? device->id : 0;
+
+  if (device->is_group_leader)
+    device->display_name = safe_asprintf("%s (Stereo)", extra->gpn);
+  else
+    device->display_name = safe_strdup(device->name);
+}
+
+static void
+airplay_stereo_metadata_log(struct output_device *device, struct airplay_extra *extra)
+{
+  const char *gid = extra->gid ? extra->gid : "(null)";
+  const char *gpn = extra->gpn ? extra->gpn : "(null)";
+  const char *tsid = extra->tsid ? extra->tsid : "(null)";
+
+  DPRINTF(E_DBG, L_AIRPLAY, "AirPlay device '%s': stereo metadata gid=%s, gpn='%s', tsid=%s, gcgl=%u, igl=%u\n",
+          device->name, gid, gpn, tsid, extra->gcgl, extra->igl);
+
+  if ((extra->gcgl || extra->igl) && !extra->gid)
+    DPRINTF(E_WARN, L_AIRPLAY, "AirPlay stereo metadata inconsistency for device '%s': leader flags set but gid missing\n",
+            device->name);
+
+  if (!extra->gid)
+    {
+      DPRINTF(E_DBG, L_AIRPLAY, "AirPlay device '%s': no stereo metadata present\n", device->name);
+      return;
+    }
+
+  if (!device->is_grouped)
+    {
+      DPRINTF(E_DBG, L_AIRPLAY, "AirPlay device '%s': gid present but not classified as stereo pair (type=%s, gpn='%s')\n",
+              device->name, airplay_devtype[extra->devtype], gpn);
+      return;
+    }
+
+  DPRINTF(E_INFO, L_AIRPLAY, "AirPlay stereo group detected for device '%s': gid=%s, group name='%s'\n",
+          device->name, gid, gpn);
+
+  if (device->is_group_leader)
+    DPRINTF(E_INFO, L_AIRPLAY, "AirPlay stereo leader detected: device '%s', gid=%s, group name='%s'\n",
+            device->name, gid, gpn);
+  else
+    DPRINTF(E_DBG, L_AIRPLAY, "AirPlay device '%s': classified as stereo member, leader=0\n", device->name);
+}
+
 
 /* Examples of txt content:
  * Airport Express 2:
@@ -3911,9 +3998,15 @@ features_parse(struct keyval *features_kv, const char *features_txt, const char 
      ["pk=xxxxxxxxx” "gcgl=0" "gid=xxxxxxx” "psi=xxxxx” "pi=8A:71:CA:EF:xxxx" "srcvers=377.28.01" "protovers=1.1" "serialNumber=xxxxxxx” "manufacturer=Roku" "model=3810X" "flags=0x644" "at=0x3" "fv=p20.9.40.4190" "rsf=0x3" "features=0x7F8AD0,0x10BCF46" "deviceid=8A:71:CA:xxxxx” "acl=0"]
   * Samsung TV
      ["pk=7xxxxxxxxxx” "gcgl=0" "gid=xxxxxxxxxxx” "psi=xxxxxxx” "pi=4C:6F:64:xxxxxxx” "srcvers=377.17.24.6" "protovers=1.1" "serialNumber=xxxxxxx” "manufacturer=Samsung" "model=UNU7090" "flags=0x244" "fv=p20.0.1" "rsf=0x3" "features=0x7F8AD0,0x38BCB46" "deviceid=64:1C:AE:xxxxx” "acl=0"]
-  * HomePod
+ * HomePod
      ["vv=2" "osvers=14.3" "srcvers=530.6" "pk=..." "psi=31...D3" "pi=fd...87" "protovers=1.1" "model=AudioAccessory1,1" "tsid=4...E" "gpn=name" "gcgl=1" "igl=1" "gid=4...E" "flags=0x1a404" "features=0x4A7FCA00,0x3C356BD0" "fex=AMp/StBrNTw" "deviceid=D4:...:C1" "btaddr=5E:...:F1" "acl=0"]
-  * Sonos Symfonisk
+ *
+ * Observed HomePod stereo-pair behavior in the field:
+ *  - both members share the same gid and gpn
+ *  - both may advertise gcgl=1
+ *  - igl=1 appears to identify the visible leader more reliably
+ *  - tsid may match only a prefix/base UUID rather than the full gid
+ * Sonos Symfonisk
      ["pk=e5...1c" "gcgl=0" "gid=[uuid]" "pi=[uuid]" "srcvers=366.0" "protovers=1.1" "serialNumber=xx" "manufacturer=Sonos" "model=Bookshelf" "flags=0x4" "fv=p20.63.2-88230" "rsf=0x0" "features=0x445F8A00,0x1C340" "deviceid=11:22:33:44:55:66" "acl=0"]
   * Marantz NR1607 and SR6009 (which don't support pairing)
      ["srcvers=190.9.p6" "model=NR1607" "fv=p105321.1400.0" "flags=0x4" "features=0x444F8A00" "deviceid=00:06:12:12:12:12"]
@@ -4097,6 +4190,16 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
   else if (*p == '\0')
     DPRINTF(E_WARN, L_AIRPLAY, "AirPlay device '%s': am has no value\n", name);
 
+  extra->gid = safe_strdup(keyval_get(txt, "gid"));
+  extra->gpn = safe_strdup(keyval_get(txt, "gpn"));
+  extra->tsid = safe_strdup(keyval_get(txt, "tsid"));
+  extra->gcgl = txt_flag_is_true(keyval_get(txt, "gcgl"));
+  extra->igl = txt_flag_is_true(keyval_get(txt, "igl"));
+
+  airplay_stereo_state_set(device, extra);
+
+  airplay_stereo_metadata_log(device, extra);
+
   // If the user didn't set any reconnect setting we enable for Apple TV and
   // HomePods due to https://github.com/owntone/owntone-server/issues/734
   cfgopt = devcfg ? cfg_getopt(devcfg, "reconnect") : NULL;
@@ -4210,6 +4313,9 @@ airplay_device_free_extra(struct output_device *device)
   struct airplay_extra *extra = device->extra_device_info;
 
   free(extra->mdns_name);
+  free(extra->gid);
+  free(extra->gpn);
+  free(extra->tsid);
   free(extra);
 }
 

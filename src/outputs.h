@@ -93,6 +93,14 @@ struct output_device
   // Name of the device, e.g. "Living Room"
   char *name;
 
+  // Optional user-facing label that may differ from name, e.g. "Office (Stereo)"
+  char *display_name;
+
+  // Optional AirPlay 2 stereo/group metadata
+  char *group_id;
+  char *group_name;
+  uint64_t group_leader_id;
+
   // Type of the device, will be used to determine which output backend to call
   enum output_types type;
 
@@ -113,6 +121,11 @@ struct output_device
   unsigned prevent_playback:1;
   unsigned busy:1;
   unsigned resurrect:1;
+  unsigned is_grouped:1;
+  unsigned is_group_leader:1;
+  unsigned is_group_hidden:1;
+  unsigned leader_hint_gcgl:1;
+  unsigned leader_hint_igl:1;
 
   // Credentials if relevant
   const char *password;
