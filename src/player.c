@@ -2056,7 +2056,7 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
   spk->id = device->id;
   spk->index = index;
   spk->active_remote = (uint32_t)device->id;
-  strncpy(spk->name, device->name, sizeof(spk->name));
+  strncpy(spk->name, outputs_device_display_name(device), sizeof(spk->name));
   spk->name[sizeof(spk->name) - 1] = '\0';
   strncpy(spk->output_type, device->type_name, sizeof(spk->output_type));
   spk->output_type[sizeof(spk->output_type) - 1] = '\0';
@@ -2073,9 +2073,9 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
   else
     spk->format = device->supported_formats;
 
-  strncpy(spk->mode, output_mode_to_string(device->preferred_mode), sizeof(spk->mode) - 1);
+  strncpy(spk->mode, output_mode_to_string(outputs_device_display_mode(device)), sizeof(spk->mode) - 1);
   spk->mode[sizeof(spk->mode) - 1] = '\0';
-  spk->supported_modes = device->supported_modes;
+  spk->supported_modes = outputs_device_supported_modes(device);
 
   spk->selected = OUTPUTS_DEVICE_DISPLAY_SELECTED(device);
 
@@ -2087,18 +2087,203 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
   spk->busy = device->busy;
 }
 
+static bool
+speaker_visible(struct output_device *device)
+{
+  return !outputs_device_is_hidden(device);
+}
+
+static int
+speaker_visible_index_match(uint32_t wanted_index, struct output_device **matched)
+{
+  struct output_device *device;
+  uint32_t visible_index = 0;
+
+  for (device = outputs_list(); device; device = device->next)
+    {
+      if (!speaker_visible(device))
+        continue;
+
+      if (visible_index == wanted_index)
+        {
+          *matched = device;
+          return 0;
+        }
+
+      visible_index++;
+    }
+
+  return -1;
+}
+
+static bool
+speaker_is_in_selected_set(struct output_device *device, uint64_t *ids, int nspk)
+{
+  struct output_device *selected_device;
+  const char *selected_gid;
+  const char *device_gid;
+  int i;
+
+  if (!ids)
+    return false;
+
+  device_gid = outputs_device_group_id(device);
+
+  for (i = 1; i <= nspk; i++)
+    {
+      if (ids[i] == device->id)
+        return true;
+
+      selected_device = outputs_device_get(ids[i]);
+      if (!selected_device)
+        continue;
+
+      selected_gid = outputs_device_group_id(selected_device);
+      if (device_gid && selected_gid && strcmp(device_gid, selected_gid) == 0)
+        return true;
+    }
+
+  return false;
+}
+
+static void
+speaker_group_select(struct output_device *device, int max_volume)
+{
+  struct output_device *cur;
+  const char *group_id;
+
+  group_id = outputs_device_group_id(device);
+  if (!group_id)
+    {
+      outputs_device_select(device, max_volume);
+      return;
+    }
+
+  DPRINTF(E_INFO, L_PLAYER, "Expanding stereo enable/select from '%s' to group gid=%s\n",
+          outputs_device_display_name(device), group_id);
+
+  for (cur = outputs_list(); cur; cur = cur->next)
+    {
+      const char *cur_gid = outputs_device_group_id(cur);
+
+      if (cur_gid && strcmp(cur_gid, group_id) == 0)
+        outputs_device_select(cur, max_volume);
+    }
+}
+
+static void
+speaker_group_deselect(struct output_device *device)
+{
+  struct output_device *cur;
+  const char *group_id;
+
+  group_id = outputs_device_group_id(device);
+  if (!group_id)
+    {
+      outputs_device_deselect(device);
+      return;
+    }
+
+  DPRINTF(E_INFO, L_PLAYER, "Expanding stereo disable/deselect from '%s' to group gid=%s\n",
+          outputs_device_display_name(device), group_id);
+
+  for (cur = outputs_list(); cur; cur = cur->next)
+    {
+      const char *cur_gid = outputs_device_group_id(cur);
+
+      if (cur_gid && strcmp(cur_gid, group_id) == 0)
+        outputs_device_deselect(cur);
+    }
+}
+
+static int
+speaker_group_start(struct output_device *device, output_status_cb cb, bool only_probe)
+{
+  struct output_device *cur;
+  const char *group_id;
+  int ret;
+  int pending = 0;
+  int successes = 0;
+
+  group_id = outputs_device_group_id(device);
+  if (!group_id)
+    return outputs_device_start(device, cb, only_probe);
+
+  for (cur = outputs_list(); cur; cur = cur->next)
+    {
+      const char *cur_gid = outputs_device_group_id(cur);
+
+      if (!cur_gid || strcmp(cur_gid, group_id) != 0)
+        continue;
+
+      ret = outputs_device_start(cur, cb, only_probe);
+      if (ret > 0)
+        {
+          pending += ret;
+          successes++;
+        }
+      else if (ret == 0)
+        successes++;
+    }
+
+  if (pending > 0)
+    return pending;
+
+  return (successes > 0) ? 0 : -1;
+}
+
+static int
+speaker_group_stop(struct output_device *device, output_status_cb cb)
+{
+  struct output_device *cur;
+  const char *group_id;
+  int ret;
+  int pending = 0;
+  int successes = 0;
+
+  group_id = outputs_device_group_id(device);
+  if (!group_id)
+    return outputs_device_stop(device, cb);
+
+  for (cur = outputs_list(); cur; cur = cur->next)
+    {
+      const char *cur_gid = outputs_device_group_id(cur);
+
+      if (!cur_gid || strcmp(cur_gid, group_id) != 0)
+        continue;
+
+      ret = outputs_device_stop(cur, cb);
+      if (ret > 0)
+        {
+          pending += ret;
+          successes++;
+        }
+      else if (ret == 0)
+        successes++;
+    }
+
+  if (pending > 0)
+    return pending;
+
+  return (successes > 0) ? 0 : -1;
+}
+
 static enum command_state
 speaker_enumerate(void *arg, int *retval)
 {
   struct spk_enum *spk_enum = arg;
   struct output_device *device;
   struct player_speaker_info spk;
-  int i;
+  uint32_t i;
 
-  for (device = outputs_list(), i = 0; device; device = device->next, i++)
+  for (device = outputs_list(), i = 0; device; device = device->next)
     {
+      if (!speaker_visible(device))
+        continue;
+
       device_to_speaker_info(&spk, device, i);
       spk_enum->cb(&spk, spk_enum->arg);
+      i++;
     }
 
   *retval = 0;
@@ -2110,10 +2295,13 @@ speaker_get_byid(void *arg, int *retval)
 {
   struct speaker_get_param *spk_param = arg;
   struct output_device *device;
-  int i;
+  uint32_t i;
 
-  for (device = outputs_list(), i = 0; device; device = device->next, i++)
+  for (device = outputs_list(), i = 0; device; device = device->next)
     {
+      if (!speaker_visible(device))
+        continue;
+
       if ((device->advertised || device->selected)
 	  && device->id == spk_param->spk_id)
 	{
@@ -2121,6 +2309,8 @@ speaker_get_byid(void *arg, int *retval)
 	  *retval = 0;
 	  return COMMAND_END;
 	}
+
+      i++;
     }
 
   // No output device found with matching id
@@ -2133,16 +2323,21 @@ speaker_get_byactiveremote(void *arg, int *retval)
 {
   struct speaker_get_param *spk_param = arg;
   struct output_device *device;
-  int i;
+  uint32_t i;
 
-  for (device = outputs_list(), i = 0; device; device = device->next, i++)
+  for (device = outputs_list(), i = 0; device; device = device->next)
     {
+      if (!speaker_visible(device))
+        continue;
+
       if ((uint32_t)device->id == spk_param->active_remote)
 	{
 	  device_to_speaker_info(spk_param->spk_info, device, i);
 	  *retval = 0;
 	  return COMMAND_END;
 	}
+
+      i++;
     }
 
   // No output device found with matching id
@@ -2157,10 +2352,13 @@ speaker_get_byaddress(void *arg, int *retval)
   struct output_device *device;
   bool match_v4;
   bool match_v6;
-  int i;
+  uint32_t i;
 
-  for (device = outputs_list(), i = 0; device; device = device->next, i++)
+  for (device = outputs_list(), i = 0; device; device = device->next)
     {
+      if (!speaker_visible(device))
+        continue;
+
       match_v4 = device->v4_address && (strcmp(spk_param->address, device->v4_address) == 0);
       match_v6 = device->v6_address && (strcmp(spk_param->address, device->v6_address) == 0);
       if (match_v4 || match_v6)
@@ -2169,6 +2367,8 @@ speaker_get_byaddress(void *arg, int *retval)
 	  *retval = 0;
 	  return COMMAND_END;
 	}
+
+      i++;
     }
 
   *retval = -1;
@@ -2180,16 +2380,14 @@ speaker_get_byindex(void *arg, int *retval)
 {
   struct speaker_get_param *spk_param = arg;
   struct output_device *device;
-  int i;
+  int ret;
 
-  for (device = outputs_list(), i = 0; device; device = device->next, i++)
+  ret = speaker_visible_index_match(spk_param->index, &device);
+  if (ret == 0)
     {
-      if (i == spk_param->index)
-	{
-	  device_to_speaker_info(spk_param->spk_info, device, i);
-	  *retval = 0;
-	  return COMMAND_END;
-	}
+      device_to_speaker_info(spk_param->spk_info, device, spk_param->index);
+      *retval = 0;
+      return COMMAND_END;
     }
 
   *retval = -1;
@@ -2226,18 +2424,15 @@ speaker_set(void *arg, int *retval)
   for (i = 1; i <= nspk; i++)
     outputs_device_get(ids[i]);
 
+  // Stereo leaders are the visible control point for paired HomePods. If a
+  // requested output belongs to an AirPlay 2 stereo group, expand selection to
+  // every member sharing that group id.
   for (device = outputs_list(); device; device = device->next)
     {
-      for (i = 1; i <= nspk; i++)
-	{
-	  if (ids[i] == device->id)
-	    break;
-	}
-
-      if (i <= nspk)
-	outputs_device_select(device, max_volume);
+      if (speaker_is_in_selected_set(device, ids, nspk))
+        outputs_device_select(device, max_volume);
       else
-	outputs_device_deselect(device);
+        outputs_device_deselect(device);
     }
 
   *retval = outputs_start(device_activate_cb, device_shutdown_cb, PLAYER_ONLY_PROBE);
@@ -2261,13 +2456,13 @@ speaker_enable(void *arg, int *retval)
   if (!device)
     return COMMAND_END;
 
-  DPRINTF(E_DBG, L_PLAYER, "Speaker enable: '%s' (id=%" PRIu64 ")\n", device->name, *id);
+  DPRINTF(E_DBG, L_PLAYER, "Speaker enable: '%s' (id=%" PRIu64 ")\n", outputs_device_display_name(device), *id);
 
   max_volume = (player_state != PLAY_STOPPED) ? outputs_volume_get() : -1;
 
-  outputs_device_select(device, max_volume);
+  speaker_group_select(device, max_volume);
 
-  *retval = outputs_device_start(device, device_activate_cb, PLAYER_ONLY_PROBE);
+  *retval = speaker_group_start(device, device_activate_cb, PLAYER_ONLY_PROBE);
 
   if (*retval > 0)
     return COMMAND_PENDING; // async
@@ -2287,11 +2482,11 @@ speaker_disable(void *arg, int *retval)
   if (!device)
     return COMMAND_END;
 
-  DPRINTF(E_DBG, L_PLAYER, "Speaker disable: '%s' (id=%" PRIu64 ")\n", device->name, *id);
+  DPRINTF(E_DBG, L_PLAYER, "Speaker disable: '%s' (id=%" PRIu64 ")\n", outputs_device_display_name(device), *id);
 
-  outputs_device_deselect(device);
+  speaker_group_deselect(device);
 
-  *retval = outputs_device_stop(device, device_shutdown_cb);
+  *retval = speaker_group_stop(device, device_shutdown_cb);
 
   if (*retval > 0)
     return COMMAND_PENDING; // async

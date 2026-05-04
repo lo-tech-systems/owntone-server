@@ -147,8 +147,11 @@ struct output_device
   // Protocol mode preference and availability. supported_modes is a bitmask of
   // OUTPUT_MODE_RAOP / OUTPUT_MODE_AIRPLAY2, set when the device supports more
   // than one protocol. preferred_mode is the user preference (AUTO by default).
-  // candidate_raop / candidate_airplay2 hold the per-protocol discovery data;
-  // the canonical device borrows extra_device_info from whichever is active.
+  // Stereo-paired AirPlay 2 outputs may expose a narrower client-facing mode
+  // set than the raw candidate set, but the underlying candidates are still
+  // stored here. candidate_raop / candidate_airplay2 hold the per-protocol
+  // discovery data; the canonical device borrows extra_device_info from
+  // whichever is active.
   enum output_mode preferred_mode;
   uint32_t supported_modes;
   struct output_device *candidate_raop;
@@ -396,6 +399,24 @@ outputs_device_free(struct output_device *device);
 // outputs_device_candidate_apply() once the stop completes.
 int
 outputs_device_mode_set(struct output_device *device, enum output_mode mode);
+
+bool
+outputs_device_is_hidden(struct output_device *device);
+
+bool
+outputs_device_is_stereo_leader(struct output_device *device);
+
+const char *
+outputs_device_display_name(struct output_device *device);
+
+const char *
+outputs_device_group_id(struct output_device *device);
+
+uint32_t
+outputs_device_supported_modes(struct output_device *device);
+
+enum output_mode
+outputs_device_display_mode(struct output_device *device);
 
 // Applies the effective protocol candidate to the canonical device. This
 // updates device->type, type_name, addresses, and extra_device_info. Must

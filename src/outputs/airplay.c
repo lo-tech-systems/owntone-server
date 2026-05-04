@@ -3916,17 +3916,67 @@ txt_flag_is_true(const char *value)
   return (strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 || strcasecmp(value, "yes") == 0);
 }
 
+static bool
+airplay_homepod_gid_suffix_is(const char *gid, const char *tsid, const char *suffix)
+{
+  size_t tsid_len;
+
+  if (!gid || !tsid || !suffix)
+    return false;
+
+  tsid_len = strlen(tsid);
+
+  return (strncmp(gid, tsid, tsid_len) == 0 && strcmp(gid + tsid_len, suffix) == 0);
+}
+
+static char *
+airplay_stereo_group_id_normalize(struct airplay_extra *extra)
+{
+  // HomePods may advertise a shared pair gid initially and later re-advertise
+  // per-member gids such as "<tsid>+0" and "<tsid>+1". The tsid has been the
+  // stable pair identifier across those transitions, so prefer it as the
+  // runtime grouping key when present.
+  if (extra->devtype == AIRPLAY_DEV_HOMEPOD && extra->tsid)
+    return safe_strdup(extra->tsid);
+
+  return safe_strdup(extra->gid);
+}
+
+static bool
+airplay_stereo_leader_is_visible(struct airplay_extra *extra)
+{
+  if (!extra->igl)
+    return false;
+
+  // When HomePods split into per-member gids, both members may advertise
+  // igl=1. Observed advertisements use "<tsid>+0" for the visible leader and
+  // "<tsid>+1" for the secondary member.
+  if (extra->devtype == AIRPLAY_DEV_HOMEPOD && extra->gid && extra->tsid)
+    {
+      if (airplay_homepod_gid_suffix_is(extra->gid, extra->tsid, "+1"))
+        return false;
+
+      if (airplay_homepod_gid_suffix_is(extra->gid, extra->tsid, "+0"))
+        return true;
+    }
+
+  return true;
+}
+
 static void
 airplay_stereo_state_set(struct output_device *device, struct airplay_extra *extra)
 {
   bool grouped;
+  char *group_id;
 
   // Based on observed HomePod stereo-pair advertisements we only treat a
   // speaker as stereo-grouped when:
   //  - it is a HomePod-class device
-  //  - gid is present and shared
+  //  - gid is present
   //  - gpn is present (pair name in Home)
-  // The igl flag is the strongest observed signal for the visible leader.
+  // The runtime group key is normalized separately because HomePods may switch
+  // between a shared pair gid and per-member gids while still representing
+  // the same stereo pair.
   grouped = (extra->devtype == AIRPLAY_DEV_HOMEPOD && extra->gid && extra->gpn);
 
   device->leader_hint_gcgl = extra->gcgl;
@@ -3938,10 +3988,12 @@ airplay_stereo_state_set(struct output_device *device, struct airplay_extra *ext
       return;
     }
 
-  device->group_id = safe_strdup(extra->gid);
+  group_id = airplay_stereo_group_id_normalize(extra);
+
+  device->group_id = group_id;
   device->group_name = safe_strdup(extra->gpn);
   device->is_grouped = 1;
-  device->is_group_leader = extra->igl;
+  device->is_group_leader = airplay_stereo_leader_is_visible(extra);
   device->is_group_hidden = !device->is_group_leader;
   device->group_leader_id = device->is_group_leader ? device->id : 0;
 
@@ -3957,6 +4009,7 @@ airplay_stereo_metadata_log(struct output_device *device, struct airplay_extra *
   const char *gid = extra->gid ? extra->gid : "(null)";
   const char *gpn = extra->gpn ? extra->gpn : "(null)";
   const char *tsid = extra->tsid ? extra->tsid : "(null)";
+  const char *group_id = device->group_id ? device->group_id : "(null)";
 
   DPRINTF(E_DBG, L_AIRPLAY, "AirPlay device '%s': stereo metadata gid=%s, gpn='%s', tsid=%s, gcgl=%u, igl=%u\n",
           device->name, gid, gpn, tsid, extra->gcgl, extra->igl);
@@ -3978,12 +4031,12 @@ airplay_stereo_metadata_log(struct output_device *device, struct airplay_extra *
       return;
     }
 
-  DPRINTF(E_INFO, L_AIRPLAY, "AirPlay stereo group detected for device '%s': gid=%s, group name='%s'\n",
-          device->name, gid, gpn);
+  DPRINTF(E_INFO, L_AIRPLAY, "AirPlay stereo group detected for device '%s': group id=%s, raw gid=%s, group name='%s'\n",
+          device->name, group_id, gid, gpn);
 
   if (device->is_group_leader)
-    DPRINTF(E_INFO, L_AIRPLAY, "AirPlay stereo leader detected: device '%s', gid=%s, group name='%s'\n",
-            device->name, gid, gpn);
+    DPRINTF(E_INFO, L_AIRPLAY, "AirPlay stereo leader detected: device '%s', group id=%s, raw gid=%s, group name='%s'\n",
+            device->name, group_id, gid, gpn);
   else
     DPRINTF(E_DBG, L_AIRPLAY, "AirPlay device '%s': classified as stereo member, leader=0\n", device->name);
 }
@@ -4002,10 +4055,14 @@ airplay_stereo_metadata_log(struct output_device *device, struct airplay_extra *
      ["vv=2" "osvers=14.3" "srcvers=530.6" "pk=..." "psi=31...D3" "pi=fd...87" "protovers=1.1" "model=AudioAccessory1,1" "tsid=4...E" "gpn=name" "gcgl=1" "igl=1" "gid=4...E" "flags=0x1a404" "features=0x4A7FCA00,0x3C356BD0" "fex=AMp/StBrNTw" "deviceid=D4:...:C1" "btaddr=5E:...:F1" "acl=0"]
  *
  * Observed HomePod stereo-pair behavior in the field:
- *  - both members share the same gid and gpn
+ *  - both members may initially share the same gid and gpn
+ *  - later advertisements may split gid into per-member values such as
+ *    "<tsid>+0" and "<tsid>+1"
  *  - both may advertise gcgl=1
  *  - igl=1 appears to identify the visible leader more reliably
- *  - tsid may match only a prefix/base UUID rather than the full gid
+ *  - when the gid splits per member, tsid remains the stable pair identifier
+ *  - a "<tsid>+0" gid has identified the visible leader more reliably than
+ *    igl alone in those split-gid advertisements
  * Sonos Symfonisk
      ["pk=e5...1c" "gcgl=0" "gid=[uuid]" "pi=[uuid]" "srcvers=366.0" "protovers=1.1" "serialNumber=xx" "manufacturer=Sonos" "model=Bookshelf" "flags=0x4" "fv=p20.63.2-88230" "rsf=0x0" "features=0x445F8A00,0x1C340" "deviceid=11:22:33:44:55:66" "acl=0"]
   * Marantz NR1607 and SR6009 (which don't support pairing)

@@ -282,6 +282,73 @@ output_group_refresh(void)
     }
 }
 
+static struct output_device *
+group_meta_device(struct output_device *device)
+{
+  // Stereo grouping is derived from the AirPlay 2 candidate even when another
+  // backend is currently active, so prefer that candidate as the metadata
+  // source when it is available.
+  if (device && device->candidate_airplay2 && device->candidate_airplay2->group_id)
+    return device->candidate_airplay2;
+
+  return device;
+}
+
+bool
+outputs_device_is_hidden(struct output_device *device)
+{
+  struct output_device *meta = group_meta_device(device);
+
+  return meta && meta->is_group_hidden;
+}
+
+bool
+outputs_device_is_stereo_leader(struct output_device *device)
+{
+  struct output_device *meta = group_meta_device(device);
+
+  return meta && meta->is_grouped && meta->is_group_leader;
+}
+
+const char *
+outputs_device_display_name(struct output_device *device)
+{
+  struct output_device *meta = group_meta_device(device);
+
+  if (meta && meta->display_name)
+    return meta->display_name;
+
+  return device ? device->name : NULL;
+}
+
+const char *
+outputs_device_group_id(struct output_device *device)
+{
+  struct output_device *meta = group_meta_device(device);
+
+  return meta ? meta->group_id : NULL;
+}
+
+uint32_t
+outputs_device_supported_modes(struct output_device *device)
+{
+  // Grouped stereo outputs are intentionally exposed as AirPlay 2-only, even
+  // though the underlying HomePods may still advertise RAOP candidates.
+  if (outputs_device_is_stereo_leader(device))
+    return OUTPUT_MODE_AIRPLAY2;
+
+  return device ? device->supported_modes : 0;
+}
+
+enum output_mode
+outputs_device_display_mode(struct output_device *device)
+{
+  if (outputs_device_is_stereo_leader(device))
+    return OUTPUT_MODE_AIRPLAY2;
+
+  return device ? device->preferred_mode : OUTPUT_MODE_AUTO;
+}
+
 // Frees a candidate device struct and its backend-specific data. Candidates
 // own their extra_device_info; canonical devices borrow it.
 static void
@@ -331,6 +398,9 @@ supported_modes_recompute(struct output_device *device)
 static enum output_types
 effective_type_resolve(struct output_device *device)
 {
+  if (outputs_device_is_stereo_leader(device) && device->candidate_airplay2)
+    return OUTPUT_TYPE_AIRPLAY;
+
   if (device->preferred_mode == OUTPUT_MODE_RAOP && device->candidate_raop)
     return OUTPUT_TYPE_RAOP;
   if (device->preferred_mode == OUTPUT_MODE_AIRPLAY2 && device->candidate_airplay2)
@@ -1457,14 +1527,21 @@ outputs_device_mode_set(struct output_device *device, enum output_mode mode)
   if (mode != OUTPUT_MODE_AUTO && mode != OUTPUT_MODE_RAOP && mode != OUTPUT_MODE_AIRPLAY2)
     return -1;
 
+  if (outputs_device_is_stereo_leader(device) && mode == OUTPUT_MODE_RAOP)
+    {
+      DPRINTF(E_WARN, L_PLAYER, "Ignoring requested mode '%s' for stereo output '%s': stereo pairs are AirPlay 2-only\n",
+              output_mode_to_string(mode), outputs_device_display_name(device));
+      return 0;
+    }
+
   // For a concrete protocol check that the device actually supports it
   if (mode != OUTPUT_MODE_AUTO)
     {
       mode_bit = (uint32_t)mode;
-      if (!(device->supported_modes & mode_bit))
+      if (!(outputs_device_supported_modes(device) & mode_bit))
         {
           DPRINTF(E_WARN, L_PLAYER, "Ignoring requested mode '%s' for output '%s': protocol not available\n",
-                  output_mode_to_string(mode), device->name);
+                  output_mode_to_string(mode), outputs_device_display_name(device));
           return 0; // Warn and ignore; not an error from the API's perspective
         }
     }
