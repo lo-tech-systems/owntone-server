@@ -3917,6 +3917,29 @@ txt_flag_is_true(const char *value)
 }
 
 static bool
+airplay_name_contains_tv(const char *name)
+{
+  const char *p;
+
+  if (!name)
+    return false;
+
+  for (p = name; *p; p++)
+    {
+      if (strncasecmp(p, "TV", 2) == 0)
+        return true;
+    }
+
+  return false;
+}
+
+static bool
+airplay_is_appletv_device(enum airplay_devtype devtype)
+{
+  return (devtype == AIRPLAY_DEV_APPLETV || devtype == AIRPLAY_DEV_APPLETV4);
+}
+
+static bool
 airplay_homepod_gid_suffix_is(const char *gid, const char *tsid, const char *suffix)
 {
   size_t tsid_len;
@@ -3984,7 +4007,11 @@ airplay_stereo_state_set(struct output_device *device, struct airplay_extra *ext
 
   if (!grouped)
     {
-      device->display_name = safe_strdup(device->name);
+      if (airplay_is_appletv_device(extra->devtype) && !airplay_name_contains_tv(device->name))
+        device->display_name = safe_asprintf("%s (TV)", device->name);
+      else
+        device->display_name = safe_strdup(device->name);
+
       return;
     }
 
