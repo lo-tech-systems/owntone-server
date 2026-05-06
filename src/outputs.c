@@ -187,28 +187,25 @@ output_group_member_add(struct output_group *group, uint64_t device_id)
   group->member_ids[group->members_count++] = device_id;
 }
 
+// Clears only the computed group membership fields — those written by
+// output_group_refresh() rather than by the mDNS backend. Identity fields
+// sourced from mDNS (display_name, raw_gid, leader_hint_gcgl/igl) are NOT
+// touched here; they are handled separately in effective_candidate_apply() and
+// candidate_store().
 static void
 device_group_fields_clear(struct output_device *device)
 {
-  free(device->display_name);
-  device->display_name = NULL;
-
   free(device->group_id);
   device->group_id = NULL;
 
   free(device->group_name);
   device->group_name = NULL;
 
-  free(device->raw_gid);
-  device->raw_gid = NULL;
-
   device->group_leader_id = 0;
   device->is_grouped = 0;
   device->is_group_leader = 0;
   device->is_group_hidden = 0;
   device->is_tv_proxy_group = 0;
-  device->leader_hint_gcgl = 0;
-  device->leader_hint_igl = 0;
 }
 
 static void
@@ -216,17 +213,54 @@ device_group_fields_copy(struct output_device *dst, struct output_device *src)
 {
   device_group_fields_clear(dst);
 
-  dst->display_name = safe_strdup(src->display_name);
   dst->group_id = safe_strdup(src->group_id);
   dst->group_name = safe_strdup(src->group_name);
-  dst->raw_gid = safe_strdup(src->raw_gid);
   dst->group_leader_id = src->group_leader_id;
   dst->is_grouped = src->is_grouped;
   dst->is_group_leader = src->is_group_leader;
   dst->is_group_hidden = src->is_group_hidden;
+  // is_tv_proxy_group is copied for symmetry; outputs_device_is_tv_proxy_group()
+  // reads from the AirPlay 2 candidate via group_meta_device(), so the canonical
+  // copy is not used by that accessor but is kept consistent for any direct-field
+  // access in future code.
   dst->is_tv_proxy_group = src->is_tv_proxy_group;
-  dst->leader_hint_gcgl = src->leader_hint_gcgl;
-  dst->leader_hint_igl = src->leader_hint_igl;
+}
+
+// Promotes a candidate as the Apple TV proxy leader for a HomePod group. Sets
+// all group membership fields on the candidate and tags HomePod member
+// candidates with is_tv_proxy_group. Updates group->leader_id/leader_known and
+// adds the tv_device to the group's member list.
+static void
+candidate_promote_as_proxy_leader(struct output_device *tv_candidate,
+                                  struct output_device *tv_device,
+                                  struct output_group *group)
+{
+  struct output_device *device;
+  struct output_device *candidate;
+
+  // The candidate starts with cleared group fields (Phase 1 ensures this).
+  // Assign the group membership fields that identify it as the proxy leader.
+  tv_candidate->group_id       = safe_strdup(group->id);
+  tv_candidate->group_name     = safe_strdup(group->name);
+  tv_candidate->group_leader_id = tv_device->id;
+  tv_candidate->is_grouped     = 1;
+  tv_candidate->is_group_leader = 1;
+  tv_candidate->is_group_hidden = 0;
+  tv_candidate->is_tv_proxy_group = 1;
+
+  group->leader_id    = tv_device->id;
+  group->leader_known = true;
+  output_group_member_add(group, tv_device->id);
+
+  // Tag HomePod member candidates so tv_proxy_device_skip() can gate them.
+  for (device = outputs_device_list; device; device = device->next)
+    {
+      candidate = device->candidate_airplay2;
+      if (!candidate || !candidate->group_id || strcmp(candidate->group_id, group->id) != 0)
+        continue;
+      if (device->id != tv_device->id)
+        candidate->is_tv_proxy_group = 1;
+    }
 }
 
 static void
@@ -241,17 +275,23 @@ output_group_refresh(void)
   const char *shared_raw_gid;
   int leaders;
 
-  // Reset any TV proxy state set synthetically during a previous refresh.
-  // The Apple TV proxy leader's group fields are computed (not from mDNS), so
-  // they must be cleared before rebuilding. HomePod members only need their
-  // is_tv_proxy_group flag cleared; their group_id comes from mDNS and stays.
+  // Reset computed group fields written synthetically by Phase 3 during the
+  // previous refresh. Two cases:
+  //   Apple TV proxy leader (is_tv_proxy_group && is_group_leader): all group
+  //     fields were synthetically assigned — device_group_fields_clear() resets
+  //     them. mDNS identity fields (raw_gid, display_name, leader_hint_*) are
+  //     NOT in device_group_fields_clear(), so they are preserved.
+  //   HomePod member (is_tv_proxy_group && !is_group_leader): only
+  //     is_tv_proxy_group was synthetically set; group_id/name/etc. came from
+  //     mDNS and must survive for Phase 2 to rebuild the group — so we clear
+  //     only the flag.
   for (device = outputs_device_list; device; device = device->next)
     {
       candidate = device->candidate_airplay2;
-      if (!candidate)
+      if (!candidate || !candidate->is_tv_proxy_group)
         continue;
 
-      if (candidate->is_tv_proxy_group && candidate->is_group_leader)
+      if (candidate->is_group_leader)
         {
           DPRINTF(E_DBG, L_PLAYER,
                   "output_group_refresh: clearing proxy leader candidate=%p canonical id=%" PRIu64 " name='%s' group_id=%s group_name='%s' raw_gid=%s\n",
@@ -259,18 +299,12 @@ output_group_refresh(void)
                   candidate->group_id ? candidate->group_id : "(null)",
                   candidate->group_name ? candidate->group_name : "(null)",
                   candidate->raw_gid ? candidate->raw_gid : "(null)");
-          // This candidate was promoted as Apple TV proxy leader; clear the
-          // synthetically assigned group fields but preserve raw_gid.
-          free(candidate->group_id);
-          candidate->group_id = NULL;
-          free(candidate->group_name);
-          candidate->group_name = NULL;
-          candidate->group_leader_id = 0;
-          candidate->is_grouped = 0;
-          candidate->is_group_leader = 0;
-          candidate->is_group_hidden = 0;
+          device_group_fields_clear(candidate);
         }
-      candidate->is_tv_proxy_group = 0;
+      else
+        {
+          candidate->is_tv_proxy_group = 0;
+        }
     }
 
   output_group_free_all();
@@ -353,33 +387,13 @@ output_group_refresh(void)
 
       tv_candidate = tv_device->candidate_airplay2;
 
-      // Promote the Apple TV as the proxy leader for this HomePod group.
       DPRINTF(E_DBG, L_PLAYER,
               "output_group_refresh: promoting proxy leader tv_device=%p id=%" PRIu64 " name='%s' candidate=%p raw_gid=%s -> group_id=%s group_name='%s'\n",
               tv_device, tv_device->id, tv_device->name ? tv_device->name : "(null)",
               tv_candidate, tv_candidate->raw_gid ? tv_candidate->raw_gid : "(null)",
               group->id, group->name ? group->name : "(unknown)");
-      tv_candidate->group_id       = safe_strdup(group->id);
-      tv_candidate->group_name     = safe_strdup(group->name);
-      tv_candidate->group_leader_id = tv_device->id;
-      tv_candidate->is_grouped     = 1;
-      tv_candidate->is_group_leader = 1;
-      tv_candidate->is_group_hidden = 0;
-      tv_candidate->is_tv_proxy_group = 1;
 
-      group->leader_id    = tv_device->id;
-      group->leader_known = true;
-      output_group_member_add(group, tv_device->id);
-
-      // Tag HomePod members so the player can apply connection mode gating.
-      for (device = outputs_device_list; device; device = device->next)
-        {
-          candidate = device->candidate_airplay2;
-          if (!candidate || !candidate->group_id || strcmp(candidate->group_id, group->id) != 0)
-            continue;
-          if (device->id != tv_device->id)
-            candidate->is_tv_proxy_group = 1;
-        }
+      candidate_promote_as_proxy_leader(tv_candidate, tv_device, group);
 
       DPRINTF(E_INFO, L_PLAYER,
               "AirPlay TV proxy group: Apple TV '%s' (id=%" PRIu64 ") linked as leader for HomePod group gid=%s, name='%s'\n",
@@ -630,6 +644,18 @@ effective_candidate_apply(struct output_device *canonical)
   // Keep name in sync with active candidate
   free(canonical->name);
   canonical->name = strdup(candidate->name);
+
+  // Copy mDNS-sourced identity fields (set by backend on announcement, not by
+  // group refresh logic — so these live outside device_group_fields_copy).
+  free(canonical->display_name);
+  canonical->display_name = safe_strdup(candidate->display_name);
+
+  free(canonical->raw_gid);
+  canonical->raw_gid = safe_strdup(candidate->raw_gid);
+
+  canonical->leader_hint_gcgl = candidate->leader_hint_gcgl;
+  canonical->leader_hint_igl  = candidate->leader_hint_igl;
+
   device_group_fields_copy(canonical, candidate);
 }
 
@@ -669,6 +695,17 @@ candidate_store(struct output_device *canonical, struct output_device *new_cand)
       existing->has_password       = new_cand->has_password;
       existing->password           = new_cand->password;
       existing->supported_formats  = new_cand->supported_formats;
+
+      // Update mDNS-sourced identity fields (not in device_group_fields_copy)
+      free(existing->display_name);
+      existing->display_name = safe_strdup(new_cand->display_name);
+
+      free(existing->raw_gid);
+      existing->raw_gid = safe_strdup(new_cand->raw_gid);
+
+      existing->leader_hint_gcgl = new_cand->leader_hint_gcgl;
+      existing->leader_hint_igl  = new_cand->leader_hint_igl;
+
       device_group_fields_copy(existing, new_cand);
 
       candidate_free(new_cand);

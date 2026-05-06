@@ -4034,9 +4034,14 @@ airplay_stereo_state_set(struct output_device *device, struct airplay_extra *ext
   device->leader_hint_gcgl = extra->gcgl;
   device->leader_hint_igl = extra->igl;
 
-  // Always persist the raw mDNS gid so output_group_refresh() can cross-reference
-  // Apple TV devices with their proxied HomePod groups.
-  device->raw_gid = safe_strdup(extra->gid);
+  // Persist the raw mDNS gid for cross-referencing Apple TVs with their proxied
+  // HomePod groups in output_group_refresh(). Only set when the device
+  // advertises a gid (AirPlay 2 devices); RAOP-only devices have no gid.
+  if (extra->gid)
+    {
+      free(device->raw_gid);
+      device->raw_gid = safe_strdup(extra->gid);
+    }
 
   if (!grouped)
     {
