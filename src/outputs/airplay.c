@@ -1637,6 +1637,12 @@ session_make(struct output_device *device, int callback_id)
       goto error;
     }
 
+  DPRINTF(E_DBG, L_AIRPLAY,
+          "Stream mode for '%s': payload_type=%u (realtime), timing=%s, reason=default_sender_path\n",
+          session->devname, AIRPLAY_RTP_PAYLOADTYPE, session->master_session->use_ptp ? "PTP" : "NTP");
+  DPRINTF(E_DBG, L_AIRPLAY, "Session group UUID for '%s': %s (source=generated)\n",
+          session->devname, session->group_uuid);
+
   // Attach to list of sessions
   session->next = airplay_sessions;
   airplay_sessions = session;
@@ -1730,10 +1736,18 @@ airplay_metadata_send_generic(struct airplay_session *session, struct output_met
   struct airplay_metadata *rmd = metadata->priv;
 
   if (session->wanted_metadata & AIRPLAY_MD_WANTS_PROGRESS)
-    sequence_start(AIRPLAY_SEQ_SEND_PROGRESS, session, metadata, "SET_PARAMETER (progress)");
+    {
+      DPRINTF(E_DBG, L_AIRPLAY, "SET_PARAMETER (progress): Sending SET_PARAMETER (progress) to '%s'\n",
+              session->devname);
+      sequence_start(AIRPLAY_SEQ_SEND_PROGRESS, session, metadata, "SET_PARAMETER (progress)");
+    }
 
   if (!only_progress && (session->wanted_metadata & AIRPLAY_MD_WANTS_TEXT))
-    sequence_start(AIRPLAY_SEQ_SEND_TEXT, session, metadata, "SET_PARAMETER (text)");
+    {
+      DPRINTF(E_DBG, L_AIRPLAY, "SET_PARAMETER (text): Sending SET_PARAMETER (text) to '%s'\n",
+              session->devname);
+      sequence_start(AIRPLAY_SEQ_SEND_TEXT, session, metadata, "SET_PARAMETER (text)");
+    }
 
   if (!only_progress && (session->wanted_metadata & AIRPLAY_MD_WANTS_ARTWORK) && rmd->artwork)
     sequence_start(AIRPLAY_SEQ_SEND_ARTWORK, session, metadata, "SET_PARAMETER (artwork)");
@@ -2642,6 +2656,12 @@ payload_make_setup_stream(struct evrtsp_request *req, struct airplay_session *se
   streams = plist_new_array();
   plist_array_append_item(streams, stream);
 
+  DPRINTF(E_DBG, L_AIRPLAY,
+          "SETUP(stream) payload for '%s': audioFormat=%u, controlPort=%u, latencyMin=%u, latencyMax=%u, spf=%u, sr=%u, type=%u (realtime), supportsDynamicStreamID=%u, streamConnectionID=%u\n",
+          session->devname, 262144U, session->control_svc->port, 11025U, 88200U,
+          AIRPLAY_SAMPLES_PER_PACKET, AIRPLAY_QUALITY_SAMPLE_RATE_DEFAULT,
+          AIRPLAY_RTP_PAYLOADTYPE, 0U, session->session_id);
+
   root = plist_new_dict();
   plist_dict_set_item(root, "streams", streams);
   ret = wplist_to_bin(&data, &len, root);
@@ -2710,6 +2730,10 @@ payload_make_setup_session_ntp(struct evrtsp_request *req, struct airplay_sessio
   wplist_dict_add_uint(root, "timingPort", session->timing_svc->port);
   wplist_dict_add_string(root, "timingProtocol", "NTP"); // If set to "None" then an ATV4 will not respond to stream SETUP request
 
+  DPRINTF(E_DBG, L_AIRPLAY,
+          "SETUP(session/NTP) payload for '%s': deviceID=%s, sessionUUID=%s, timingPort=%u, timingProtocol=NTP\n",
+          session->devname, device_id_colon, session->session_uuid, session->timing_svc->port);
+
   ret = wplist_to_bin(&data, &len, root);
   plist_free(root);
 
@@ -2763,6 +2787,11 @@ payload_make_setup_session_ptp(struct evrtsp_request *req, struct airplay_sessio
 
   plist_dict_set_item(root, "timingPeerInfo", timingpeerinfo);
   plist_dict_set_item(root, "timingPeerList", timingpeerlist);
+
+  DPRINTF(E_DBG, L_AIRPLAY,
+          "SETUP(session/PTP) payload for '%s': deviceID=%s, sessionUUID=%s, timingProtocol=PTP, macAddress=%s, groupUUID=%s, groupContainsGroupLeader=%u\n",
+          session->devname, device_id_colon, session->session_uuid,
+          session->local_mac_address, session->group_uuid, 0U);
 
   ret = wplist_to_bin(&data, &len, root);
   plist_free(root);
@@ -4005,6 +4034,10 @@ airplay_stereo_state_set(struct output_device *device, struct airplay_extra *ext
   device->leader_hint_gcgl = extra->gcgl;
   device->leader_hint_igl = extra->igl;
 
+  // Always persist the raw mDNS gid so output_group_refresh() can cross-reference
+  // Apple TV devices with their proxied HomePod groups.
+  device->raw_gid = safe_strdup(extra->gid);
+
   if (!grouped)
     {
       if (airplay_is_appletv_device(extra->devtype) && !airplay_name_contains_tv(device->name))
@@ -4037,9 +4070,16 @@ airplay_stereo_metadata_log(struct output_device *device, struct airplay_extra *
   const char *gpn = extra->gpn ? extra->gpn : "(null)";
   const char *tsid = extra->tsid ? extra->tsid : "(null)";
   const char *group_id = device->group_id ? device->group_id : "(null)";
+  const char *display_name = device->display_name ? device->display_name : device->name;
 
   DPRINTF(E_DBG, L_AIRPLAY, "AirPlay device '%s': stereo metadata gid=%s, gpn='%s', tsid=%s, gcgl=%u, igl=%u\n",
           device->name, gid, gpn, tsid, extra->gcgl, extra->igl);
+
+  DPRINTF(E_DBG, L_AIRPLAY,
+          "AirPlay device '%s': derived stereo state type=%s, raw gid=%s, normalized group_id=%s, gpn='%s', tsid=%s, gcgl=%u, igl=%u, is_grouped=%u, is_group_leader=%u, is_group_hidden=%u, display_name='%s'\n",
+          device->name, airplay_devtype[extra->devtype], gid, group_id, gpn, tsid,
+          extra->gcgl, extra->igl, device->is_grouped, device->is_group_leader,
+          device->is_group_hidden, display_name);
 
   if ((extra->gcgl || extra->igl) && !extra->gid)
     DPRINTF(E_WARN, L_AIRPLAY, "AirPlay stereo metadata inconsistency for device '%s': leader flags set but gid missing\n",

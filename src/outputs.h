@@ -99,6 +99,7 @@ struct output_device
   // Optional AirPlay 2 stereo/group metadata
   char *group_id;
   char *group_name;
+  char *raw_gid;        // Raw mDNS gid, used to cross-reference TV proxy groups
   uint64_t group_leader_id;
 
   // Type of the device, will be used to determine which output backend to call
@@ -124,6 +125,7 @@ struct output_device
   unsigned is_grouped:1;
   unsigned is_group_leader:1;
   unsigned is_group_hidden:1;
+  unsigned is_tv_proxy_group:1;  // Set when device is part of a HomePod-behind-AppleTV group
   unsigned leader_hint_gcgl:1;
   unsigned leader_hint_igl:1;
 
@@ -405,6 +407,9 @@ outputs_device_is_hidden(struct output_device *device);
 
 bool
 outputs_device_is_stereo_leader(struct output_device *device);
+
+bool
+outputs_device_is_tv_proxy_group(struct output_device *device);
 
 const char *
 outputs_device_display_name(struct output_device *device);

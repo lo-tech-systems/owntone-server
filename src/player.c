@@ -118,6 +118,19 @@
 // know if they should only probe the device, or fully start it.
 #define PLAYER_ONLY_PROBE (player_state != PLAY_PLAYING)
 
+// Controls which devices receive AirPlay sessions when HomePods are routed via
+// an Apple TV (the "HomePods as Apple TV output" topology). Three modes:
+//   TV_PROXY_CONNECT_ALL      - connect to Apple TV + all HomePod members
+//   TV_PROXY_CONNECT_APPLETV  - connect to Apple TV only (let it route audio)
+//   TV_PROXY_CONNECT_HOMEPODS - connect to HomePods only (bypass the Apple TV)
+enum tv_proxy_connect_mode
+{
+  TV_PROXY_CONNECT_ALL      = 0,
+  TV_PROXY_CONNECT_APPLETV  = 1,
+  TV_PROXY_CONNECT_HOMEPODS = 2,
+};
+static const enum tv_proxy_connect_mode tv_proxy_connect = TV_PROXY_CONNECT_HOMEPODS;
+
 //#define DEBUG_PLAYER 1
 
 struct spk_enum
@@ -1262,6 +1275,11 @@ device_remove_family(void *arg, int *retval)
   int ret;
 
   remove = cmdarg->device;
+  DPRINTF(E_DBG, L_PLAYER,
+          "device_remove_family: remove=%p id=%" PRIu64 " type=%s name='%s' v4_port=%d v6_port=%d advertised=%u\n",
+          remove, remove->id, remove->type_name ? remove->type_name : "(null)",
+          remove->name ? remove->name : "(null)", remove->v4_port, remove->v6_port,
+          remove->advertised);
 
   device = outputs_device_get(remove->id);
   if (!device)
@@ -1273,10 +1291,19 @@ device_remove_family(void *arg, int *retval)
       return COMMAND_END;
     }
 
+  DPRINTF(E_DBG, L_PLAYER,
+          "device_remove_family: canonical=%p id=%" PRIu64 " name='%s' type=%s session=%p supported_modes=0x%x cand_raop=%p cand_airplay2=%p\n",
+          device, device->id, device->name ? device->name : "(null)",
+          device->type_name ? device->type_name : "(null)", device->session,
+          device->supported_modes, device->candidate_raop, device->candidate_airplay2);
+
   // Delegate to outputs.c which understands the candidate model. A return
   // value of 1 means the canonical device has no remaining candidates and
   // no active session; we must remove it.
   ret = outputs_device_protocol_remove(device, remove);
+  DPRINTF(E_DBG, L_PLAYER,
+          "device_remove_family: outputs_device_protocol_remove returned %d for canonical id=%" PRIu64 " name='%s'\n",
+          ret, device->id, device->name ? device->name : "(null)");
   if (ret < 0)
     {
       // Not a known multi-protocol type (e.g. legacy local audio):
@@ -2146,6 +2173,36 @@ speaker_is_in_selected_set(struct output_device *device, uint64_t *ids, int nspk
   return false;
 }
 
+// Returns true if the TV proxy connect mode would suppress starting/stopping
+// this device in a TV proxy group. The Apple TV is the group leader; HomePods
+// are non-leader members.
+static bool
+tv_proxy_device_skip(struct output_device *device)
+{
+  bool is_leader;
+
+  if (tv_proxy_connect == TV_PROXY_CONNECT_ALL)
+    return false;
+  if (!outputs_device_is_tv_proxy_group(device))
+    return false;
+
+  is_leader = outputs_device_is_stereo_leader(device);
+
+  if (tv_proxy_connect == TV_PROXY_CONNECT_APPLETV && !is_leader)
+    {
+      DPRINTF(E_DBG, L_PLAYER, "TV proxy connect=AppleTV: skipping HomePod member '%s'\n",
+              outputs_device_display_name(device));
+      return true;
+    }
+  if (tv_proxy_connect == TV_PROXY_CONNECT_HOMEPODS && is_leader)
+    {
+      DPRINTF(E_DBG, L_PLAYER, "TV proxy connect=HomePods: skipping Apple TV leader '%s'\n",
+              outputs_device_display_name(device));
+      return true;
+    }
+  return false;
+}
+
 static void
 speaker_group_select(struct output_device *device, int max_volume)
 {
@@ -2216,6 +2273,9 @@ speaker_group_start(struct output_device *device, output_status_cb cb, bool only
       if (!cur_gid || strcmp(cur_gid, group_id) != 0)
         continue;
 
+      if (tv_proxy_device_skip(cur))
+        continue;
+
       ret = outputs_device_start(cur, cb, only_probe);
       if (ret > 0)
         {
@@ -2252,6 +2312,9 @@ speaker_group_stop(struct output_device *device, output_status_cb cb)
       if (!cur_gid || strcmp(cur_gid, group_id) != 0)
         continue;
 
+      if (tv_proxy_device_skip(cur))
+        continue;
+
       ret = outputs_device_stop(cur, cb);
       if (ret > 0)
         {
@@ -2262,6 +2325,58 @@ speaker_group_stop(struct output_device *device, output_status_cb cb)
         successes++;
     }
 
+  if (pending > 0)
+    return pending;
+
+  return (successes > 0) ? 0 : -1;
+}
+
+static int
+speaker_group_volume_set(struct output_device *device, int absvol, int relvol, output_status_cb cb)
+{
+  struct output_device *cur;
+  const char *group_id;
+  int ret;
+  int pending = 0;
+  int successes = 0;
+
+  outputs_device_volume_register(device, absvol, relvol);
+  ret = outputs_device_volume_set(device, cb);
+  if (ret > 0)
+    pending += ret;
+  else if (ret == 0)
+    successes++;
+
+  if (!outputs_device_is_tv_proxy_group(device))
+    goto done;
+
+  group_id = outputs_device_group_id(device);
+  if (!group_id)
+    goto done;
+
+  for (cur = outputs_list(); cur; cur = cur->next)
+    {
+      const char *cur_gid = outputs_device_group_id(cur);
+
+      if (cur == device)
+        continue;
+      if (!cur_gid || strcmp(cur_gid, group_id) != 0)
+        continue;
+      if (!outputs_device_is_tv_proxy_group(cur))
+        continue;
+
+      outputs_device_volume_register(cur, absvol, relvol);
+      ret = outputs_device_volume_set(cur, cb);
+      if (ret > 0)
+        {
+          pending += ret;
+          successes++;
+        }
+      else if (ret == 0)
+        successes++;
+    }
+
+ done:
   if (pending > 0)
     return pending;
 
@@ -2764,9 +2879,7 @@ volume_setrel_speaker(void *arg, int *retval)
       return COMMAND_END;
     }
 
-  outputs_device_volume_register(device, -1, vol_param->volume);
-
-  *retval = outputs_device_volume_set(device, device_volume_cb);
+  *retval = speaker_group_volume_set(device, -1, vol_param->volume, device_volume_cb);
 
   if (*retval > 0)
     return COMMAND_PENDING; // async
@@ -2788,9 +2901,7 @@ volume_setabs_speaker(void *arg, int *retval)
       return COMMAND_END;
     }
 
-  outputs_device_volume_register(device, vol_param->volume, -1);
-
-  *retval = outputs_device_volume_set(device, device_volume_cb);
+  *retval = speaker_group_volume_set(device, vol_param->volume, -1, device_volume_cb);
 
   if (*retval > 0)
     return COMMAND_PENDING; // async
@@ -2821,9 +2932,7 @@ volume_setraw_speaker(void *arg, int *retval)
       return COMMAND_END;
     }
 
-  outputs_device_volume_register(device, volume, -1);
-
-  *retval = outputs_device_volume_set(device, device_volume_cb);
+  *retval = speaker_group_volume_set(device, volume, -1, device_volume_cb);
 
   if (*retval > 0)
     return COMMAND_PENDING; // async

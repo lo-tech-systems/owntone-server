@@ -199,10 +199,14 @@ device_group_fields_clear(struct output_device *device)
   free(device->group_name);
   device->group_name = NULL;
 
+  free(device->raw_gid);
+  device->raw_gid = NULL;
+
   device->group_leader_id = 0;
   device->is_grouped = 0;
   device->is_group_leader = 0;
   device->is_group_hidden = 0;
+  device->is_tv_proxy_group = 0;
   device->leader_hint_gcgl = 0;
   device->leader_hint_igl = 0;
 }
@@ -215,10 +219,12 @@ device_group_fields_copy(struct output_device *dst, struct output_device *src)
   dst->display_name = safe_strdup(src->display_name);
   dst->group_id = safe_strdup(src->group_id);
   dst->group_name = safe_strdup(src->group_name);
+  dst->raw_gid = safe_strdup(src->raw_gid);
   dst->group_leader_id = src->group_leader_id;
   dst->is_grouped = src->is_grouped;
   dst->is_group_leader = src->is_group_leader;
   dst->is_group_hidden = src->is_group_hidden;
+  dst->is_tv_proxy_group = src->is_tv_proxy_group;
   dst->leader_hint_gcgl = src->leader_hint_gcgl;
   dst->leader_hint_igl = src->leader_hint_igl;
 }
@@ -228,9 +234,44 @@ output_group_refresh(void)
 {
   struct output_device *device;
   struct output_device *candidate;
+  struct output_device *tv_device;
+  struct output_device *tv_candidate;
   struct output_group *group;
   const char *log_name;
+  const char *shared_raw_gid;
   int leaders;
+
+  // Reset any TV proxy state set synthetically during a previous refresh.
+  // The Apple TV proxy leader's group fields are computed (not from mDNS), so
+  // they must be cleared before rebuilding. HomePod members only need their
+  // is_tv_proxy_group flag cleared; their group_id comes from mDNS and stays.
+  for (device = outputs_device_list; device; device = device->next)
+    {
+      candidate = device->candidate_airplay2;
+      if (!candidate)
+        continue;
+
+      if (candidate->is_tv_proxy_group && candidate->is_group_leader)
+        {
+          DPRINTF(E_DBG, L_PLAYER,
+                  "output_group_refresh: clearing proxy leader candidate=%p canonical id=%" PRIu64 " name='%s' group_id=%s group_name='%s' raw_gid=%s\n",
+                  candidate, device->id, device->name ? device->name : "(null)",
+                  candidate->group_id ? candidate->group_id : "(null)",
+                  candidate->group_name ? candidate->group_name : "(null)",
+                  candidate->raw_gid ? candidate->raw_gid : "(null)");
+          // This candidate was promoted as Apple TV proxy leader; clear the
+          // synthetically assigned group fields but preserve raw_gid.
+          free(candidate->group_id);
+          candidate->group_id = NULL;
+          free(candidate->group_name);
+          candidate->group_name = NULL;
+          candidate->group_leader_id = 0;
+          candidate->is_grouped = 0;
+          candidate->is_group_leader = 0;
+          candidate->is_group_hidden = 0;
+        }
+      candidate->is_tv_proxy_group = 0;
+    }
 
   output_group_free_all();
 
@@ -242,6 +283,15 @@ output_group_refresh(void)
       if (!candidate || !candidate->group_id)
         continue;
 
+      DPRINTF(E_DBG, L_PLAYER,
+              "Considering AirPlay group candidate: canonical id=%" PRIu64 ", canonical='%s', candidate='%s', type=%s, gid=%s, name='%s', leader=%u, hidden=%u, leader_hint_gcgl=%u, leader_hint_igl=%u\n",
+              device->id, device->name ? device->name : "(null)",
+              candidate->name ? candidate->name : "(null)",
+              candidate->type_name ? candidate->type_name : "(unknown)",
+              candidate->group_id, candidate->group_name ? candidate->group_name : "(null)",
+              candidate->is_group_leader, candidate->is_group_hidden,
+              candidate->leader_hint_gcgl, candidate->leader_hint_igl);
+
       group = output_group_find_or_add(candidate->group_id);
       if (!group->name && candidate->group_name)
         group->name = safe_strdup(candidate->group_name);
@@ -252,6 +302,88 @@ output_group_refresh(void)
         }
 
       output_group_member_add(group, device->id);
+    }
+
+  // For each HomePod group with no mDNS leader (both HomePods behind an Apple
+  // TV report igl=0), look for an Apple TV whose raw mDNS gid matches the
+  // members' shared raw gid and which carries igl=1. Promote it as the visible
+  // proxy leader for the group.
+  for (group = outputs_group_list; group; group = group->next)
+    {
+      if (group->leader_known)
+        continue;
+
+      // Find the raw_gid shared by members of this leaderless group.
+      shared_raw_gid = NULL;
+      for (device = outputs_device_list; device; device = device->next)
+        {
+          candidate = device->candidate_airplay2;
+          if (!candidate || !candidate->group_id || strcmp(candidate->group_id, group->id) != 0)
+            continue;
+          if (candidate->raw_gid)
+            {
+              shared_raw_gid = candidate->raw_gid;
+              break;
+            }
+        }
+
+      if (!shared_raw_gid)
+        continue;
+
+      // Find an Apple TV whose raw_gid matches and which has the leader hint.
+      tv_device = NULL;
+      for (device = outputs_device_list; device; device = device->next)
+        {
+          candidate = device->candidate_airplay2;
+          if (!candidate)
+            continue;
+          // Exclude devices already in this group.
+          if (candidate->group_id && strcmp(candidate->group_id, group->id) == 0)
+            continue;
+          if (!candidate->raw_gid || strcmp(candidate->raw_gid, shared_raw_gid) != 0)
+            continue;
+          if (!candidate->leader_hint_igl)
+            continue;
+          tv_device = device;
+          break;
+        }
+
+      if (!tv_device)
+        continue;
+
+      tv_candidate = tv_device->candidate_airplay2;
+
+      // Promote the Apple TV as the proxy leader for this HomePod group.
+      DPRINTF(E_DBG, L_PLAYER,
+              "output_group_refresh: promoting proxy leader tv_device=%p id=%" PRIu64 " name='%s' candidate=%p raw_gid=%s -> group_id=%s group_name='%s'\n",
+              tv_device, tv_device->id, tv_device->name ? tv_device->name : "(null)",
+              tv_candidate, tv_candidate->raw_gid ? tv_candidate->raw_gid : "(null)",
+              group->id, group->name ? group->name : "(unknown)");
+      tv_candidate->group_id       = safe_strdup(group->id);
+      tv_candidate->group_name     = safe_strdup(group->name);
+      tv_candidate->group_leader_id = tv_device->id;
+      tv_candidate->is_grouped     = 1;
+      tv_candidate->is_group_leader = 1;
+      tv_candidate->is_group_hidden = 0;
+      tv_candidate->is_tv_proxy_group = 1;
+
+      group->leader_id    = tv_device->id;
+      group->leader_known = true;
+      output_group_member_add(group, tv_device->id);
+
+      // Tag HomePod members so the player can apply connection mode gating.
+      for (device = outputs_device_list; device; device = device->next)
+        {
+          candidate = device->candidate_airplay2;
+          if (!candidate || !candidate->group_id || strcmp(candidate->group_id, group->id) != 0)
+            continue;
+          if (device->id != tv_device->id)
+            candidate->is_tv_proxy_group = 1;
+        }
+
+      DPRINTF(E_INFO, L_PLAYER,
+              "AirPlay TV proxy group: Apple TV '%s' (id=%" PRIu64 ") linked as leader for HomePod group gid=%s, name='%s'\n",
+              tv_device->name, tv_device->id, group->id, group->name ? group->name : "(unknown)");
     }
 
   for (group = outputs_group_list; group; group = group->next)
@@ -310,6 +442,14 @@ outputs_device_is_stereo_leader(struct output_device *device)
   return meta && meta->is_grouped && meta->is_group_leader;
 }
 
+bool
+outputs_device_is_tv_proxy_group(struct output_device *device)
+{
+  struct output_device *meta = group_meta_device(device);
+
+  return meta && meta->is_tv_proxy_group;
+}
+
 const char *
 outputs_device_display_name(struct output_device *device)
 {
@@ -357,6 +497,16 @@ candidate_free(struct output_device *candidate)
   if (!candidate)
     return;
 
+  DPRINTF(E_DBG, L_PLAYER,
+          "candidate_free: candidate=%p id=%" PRIu64 " type=%s name='%s' display='%s' group_id=%s group_name='%s' raw_gid=%s extra=%p\n",
+          candidate, candidate->id, candidate->type_name ? candidate->type_name : "(null)",
+          candidate->name ? candidate->name : "(null)",
+          candidate->display_name ? candidate->display_name : "(null)",
+          candidate->group_id ? candidate->group_id : "(null)",
+          candidate->group_name ? candidate->group_name : "(null)",
+          candidate->raw_gid ? candidate->raw_gid : "(null)",
+          candidate->extra_device_info);
+
   if (candidate->extra_device_info && outputs[candidate->type]->device_free_extra)
     outputs[candidate->type]->device_free_extra(candidate);
 
@@ -364,6 +514,7 @@ candidate_free(struct output_device *candidate)
   free(candidate->display_name);
   free(candidate->group_id);
   free(candidate->group_name);
+  free(candidate->raw_gid);
   free(candidate->auth_key);
   free(candidate->v4_address);
   free(candidate->v6_address);
@@ -1479,6 +1630,17 @@ outputs_device_free(struct output_device *device)
   if (!device)
     return;
 
+  DPRINTF(E_DBG, L_PLAYER,
+          "outputs_device_free: device=%p id=%" PRIu64 " type=%s name='%s' display='%s' session=%p cand_raop=%p cand_airplay2=%p group_id=%s group_name='%s' raw_gid=%s extra=%p\n",
+          device, device->id, device->type_name ? device->type_name : "(null)",
+          device->name ? device->name : "(null)",
+          device->display_name ? device->display_name : "(null)",
+          device->session, device->candidate_raop, device->candidate_airplay2,
+          device->group_id ? device->group_id : "(null)",
+          device->group_name ? device->group_name : "(null)",
+          device->raw_gid ? device->raw_gid : "(null)",
+          device->extra_device_info);
+
   if (outputs[device->type]->disabled)
     DPRINTF(E_LOG, L_PLAYER, "BUG! Freeing device from a disabled output?\n");
 
@@ -1501,6 +1663,7 @@ outputs_device_free(struct output_device *device)
   free(device->display_name);
   free(device->group_id);
   free(device->group_name);
+  free(device->raw_gid);
   free(device->auth_key);
   free(device->v4_address);
   free(device->v6_address);
@@ -1574,15 +1737,32 @@ outputs_device_protocol_remove(struct output_device *canonical, struct output_de
   if (!candidate)
     return 0; // Already gone
 
+  DPRINTF(E_DBG, L_PLAYER,
+          "outputs_device_protocol_remove: canonical=%p id=%" PRIu64 " name='%s' type=%s session=%p remove=%p remove_type=%s candidate=%p candidate_type=%s candidate_name='%s' v4=%s:%d v6=%s:%d group_id=%s group_name='%s' raw_gid=%s\n",
+          canonical, canonical->id, canonical->name ? canonical->name : "(null)",
+          canonical->type_name ? canonical->type_name : "(null)", canonical->session,
+          remove, remove->type_name ? remove->type_name : "(null)",
+          candidate, candidate->type_name ? candidate->type_name : "(null)",
+          candidate->name ? candidate->name : "(null)",
+          candidate->v4_address ? candidate->v4_address : "(null)", candidate->v4_port,
+          candidate->v6_address ? candidate->v6_address : "(null)", candidate->v6_port,
+          candidate->group_id ? candidate->group_id : "(null)",
+          candidate->group_name ? candidate->group_name : "(null)",
+          candidate->raw_gid ? candidate->raw_gid : "(null)");
+
   // Remove the departing address family from the candidate
   if (remove->v4_port && candidate->v4_address)
     {
+      DPRINTF(E_DBG, L_PLAYER, "outputs_device_protocol_remove: clearing IPv4 for candidate=%p address=%s port=%d\n",
+              candidate, candidate->v4_address, candidate->v4_port);
       free(candidate->v4_address);
       candidate->v4_address = NULL;
       candidate->v4_port    = 0;
     }
   if (remove->v6_port && candidate->v6_address)
     {
+      DPRINTF(E_DBG, L_PLAYER, "outputs_device_protocol_remove: clearing IPv6 for candidate=%p address=%s port=%d\n",
+              candidate, candidate->v6_address, candidate->v6_port);
       free(candidate->v6_address);
       candidate->v6_address = NULL;
       candidate->v6_port    = 0;
@@ -1591,6 +1771,11 @@ outputs_device_protocol_remove(struct output_device *canonical, struct output_de
   // If the candidate still has at least one address it is still reachable
   if (candidate->v4_address || candidate->v6_address)
     {
+      DPRINTF(E_DBG, L_PLAYER,
+              "outputs_device_protocol_remove: candidate=%p still reachable after family removal, remaining v4=%s:%d v6=%s:%d\n",
+              candidate,
+              candidate->v4_address ? candidate->v4_address : "(null)", candidate->v4_port,
+              candidate->v6_address ? candidate->v6_address : "(null)", candidate->v6_port);
       // If this is the active backend, refresh canonical's address fields
       if (canonical->type == candidate->type)
         effective_candidate_apply(canonical);
@@ -1607,6 +1792,9 @@ outputs_device_protocol_remove(struct output_device *canonical, struct output_de
 
   if (canonical->session && canonical->type == candidate->type)
     {
+      DPRINTF(E_DBG, L_PLAYER,
+              "outputs_device_protocol_remove: preserving active candidate=%p for canonical id=%" PRIu64 " because session=%p is still using backend %s\n",
+              candidate, canonical->id, canonical->session, candidate->type_name ? candidate->type_name : "(null)");
       // Active session is using this candidate's extra_device_info. Keep the
       // candidate alive so the session can finish cleanly; the session will
       // fail, and deferred_cb will switch to the remaining protocol after
@@ -1622,18 +1810,32 @@ outputs_device_protocol_remove(struct output_device *canonical, struct output_de
     }
 
   // Safe to free the candidate now
+  DPRINTF(E_DBG, L_PLAYER,
+          "outputs_device_protocol_remove: freeing exhausted candidate=%p for canonical id=%" PRIu64 " name='%s'\n",
+          candidate, canonical->id, canonical->name ? canonical->name : "(null)");
   candidate_free(*slot);
   *slot = NULL;
+  // The canonical borrows extra_device_info from the active candidate.
+  // Clear the borrowed pointer now that the candidate (and its owned extra)
+  // have been freed, so outputs_device_free() doesn't double-free it.
+  if (canonical->type == candidate->type)
+    canonical->extra_device_info = NULL;
   supported_modes_recompute(canonical);
 
   if (!canonical->candidate_raop && !canonical->candidate_airplay2)
     {
+      DPRINTF(E_DBG, L_PLAYER,
+              "outputs_device_protocol_remove: canonical id=%" PRIu64 " has no remaining candidates, session=%p\n",
+              canonical->id, canonical->session);
       canonical->advertised = 0;
       output_group_refresh();
       return canonical->session ? 0 : 1; // 1 = caller should remove canonical
     }
 
   // Another protocol is available: switch to it
+  DPRINTF(E_DBG, L_PLAYER,
+          "outputs_device_protocol_remove: canonical id=%" PRIu64 " switching to remaining backend, cand_raop=%p cand_airplay2=%p\n",
+          canonical->id, canonical->candidate_raop, canonical->candidate_airplay2);
   effective_candidate_apply(canonical);
   output_group_refresh();
   return 0;
