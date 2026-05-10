@@ -11,18 +11,21 @@ speakers, and is controlled entirely via an HTTP JSON API.
 ## Features
 
 * FIFO (named pipe) audio input — compatible with Shairport-Sync and similar tools
-* AirPlay 1 (RAOP) and AirPlay 2 output to multiple simultaneous speakers
-* Metadata forwarding — title/artist/album/artwork pushed to AirPlay speakers
-* JSON config file (`owntone-settings.json`) — auto-created at startup if missing
-  and self-healed for the configured runtime user
+* Playback via:
+** AirPlay 1 (RAOP) and AirPlay 2 compatible speakers
+** HomePods, including stereo pairs
+** Playback via Apple TV, either through HDMI or connected HomePods
 * HTTP JSON API for all control and settings
-* No web UI, no library scanning, no external service integrations
+
+This build has no web UI, no library scanning, and no external service integrations.
 
 ---
 
 ## Use Case
 
 OwnTone-Minimal is intended as a backend audio output service within a larger pipeline.
+Supported output devices include AirPlay 1 speakers, AirPlay 2 speakers, HomePods
+(including stereo pairs), and Apple TV (routing audio to its connected HomePods).
 
 ```text
 Audio source → DSP / processing → FIFO pipe → OwnTone-Minimal → AirPlay devices
@@ -83,6 +86,28 @@ implementations are inherited unchanged from OwnTone. All protocol-level decisio
 OwnTone project.
 
 See [FORK.md](FORK.md) for a detailed description of what was changed and why.
+
+---
+
+## Protocol Compatibility and Intellectual Property Notice
+
+OwnTone-Minimal is an independent interoperability project. Its AirPlay 1 and AirPlay 2 playback
+support — including HomePod, HomePod stereo pairs, and Apple TV proxy routing — is provided only
+so independently created software can exchange audio with compatible devices on a local network.
+
+This project does not include Apple source code, Apple binaries, Apple firmware, Apple artwork, or
+Apple confidential documentation. Contributors must not submit code, test material, keys,
+certificates, protocol dumps, or documentation obtained under an Apple NDA or from any non-public
+Apple source.
+
+The terms "Apple", "AirPlay", "AirPlay 2", "Apple TV", "HomePod", and related names are used only
+to identify compatible devices and protocols. OwnTone-Minimal is not affiliated with, endorsed by,
+sponsored by, or certified by Apple Inc.
+
+Reverse-engineered protocol behavior should be documented and implemented only to the extent
+necessary for interoperability with independently created software and lawful user-owned devices.
+Any copyright, trademark, or other intellectual-property concern should be reported to the
+maintainers so it can be reviewed promptly.
 
 ---
 
