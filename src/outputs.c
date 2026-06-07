@@ -28,6 +28,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <time.h>
 
 #include <event2/event.h>
 
@@ -40,6 +41,26 @@
 
 extern struct output_definition output_raop;
 extern struct output_definition output_airplay;
+
+// Returns seconds elapsed since an arbitrary fixed point, using a monotonic
+// clock that is unaffected by NTP steps or manual wall-clock adjustments.
+// Used exclusively for grace-period bookkeeping (removal_at, GC now).
+// Returns 0 on clock_gettime() failure (CLOCK_MONOTONIC should never fail on
+// POSIX; 0 is already the "no timestamp" sentinel — the GC grace-check guards
+// on removal_at > 0, so a 0 stamp causes immediate expiry, which is safe).
+// Returning 0 on both paths keeps timestamps in the same domain and avoids
+// mixing monotonic and wall-clock epochs.
+static time_t
+monotonic_secs(void)
+{
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+    {
+      DPRINTF(E_WARN, L_PLAYER, "clock_gettime(CLOCK_MONOTONIC) failed: %s\n", strerror(errno));
+      return 0;
+    }
+  return ts.tv_sec;
+}
 
 /* From player.c */
 extern struct event_base *evbase_player;
@@ -352,7 +373,9 @@ output_group_refresh(void)
       for (device = outputs_device_list; device; device = device->next)
         {
           candidate = device->candidate_airplay2;
-          if (!candidate || !candidate->group_id || strcmp(candidate->group_id, group->id) != 0)
+          if (!candidate)
+            continue;
+          if (!candidate->group_id || strcmp(candidate->group_id, group->id) != 0)
             continue;
           if (candidate->raw_gid)
             {
@@ -406,7 +429,9 @@ output_group_refresh(void)
       for (device = outputs_device_list; device; device = device->next)
         {
           candidate = device->candidate_airplay2;
-          if (!candidate || !candidate->group_id || strcmp(candidate->group_id, group->id) != 0)
+          if (!candidate)
+            continue;
+          if (!candidate->group_id || strcmp(candidate->group_id, group->id) != 0)
             continue;
           if (candidate->is_group_leader)
             leaders++;
@@ -433,8 +458,9 @@ group_meta_device(struct output_device *device)
 {
   // Stereo grouping is derived from the AirPlay 2 candidate even when another
   // backend is currently active, so prefer that candidate as the metadata
-  // source when it is available.
-  if (device && device->candidate_airplay2 && device->candidate_airplay2->group_id)
+  // source when it is available, including while it is in the grace period.
+  if (device && device->candidate_airplay2
+      && device->candidate_airplay2->group_id)
     return device->candidate_airplay2;
 
   return device;
@@ -547,36 +573,50 @@ candidate_slot(struct output_device *canonical, enum output_types type)
   return NULL;
 }
 
-// Recomputes supported_modes from whichever candidate slots are populated.
+// Recomputes supported_modes from whichever candidate slots are populated and
+// not pending removal. Called on new advertisement and on GC expiry; not called
+// on grace-period entry so the bitmask stays valid for clients during the window.
 static void
 supported_modes_recompute(struct output_device *device)
 {
   device->supported_modes = 0;
-  if (device->candidate_raop)
+  if (device->candidate_raop && !device->candidate_raop->removal_candidate)
     device->supported_modes |= OUTPUT_MODE_RAOP;
-  if (device->candidate_airplay2)
+  if (device->candidate_airplay2 && !device->candidate_airplay2->removal_candidate)
     device->supported_modes |= OUTPUT_MODE_AIRPLAY2;
 }
 
 // Resolves the effective output type from preferred_mode and available
 // candidates, falling back to priority-based selection for AUTO.
+// Removal candidates are treated as absent so protocol selection skips them.
 static enum output_types
 effective_type_resolve(struct output_device *device)
 {
-  if (outputs_device_is_stereo_leader(device) && device->candidate_airplay2)
+  // Skip removal candidates: their addresses have been cleared and copying
+  // them onto the canonical would overwrite valid cached address data.
+  struct output_device *raop = (device->candidate_raop && !device->candidate_raop->removal_candidate)
+                               ? device->candidate_raop : NULL;
+  struct output_device *ap2  = (device->candidate_airplay2 && !device->candidate_airplay2->removal_candidate)
+                               ? device->candidate_airplay2 : NULL;
+
+  if (outputs_device_is_stereo_leader(device) && ap2)
     return OUTPUT_TYPE_AIRPLAY;
 
-  if (device->preferred_mode == OUTPUT_MODE_RAOP && device->candidate_raop)
+  if (device->preferred_mode == OUTPUT_MODE_RAOP && raop)
     return OUTPUT_TYPE_RAOP;
-  if (device->preferred_mode == OUTPUT_MODE_AIRPLAY2 && device->candidate_airplay2)
+  if (device->preferred_mode == OUTPUT_MODE_AIRPLAY2 && ap2)
     return OUTPUT_TYPE_AIRPLAY;
 
   // AUTO or preferred protocol unavailable: highest priority wins
-  if (device->candidate_airplay2 &&
-      (!device->candidate_raop ||
-       outputs[OUTPUT_TYPE_AIRPLAY]->priority <= outputs[OUTPUT_TYPE_RAOP]->priority))
+  if (ap2 &&
+      (!raop || outputs[OUTPUT_TYPE_AIRPLAY]->priority <= outputs[OUTPUT_TYPE_RAOP]->priority))
     return OUTPUT_TYPE_AIRPLAY;
 
+  if (raop)
+    return OUTPUT_TYPE_RAOP;
+
+  // All candidates are removal candidates or absent. Return a safe default;
+  // effective_candidate_apply() will guard against the removal candidate.
   return OUTPUT_TYPE_RAOP;
 }
 
@@ -592,7 +632,9 @@ effective_candidate_apply(struct output_device *canonical)
   etype = effective_type_resolve(canonical);
   candidate = (etype == OUTPUT_TYPE_RAOP) ? canonical->candidate_raop
                                           : canonical->candidate_airplay2;
-  if (!candidate)
+  // Guard: candidate may be a removal candidate (no addresses) when all slots
+  // are pending GC. Don't copy empty transport fields onto the canonical.
+  if (!candidate || candidate->removal_candidate)
     return;
 
   // Log backend switches before overwriting canonical->type (skip on first apply
@@ -601,12 +643,15 @@ effective_candidate_apply(struct output_device *canonical)
     DPRINTF(E_INFO, L_PLAYER, "Switching '%s' output backend: %s -> %s\n",
             canonical->name, outputs_name(canonical->type), candidate->type_name);
 
-  // Log when the user's preferred protocol is unavailable and we fall back
+  // Log when the user's preferred protocol is unavailable and we fall back.
+  // Use available (non-removal) candidates for the check.
   if (canonical->preferred_mode != OUTPUT_MODE_AUTO)
     {
+      bool avail_raop = canonical->candidate_raop && !canonical->candidate_raop->removal_candidate;
+      bool avail_ap2  = canonical->candidate_airplay2 && !canonical->candidate_airplay2->removal_candidate;
       bool preferred_unavailable =
-        (canonical->preferred_mode == OUTPUT_MODE_RAOP    && !canonical->candidate_raop) ||
-        (canonical->preferred_mode == OUTPUT_MODE_AIRPLAY2 && !canonical->candidate_airplay2);
+        (canonical->preferred_mode == OUTPUT_MODE_RAOP    && !avail_raop) ||
+        (canonical->preferred_mode == OUTPUT_MODE_AIRPLAY2 && !avail_ap2);
       if (preferred_unavailable)
         DPRINTF(E_DBG, L_PLAYER, "Preferred protocol for '%s' unavailable, using %s\n",
                 candidate->name, candidate->type_name);
@@ -674,6 +719,12 @@ candidate_store(struct output_device *canonical, struct output_device *new_cand)
       return;
     }
 
+  // Every advertisement (new or refresh) stamps a fresh last_seen time and
+  // cancels any in-progress grace-period removal.
+  new_cand->last_seen         = time(NULL);
+  new_cand->removal_candidate = 0;
+  new_cand->removal_at        = 0;
+
   if (*slot && canonical->session && canonical->type == new_cand->type)
     {
       // Active session is using this candidate's extra_device_info. Update
@@ -707,6 +758,11 @@ candidate_store(struct output_device *canonical, struct output_device *new_cand)
       existing->leader_hint_igl  = new_cand->leader_hint_igl;
 
       device_group_fields_copy(existing, new_cand);
+
+      // Propagate the re-advertisement stamp to the in-place candidate.
+      existing->last_seen         = new_cand->last_seen;
+      existing->removal_candidate = 0;
+      existing->removal_at        = 0;
 
       candidate_free(new_cand);
       return;
@@ -811,8 +867,11 @@ deferred_cb(int fd, short what, void *arg)
 	  memset(&outputs_cb_register[callback_id], 0, sizeof(struct outputs_callback_register));
 
 	  // The device has left the building (stopped/failed), and the backend
-	  // is not using it any more
-	  if (device && !device->advertised && !device->session)
+	  // is not using it any more. Only remove immediately when there are no
+	  // candidates left to enter the grace-period flow; if candidates remain
+	  // (even addressless ones), fall through to the grace-period handling.
+	  if (device && !device->advertised && !device->session
+	      && !device->candidate_raop && !device->candidate_airplay2)
 	    {
 	      outputs_device_remove(device);
 	      device = NULL;
@@ -831,19 +890,18 @@ deferred_cb(int fd, short what, void *arg)
 
 		  // Case 1: The active candidate disappeared while a session was
 		  // running. Its slot is still set (kept alive for extra_device_info)
-		  // but the candidate has no addresses. Free it and switch now.
+		  // but the candidate has no addresses. Start the grace clock from
+		  // NOW (session-end time), not from when mDNS fired REMOVE: if the
+		  // session outlasted the configured grace period the device should
+		  // still have a full window to re-advertise after streaming stops.
 		  if (active_cand && !active_cand->v4_address && !active_cand->v6_address)
 		    {
-		      DPRINTF(E_INFO, L_PLAYER, "Freeing gone %s candidate for '%s' after session end\n",
+		      DPRINTF(E_INFO, L_PLAYER,
+			      "Active %s candidate for '%s' has no addresses after session end; deferring to GC\n",
 			      active_cand->type_name, device->name);
-		      device->extra_device_info = NULL; // borrowed reference; candidate owns it
-		      candidate_free(active_cand);
-		      *active_slot = NULL;
-		      supported_modes_recompute(device);
-		      if (device->candidate_raop || device->candidate_airplay2)
-			effective_candidate_apply(device);
-		      else
-			device->advertised = 0;
+		      active_cand->removal_candidate = 1;
+		      active_cand->removal_at        = monotonic_secs(); // reset to session-end time
+		      effective_candidate_apply(device); // switches to other protocol if available
 		    }
 		  // Case 2: The active slot was already cleared through another path.
 		  else if (!active_cand && (device->candidate_raop || device->candidate_airplay2))
@@ -1528,6 +1586,11 @@ outputs_device_start(struct output_device *device, output_status_cb cb, bool onl
   if (device->session)
     return 0; // Device is already running, nothing to do
 
+  // Device was fully removed from mDNS (non-multi-protocol path) or all
+  // candidates were expired by GC. Refuse to start.
+  if (!device->advertised)
+    return -1;
+
   if (only_probe)
     ret = outputs[device->type]->device_probe(device, callback_add(device, cb));
   else
@@ -1832,47 +1895,37 @@ outputs_device_protocol_remove(struct output_device *canonical, struct output_de
       DPRINTF(E_DBG, L_PLAYER,
               "outputs_device_protocol_remove: preserving active candidate=%p for canonical id=%" PRIu64 " because session=%p is still using backend %s\n",
               candidate, canonical->id, canonical->session, candidate->type_name ? candidate->type_name : "(null)");
-      // Active session is using this candidate's extra_device_info. Keep the
-      // candidate alive so the session can finish cleanly; the session will
-      // fail, and deferred_cb will switch to the remaining protocol after
-      // device->session is cleared.
-      uint32_t gone_bit = (remove->type == OUTPUT_TYPE_RAOP) ? OUTPUT_MODE_RAOP
-                                                              : OUTPUT_MODE_AIRPLAY2;
-      canonical->supported_modes &= ~gone_bit;
-      // Mark as unadvertised only when no other protocol remains
-      if (!canonical->supported_modes)
-        canonical->advertised = 0;
+      // Mark the addressless candidate so effective_type_resolve() and
+      // effective_candidate_apply() skip it immediately — they check
+      // removal_candidate, not the addresses directly.  The candidate itself
+      // is kept alive (not freed) because the session holds a reference to its
+      // extra_device_info.  outputs_device_gc() will skip freeing it while the
+      // session is active; deferred_cb() Case 1 will re-confirm the flag and
+      // hand it to GC after the session ends.  candidate_store() cancels the
+      // flag if mDNS re-advertises before the session fails.
+      candidate->removal_candidate = 1;
+      candidate->removal_at        = monotonic_secs();
       output_group_refresh();
       return 0;
     }
 
-  // Safe to free the candidate now
-  DPRINTF(E_DBG, L_PLAYER,
-          "outputs_device_protocol_remove: freeing exhausted candidate=%p for canonical id=%" PRIu64 " name='%s'\n",
-          candidate, canonical->id, canonical->name ? canonical->name : "(null)");
-  candidate_free(*slot);
-  *slot = NULL;
-  // The canonical borrows extra_device_info from the active candidate.
-  // Clear the borrowed pointer now that the candidate (and its owned extra)
-  // have been freed, so outputs_device_free() doesn't double-free it.
-  if (canonical->type == candidate->type)
-    canonical->extra_device_info = NULL;
-  supported_modes_recompute(canonical);
+  // Defer removal: mark the candidate instead of freeing it immediately.
+  // outputs_device_gc() will free it once the grace period (configured via
+  // device_removal_grace_period) expires without a new mDNS advertisement.
+  // This prevents spurious disappearances caused by dropped mDNS probes on
+  // Wi-Fi networks — the device stays visible in the output list and will
+  // reappear automatically if mDNS re-advertises it within the grace window.
+  DPRINTF(E_INFO, L_PLAYER,
+          "Device '%s' protocol %s has no addresses; deferring removal (last seen %lds ago)\n",
+          canonical->name, candidate->type_name,
+          candidate->last_seen ? (long)(time(NULL) - candidate->last_seen) : -1L);
 
-  if (!canonical->candidate_raop && !canonical->candidate_airplay2)
-    {
-      DPRINTF(E_DBG, L_PLAYER,
-              "outputs_device_protocol_remove: canonical id=%" PRIu64 " has no remaining candidates, session=%p\n",
-              canonical->id, canonical->session);
-      canonical->advertised = 0;
-      output_group_refresh();
-      return canonical->session ? 0 : 1; // 1 = caller should remove canonical
-    }
+  candidate->removal_candidate = 1;
+  candidate->removal_at        = monotonic_secs();
 
-  // Another protocol is available: switch to it
-  DPRINTF(E_DBG, L_PLAYER,
-          "outputs_device_protocol_remove: canonical id=%" PRIu64 " switching to remaining backend, cand_raop=%p cand_airplay2=%p\n",
-          canonical->id, canonical->candidate_raop, canonical->candidate_airplay2);
+  // If another protocol candidate is available, switch the active backend to
+  // it now. The canonical device stays advertised with last-known address data
+  // so it remains visible and usable during the grace window.
   effective_candidate_apply(canonical);
   output_group_refresh();
   return 0;
@@ -2129,6 +2182,104 @@ outputs_init(void)
     output_buffer.data[i].evbuf = evbuffer_new();
 
   return 0;
+}
+
+bool
+outputs_device_gc(int grace_secs)
+{
+  struct output_device *device;
+  struct output_device *next;
+  struct output_device *cand;
+  struct output_device **slots[2];
+  time_t now = monotonic_secs();
+  bool any_changed = false;
+  bool cand_freed;
+  int i;
+
+  for (device = outputs_device_list; device; device = next)
+    {
+      next = device->next;
+
+      slots[0] = &device->candidate_raop;
+      slots[1] = &device->candidate_airplay2;
+      cand_freed = false;
+
+      for (i = 0; i < 2; i++)
+        {
+          cand = *slots[i];
+          if (!cand || !cand->removal_candidate)
+            continue;
+
+          // Never free the candidate backing an active session: the session
+          // holds a borrowed reference to its extra_device_info, and freeing
+          // it would cause a use-after-free.  The removal flag is intentionally
+          // left set so that effective_type_resolve() continues to skip this
+          // addressless candidate.  Cleanup is delegated to deferred_cb()
+          // Case 1 (post-session) and candidate_store() (re-advertisement).
+          if (device->session && device->type == cand->type)
+            {
+              DPRINTF(E_DBG, L_PLAYER,
+                      "outputs_device_gc: skipping active %s candidate for '%s' (session still alive)\n",
+                      cand->type_name, device->name);
+              continue;
+            }
+
+          // Grace window: measured from removal_at (when REMOVE was received
+          // or the session ended), not from last_seen. This ensures a full
+          // grace period even when the last advertisement was a long time ago.
+          if (cand->removal_at > 0 && (now - cand->removal_at) <= (time_t)grace_secs)
+            {
+              DPRINTF(E_DBG, L_PLAYER,
+                      "outputs_device_gc: device '%s' %s candidate within grace window (%lds since removal), deferring\n",
+                      device->name, cand->type_name, (long)(now - cand->removal_at));
+              continue;
+            }
+
+          // Grace period expired: free the candidate.
+          DPRINTF(E_INFO, L_PLAYER,
+                  "outputs_device_gc: removing stale %s candidate for device '%s' (removed %lds ago, last seen %lds ago)\n",
+                  cand->type_name, device->name,
+                  cand->removal_at ? (long)(now - cand->removal_at)         : -1L,
+                  cand->last_seen  ? (long)(time(NULL) - cand->last_seen)    : -1L);
+
+          // Clear the borrowed extra_device_info pointer on the canonical
+          // before freeing the candidate that owns it.
+          if (device->type == cand->type)
+            device->extra_device_info = NULL;
+
+          candidate_free(cand);
+          *slots[i] = NULL;
+          cand_freed = true;
+        }
+
+      if (!cand_freed)
+        continue;
+
+      supported_modes_recompute(device);
+
+      if (!device->candidate_raop && !device->candidate_airplay2)
+        {
+          // No candidates remain. Only remove when no session is active; a
+          // session should keep its canonical device alive until it ends.
+          if (!device->session)
+            {
+              DPRINTF(E_INFO, L_PLAYER,
+                      "outputs_device_gc: removing device '%s' — no candidates remain\n",
+                      device->name);
+              outputs_device_remove(device);
+            }
+        }
+      else
+        {
+          // At least one valid candidate survives; reapply it.
+          effective_candidate_apply(device);
+          output_group_refresh();
+        }
+
+      any_changed = true;
+    }
+
+  return any_changed;
 }
 
 void

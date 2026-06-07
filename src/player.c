@@ -114,6 +114,13 @@
 // with Homepods and ATV4's dropping connections, so it is also a workaround.
 #define PLAYER_SPEAKER_RESURRECT_TIME 5
 
+// Seconds between housekeeping ticks that expire removal-candidate devices.
+#define PLAYER_DEVICE_GC_INTERVAL 30
+
+// Default grace period (seconds) before a removal-candidate device is freed.
+// Can be overridden via the "device_removal_grace_period" config key.
+#define PLAYER_DEVICE_REMOVAL_GRACE_DEFAULT 180
+
 // Shorthand condition for outputs_start and outputs_device_start, both need to
 // know if they should only probe the device, or fully start it.
 #define PLAYER_ONLY_PROBE (player_state != PLAY_PLAYING)
@@ -306,6 +313,10 @@ static int pb_timer_fd;
 timer_t pb_timer;
 #endif
 static struct event *pb_timer_ev;
+
+// Device housekeeping timer — expires removal-candidate devices
+static struct event *device_gc_ev;
+static int device_removal_grace_secs;
 
 // Time between ticks, i.e. time between when playback_cb() is invoked
 static struct timespec player_tick_interval;
@@ -1261,6 +1272,22 @@ device_add(void *arg, int *retval)
   return COMMAND_END;
 }
 
+// Housekeeping timer callback: runs every PLAYER_DEVICE_GC_INTERVAL seconds in
+// the player thread. Frees removal-candidate device slots whose grace period
+// has expired and fires LISTENER_SPEAKER if the output list changed.
+static void
+device_gc_cb(int fd, short event, void *arg)
+{
+  struct timeval tv = { PLAYER_DEVICE_GC_INTERVAL, 0 };
+  bool any_changed;
+
+  any_changed = outputs_device_gc(device_removal_grace_secs);
+  if (any_changed)
+    status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
+
+  evtimer_add(device_gc_ev, &tv);
+}
+
 static enum command_state
 device_remove_family(void *arg, int *retval)
 {
@@ -1292,9 +1319,8 @@ device_remove_family(void *arg, int *retval)
           device->type_name ? device->type_name : "(null)", device->session,
           device->supported_modes, device->candidate_raop, device->candidate_airplay2);
 
-  // Delegate to outputs.c which understands the candidate model. A return
-  // value of 1 means the canonical device has no remaining candidates and
-  // no active session; we must remove it.
+  // Delegate to outputs.c which understands the candidate model. Returns 0
+  // (candidate deferred to GC) or -1 (legacy non-multi-protocol type).
   ret = outputs_device_protocol_remove(device, remove);
   DPRINTF(E_DBG, L_PLAYER,
           "device_remove_family: outputs_device_protocol_remove returned %d for canonical id=%" PRIu64 " name='%s'\n",
@@ -3350,6 +3376,14 @@ player_init(void)
 
   speaker_autoselect = config_get_bool("speaker_autoselect", false);
   clear_queue_on_stop_disabled = config_get_bool("clear_queue_on_stop_disable", false);
+  device_removal_grace_secs = config_get_int("device_removal_grace_period", PLAYER_DEVICE_REMOVAL_GRACE_DEFAULT);
+  if (device_removal_grace_secs < 0)
+    {
+      DPRINTF(E_WARN, L_PLAYER,
+              "device_removal_grace_period must be >= 0; using default %d\n",
+              PLAYER_DEVICE_REMOVAL_GRACE_DEFAULT);
+      device_removal_grace_secs = PLAYER_DEVICE_REMOVAL_GRACE_DEFAULT;
+    }
 
   db_queue_set_pipe(config_get_str("pipe_path", NULL));
 
@@ -3397,6 +3431,12 @@ player_init(void)
 #endif
   CHECK_NULL(L_PLAYER, cmdbase = commands_base_new(evbase_player, NULL));
 
+  CHECK_NULL(L_PLAYER, device_gc_ev = evtimer_new(evbase_player, device_gc_cb, NULL));
+  {
+    struct timeval gc_tv = { PLAYER_DEVICE_GC_INTERVAL, 0 };
+    evtimer_add(device_gc_ev, &gc_tv);
+  }
+
   ret = outputs_init();
   if (ret < 0)
     {
@@ -3427,6 +3467,7 @@ player_init(void)
  error_evbase_free:
   commands_base_free(cmdbase);
   event_free(pb_timer_ev);
+  event_free(device_gc_ev);
   event_base_free(evbase_player);
 #ifdef HAVE_TIMERFD
   close(pb_timer_fd);
@@ -3442,6 +3483,10 @@ player_deinit(void)
   int ret;
 
   player_playback_abort();
+
+  // Stop the GC timer before tearing down output backends. The callback
+  // traverses the device list; backends must not be freed under it.
+  event_del(device_gc_ev);
 
 #ifdef HAVE_TIMERFD
   close(pb_timer_fd);
@@ -3465,5 +3510,6 @@ player_deinit(void)
     }
 
   event_free(pb_timer_ev);
+  event_free(device_gc_ev);
   event_base_free(evbase_player);
 }

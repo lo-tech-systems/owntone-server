@@ -128,6 +128,10 @@ struct output_device
   unsigned is_tv_proxy_group:1;  // Set when device is part of a HomePod-behind-AppleTV group
   unsigned leader_hint_gcgl:1;
   unsigned leader_hint_igl:1;
+  // Set when mDNS fires REMOVE and all addresses are gone; cleared by
+  // candidate_store() on re-advertisement. The housekeeping timer frees the
+  // candidate once the grace period expires without a new advertisement.
+  unsigned removal_candidate:1;
 
   // Credentials if relevant
   const char *password;
@@ -173,6 +177,18 @@ struct output_device
   int metadata_fd;
 
   struct event *stop_timer;
+
+  // Wall-clock time of the last successful mDNS advertisement for this
+  // candidate. Set by candidate_store(); 0 if never set (legacy devices).
+  time_t last_seen;
+
+  // Monotonic seconds (CLOCK_MONOTONIC) when removal_candidate was set, i.e.
+  // when mDNS fired REMOVE or when a session ended with an addressless candidate.
+  // The GC measures the grace window from this timestamp, not from last_seen,
+  // so a device that last advertised several minutes ago still gets a full
+  // grace period after the actual removal event. Cleared (set to 0) by
+  // candidate_store() on re-advertisement.
+  time_t removal_at;
 
   // Opaque pointers to device and session data
   void *extra_device_info;
@@ -431,12 +447,24 @@ outputs_device_candidate_apply(struct output_device *device);
 
 // Called when a backend advertisement disappears for one address family.
 // Locates the matching candidate by type and removes the gone address. If the
-// candidate has no addresses left it is freed and, if another protocol is
-// available, the effective backend is switched. Returns 1 when the canonical
-// device has no remaining candidates and no active session so the caller
-// should call outputs_device_remove(); returns 0 otherwise.
+// candidate has no addresses left it is marked as a removal_candidate instead
+// of being freed immediately, giving the grace-period timer a chance to cancel
+// the removal if mDNS re-advertises the device within the grace window.
+// Always returns 0; the canonical device is never removed directly from this
+// function. outputs_device_gc() handles final cleanup.
 int
 outputs_device_protocol_remove(struct output_device *canonical, struct output_device *remove);
+
+// Housekeeping: walks the device list and frees any removal-candidate slots
+// whose grace period (grace_secs seconds since removal_at) has expired.
+// For canonical devices with an active session, the active-backend candidate
+// is skipped entirely (its removal flag is preserved and the session is left
+// undisturbed); only the inactive-protocol candidate is eligible for expiry.
+// Removes the canonical device when it has no remaining candidates and no
+// active session. Returns true if any device state changed (for the caller
+// to fire LISTENER_SPEAKER).
+bool
+outputs_device_gc(int grace_secs);
 
 int
 outputs_start(output_status_cb started_cb, output_status_cb stopped_cb, bool only_probe);
