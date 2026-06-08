@@ -106,6 +106,7 @@ config_defaults_build(void)
   json_object_object_add(defaults, "ipv6", json_object_new_boolean(true));
   json_object_object_add(defaults, "start_buffer_ms", json_object_new_int(2250));
   json_object_object_add(defaults, "uncompressed_alac", json_object_new_boolean(false));
+  json_object_object_add(defaults, "device_removal_grace_period", json_object_new_int(180));
   json_object_object_add(defaults, "airplay_timing_port", json_object_new_int(0));
   json_object_object_add(defaults, "airplay_control_port", json_object_new_int(0));
   json_object_object_add(defaults, "trusted_networks", trusted_networks);
@@ -124,6 +125,7 @@ static const char *api_settable_keys[] = {
   "ipv6",
   "start_buffer_ms",
   "uncompressed_alac",
+  "device_removal_grace_period",
   NULL
 };
 
@@ -623,6 +625,9 @@ config_set_int(const char *key, int value)
     return -1;
 
   if (strcmp(key, "start_buffer_ms") == 0 && (value < 300 || value > 3500))
+    return -1;
+
+  if (strcmp(key, "device_removal_grace_period") == 0 && (value < 0 || value > 3600))
     return -1;
 
   current = config_get_int(key, INT_MIN);

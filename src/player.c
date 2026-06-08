@@ -59,6 +59,7 @@
 #include <errno.h>
 #include <time.h>
 #include <pthread.h>
+#include <stdatomic.h>
 
 #ifdef HAVE_TIMERFD
 # include <sys/timerfd.h>
@@ -120,6 +121,7 @@
 // Default grace period (seconds) before a removal-candidate device is freed.
 // Can be overridden via the "device_removal_grace_period" config key.
 #define PLAYER_DEVICE_REMOVAL_GRACE_DEFAULT 180
+#define PLAYER_DEVICE_REMOVAL_GRACE_MAX     3600
 
 // Shorthand condition for outputs_start and outputs_device_start, both need to
 // know if they should only probe the device, or fully start it.
@@ -316,7 +318,7 @@ static struct event *pb_timer_ev;
 
 // Device housekeeping timer — expires removal-candidate devices
 static struct event *device_gc_ev;
-static int device_removal_grace_secs;
+static _Atomic int device_removal_grace_secs;
 
 // Time between ticks, i.e. time between when playback_cb() is invoked
 static struct timespec player_tick_interval;
@@ -3377,11 +3379,11 @@ player_init(void)
   speaker_autoselect = config_get_bool("speaker_autoselect", false);
   clear_queue_on_stop_disabled = config_get_bool("clear_queue_on_stop_disable", false);
   device_removal_grace_secs = config_get_int("device_removal_grace_period", PLAYER_DEVICE_REMOVAL_GRACE_DEFAULT);
-  if (device_removal_grace_secs < 0)
+  if (device_removal_grace_secs < 0 || device_removal_grace_secs > PLAYER_DEVICE_REMOVAL_GRACE_MAX)
     {
       DPRINTF(E_WARN, L_PLAYER,
-              "device_removal_grace_period must be >= 0; using default %d\n",
-              PLAYER_DEVICE_REMOVAL_GRACE_DEFAULT);
+              "device_removal_grace_period must be 0..%d; using default %d\n",
+              PLAYER_DEVICE_REMOVAL_GRACE_MAX, PLAYER_DEVICE_REMOVAL_GRACE_DEFAULT);
       device_removal_grace_secs = PLAYER_DEVICE_REMOVAL_GRACE_DEFAULT;
     }
 
@@ -3475,6 +3477,12 @@ player_init(void)
   timer_delete(pb_timer);
 #endif
   return -1;
+}
+
+void
+player_set_device_removal_grace_secs(int secs)
+{
+  device_removal_grace_secs = secs;
 }
 
 void

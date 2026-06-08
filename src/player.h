@@ -71,6 +71,9 @@ player_input_config_reload(void);
 void
 player_speaker_enumerate(spk_enum_cb cb, void *arg);
 
+void
+player_set_device_removal_grace_secs(int secs);
+
 int
 player_speaker_set(uint64_t *ids);
 

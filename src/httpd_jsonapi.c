@@ -186,7 +186,8 @@ static const struct setting_entry settings_table[] = {
   { "misc",   "pipe_autostart",    SETTING_TYPE_BOOL, "pipe_autostart"    },
   { "misc",   "ipv6",              SETTING_TYPE_BOOL, "ipv6"              },
   { "player", "start_buffer_ms",   SETTING_TYPE_INT,  "start_buffer_ms"   },
-  { "player", "uncompressed_alac", SETTING_TYPE_BOOL, "uncompressed_alac" },
+  { "player", "uncompressed_alac",           SETTING_TYPE_BOOL, "uncompressed_alac"           },
+  { "player", "device_removal_grace_period", SETTING_TYPE_INT,  "device_removal_grace_period" },
 };
 
 static const struct setting_entry *
@@ -255,6 +256,7 @@ jsonapi_reply_settings_option_put(struct httpd_request *hreq)
   json_object *request;
   json_object *jreply;
   bool restart_required;
+  int intval = 0;
   int ret = 0;
 
   entry = settings_entry_lookup(categoryname, optionname);
@@ -272,7 +274,10 @@ jsonapi_reply_settings_option_put(struct httpd_request *hreq)
     }
 
   if (entry->type == SETTING_TYPE_INT && jparse_contains_key(request, "value", json_type_int))
-    ret = config_set_int(entry->config_key, jparse_int_from_obj(request, "value"));
+    {
+      intval = jparse_int_from_obj(request, "value");
+      ret = config_set_int(entry->config_key, intval);
+    }
   else if (entry->type == SETTING_TYPE_BOOL && jparse_contains_key(request, "value", json_type_boolean))
     ret = config_set_bool(entry->config_key, jparse_bool_from_obj(request, "value"));
   else if (entry->type == SETTING_TYPE_STR && jparse_contains_key(request, "value", json_type_string))
@@ -305,6 +310,9 @@ jsonapi_reply_settings_option_put(struct httpd_request *hreq)
       jparse_free(request);
       return HTTP_INTERNAL;
     }
+
+  if (strcmp(entry->config_key, "device_removal_grace_period") == 0)
+    player_set_device_removal_grace_secs(intval);
 
   restart_required = config_restart_required_get();
 
