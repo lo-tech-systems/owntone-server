@@ -80,6 +80,7 @@
 #include "worker.h"
 #include "listener.h"
 #include "commands.h"
+#include "mdns.h"
 
 // Audio and metadata outputs
 #include "outputs.h"
@@ -122,6 +123,9 @@
 // Can be overridden via the "device_removal_grace_period" config key.
 #define PLAYER_DEVICE_REMOVAL_GRACE_DEFAULT 180
 #define PLAYER_DEVICE_REMOVAL_GRACE_MAX     3600
+
+// Number of empty-output GC checks before requesting mDNS rediscovery.
+#define ZERO_OUTPUT_RESCAN_CHECKS 3
 
 // Shorthand condition for outputs_start and outputs_device_start, both need to
 // know if they should only probe the device, or fully start it.
@@ -319,6 +323,9 @@ static struct event *pb_timer_ev;
 // Device housekeeping timer — expires removal-candidate devices
 static struct event *device_gc_ev;
 static _Atomic int device_removal_grace_secs;
+static bool outputs_ever_seen;
+static int zero_output_gc_checks;
+static bool zero_output_rescan_attempted;
 
 // Time between ticks, i.e. time between when playback_cb() is invoked
 static struct timespec player_tick_interval;
@@ -347,6 +354,9 @@ pb_abort(void);
 
 static int
 pb_suspend(void);
+
+static bool
+speaker_visible(struct output_device *device);
 
 
 /* ----------------------- Misc helpers and callbacks ----------------------- */
@@ -1251,6 +1261,77 @@ playback_cb(int fd, short what, void *arg)
 
 /* ----------------- Output device handling (add/remove etc) ---------------- */
 
+static int
+speaker_visible_count(void)
+{
+  struct output_device *device;
+  int visible;
+
+  visible = 0;
+  for (device = outputs_list(); device; device = device->next)
+    {
+      if (speaker_visible(device))
+	visible++;
+    }
+
+  return visible;
+}
+
+static void
+zero_output_recovery_check(bool count_towards_rescan)
+{
+  int visible;
+
+  visible = speaker_visible_count();
+  DPRINTF(E_SPAM, L_PLAYER, "Zero-output recovery check: visible=%d ever_seen=%u checks=%d attempted=%u\n",
+          visible, outputs_ever_seen, zero_output_gc_checks, zero_output_rescan_attempted);
+
+  if (visible > 0)
+    {
+      if (!outputs_ever_seen || zero_output_gc_checks || zero_output_rescan_attempted)
+	DPRINTF(E_DBG, L_PLAYER, "Visible outputs present; arming zero-output recovery for future empty episodes\n");
+
+      outputs_ever_seen = true;
+      zero_output_gc_checks = 0;
+      zero_output_rescan_attempted = false;
+      return;
+    }
+
+  if (!outputs_ever_seen)
+    return;
+
+  if (zero_output_rescan_attempted)
+    {
+      DPRINTF(E_SPAM, L_PLAYER, "Zero-output recovery already attempted; waiting for outputs to reappear\n");
+      return;
+    }
+
+  if (!count_towards_rescan)
+    {
+      DPRINTF(E_DBG, L_PLAYER, "Zero visible outputs observed after previous discovery; waiting for GC threshold\n");
+      return;
+    }
+
+  zero_output_gc_checks++;
+  DPRINTF(E_DBG, L_PLAYER, "Zero outputs observed after previous discovery: check %d/%d\n",
+          zero_output_gc_checks, ZERO_OUTPUT_RESCAN_CHECKS);
+
+  if (zero_output_gc_checks < ZERO_OUTPUT_RESCAN_CHECKS)
+    return;
+
+  DPRINTF(E_INFO, L_PLAYER, "No visible outputs after previous discovery; requesting mDNS rescan\n");
+  if (mdns_rescan_request())
+    {
+      zero_output_gc_checks = 0;
+      zero_output_rescan_attempted = true;
+    }
+  else
+    {
+      DPRINTF(E_WARN, L_PLAYER, "mDNS rescan request could not be enqueued; will retry after the next threshold window\n");
+      zero_output_gc_checks = 0;
+    }
+}
+
 static enum command_state
 device_add(void *arg, int *retval)
 {
@@ -1269,6 +1350,7 @@ device_add(void *arg, int *retval)
     }
 
   status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
+  zero_output_recovery_check(false);
 
   *retval = 0;
   return COMMAND_END;
@@ -1286,6 +1368,8 @@ device_gc_cb(int fd, short event, void *arg)
   any_changed = outputs_device_gc(device_removal_grace_secs);
   if (any_changed)
     status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
+
+  zero_output_recovery_check(true);
 
   evtimer_add(device_gc_ev, &tv);
 }
@@ -1361,6 +1445,7 @@ device_remove_family(void *arg, int *retval)
   outputs_device_free(remove);
 
   status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
+  zero_output_recovery_check(false);
 
   *retval = 0;
   return COMMAND_END;

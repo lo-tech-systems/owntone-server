@@ -29,6 +29,12 @@ playback:
    of these can generally be reduced (which reduces latency) to somewhere between
    500 to 1,000ms.
 
+## Disappearing Speakers
+
+If all previously discovered AirPlay outputs disappear after the server changes
+network interface, OwnTone will attempt one in-process mDNS rediscovery after the
+output list has remained empty for a short period.
+
 ## Permissions
 
 If the speaker becomes unselected when you start playback, the log may show "ANNOUNCE

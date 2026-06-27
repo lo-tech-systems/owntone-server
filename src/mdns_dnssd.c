@@ -928,3 +928,17 @@ mdns_browse(char *regtype, mdns_browse_cb cb, enum mdns_options flags)
 
   return 0;
 }
+
+bool
+mdns_rescan_request(void)
+{
+  static int warned;
+
+  if (!warned)
+    {
+      DPRINTF(E_WARN, L_MDNS, "DNS-SD mDNS rescan is not implemented in this build\n");
+      warned = 1;
+    }
+
+  return true;
+}

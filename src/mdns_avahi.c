@@ -29,6 +29,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <stdbool.h>
+#include <stdatomic.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -68,6 +70,9 @@ extern struct event_base *evbase_main;
 static AvahiClient *mdns_client = NULL;
 static AvahiEntryGroup *mdns_group = NULL;
 static AvahiIfIndex mdns_interface = AVAHI_IF_UNSPEC;
+static struct event *mdns_rescan_ev;
+static int mdns_rescan_pipe[2] = { -1, -1 };
+static atomic_bool mdns_rescan_pending = ATOMIC_VAR_INIT(false);
 
 
 struct AvahiWatch
@@ -349,6 +354,7 @@ static struct AvahiPoll ev_poll_api =
 struct mdns_browser
 {
   char *type;
+  AvahiServiceBrowser *browser;
   AvahiProtocol protocol;
   mdns_browse_cb cb;
   enum mdns_options flags;
@@ -395,6 +401,10 @@ struct mdns_group_entry
 static struct mdns_browser *browser_list;
 static struct mdns_resolver *resolver_list;
 static struct mdns_group_entry *group_entries;
+
+static void
+browse_callback(AvahiServiceBrowser *b, AvahiIfIndex intf, AvahiProtocol proto, AvahiBrowserEvent event,
+		const char *name, const char *type, const char *domain, AvahiLookupResultFlags flags, void *userdata);
 
 #define IPV4LL_NETWORK 0xA9FE0000
 #define IPV4LL_NETMASK 0xFFFF0000
@@ -471,6 +481,54 @@ interface_index_get(const char *addr)
   DPRINTF(E_DBG, L_MDNS, "Using network interface %s (index %u)\n", ifname, index);
 
   return (AvahiIfIndex)index;
+}
+
+static void
+mdns_interface_refresh(void)
+{
+  const char *cfgaddr;
+  AvahiIfIndex refreshed;
+
+  cfgaddr = config_get_str("bind_address", NULL);
+  if (!cfgaddr)
+    {
+      if (mdns_interface != AVAHI_IF_UNSPEC)
+	DPRINTF(E_INFO, L_MDNS, "No bind_address configured; using all mDNS interfaces for discovery\n");
+
+      mdns_interface = AVAHI_IF_UNSPEC;
+      return;
+    }
+
+  refreshed = interface_index_get(cfgaddr);
+  if (refreshed == AVAHI_IF_UNSPEC)
+    {
+      DPRINTF(E_WARN, L_MDNS, "Configured bind_address %s is not available; falling back to all mDNS interfaces for rescan\n", cfgaddr);
+      mdns_interface = AVAHI_IF_UNSPEC;
+      return;
+    }
+
+  if (mdns_interface != refreshed)
+    DPRINTF(E_INFO, L_MDNS, "mDNS interface for bind_address %s changed from %d to %d\n",
+            cfgaddr, mdns_interface, refreshed);
+
+  mdns_interface = refreshed;
+}
+
+static int
+fd_nonblock_set(int fd)
+{
+  int flags;
+  int ret;
+
+  flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0)
+    return -1;
+
+  ret = fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+  if (ret < 0)
+    return -1;
+
+  return 0;
 }
 
 // Creates a resolver and adds to list
@@ -570,9 +628,85 @@ browser_remove_all(struct mdns_browser **head)
     {
       *head = mb->next;
 
+      if (mb->browser)
+	avahi_service_browser_free(mb->browser);
       free(mb->type);
       free(mb);
     }
+}
+
+static void
+browser_handles_clear(struct mdns_browser *head)
+{
+  struct mdns_browser *mb;
+
+  for (mb = head; mb; mb = mb->next)
+    mb->browser = NULL;
+}
+
+static int
+browser_restart(struct mdns_browser *mb)
+{
+  if (!mdns_client)
+    {
+      DPRINTF(E_WARN, L_MDNS, "Cannot restart mDNS browser for %s: Avahi client is not initialized\n", mb->type);
+      return -1;
+    }
+
+  DPRINTF(E_DBG, L_MDNS, "Restarting mDNS browser for %s\n", mb->type);
+
+  if (mb->browser)
+    {
+      avahi_service_browser_free(mb->browser);
+      mb->browser = NULL;
+    }
+
+  mb->browser = avahi_service_browser_new(mdns_client, mdns_interface, mb->protocol, mb->type, NULL, 0, browse_callback, mb);
+  if (!mb->browser)
+    {
+      DPRINTF(E_WARN, L_MDNS, "Failed to restart mDNS browser for %s: %s\n", mb->type, MDNSERR);
+      return -1;
+    }
+
+  DPRINTF(E_DBG, L_MDNS, "Restarted mDNS browser for %s\n", mb->type);
+  return 0;
+}
+
+static int
+mdns_rescan(void)
+{
+  struct mdns_browser *mb;
+  int browsers;
+  int failures;
+
+  if (!mdns_client)
+    {
+      DPRINTF(E_WARN, L_MDNS, "mDNS rescan requested before Avahi client initialization completed\n");
+      return -1;
+    }
+
+  DPRINTF(E_DBG, L_MDNS, "Starting mDNS rescan\n");
+  mdns_interface_refresh();
+  DPRINTF(E_DBG, L_MDNS, "Clearing stale mDNS resolvers before rescan\n");
+  resolver_remove_all(&resolver_list);
+
+  browsers = 0;
+  failures = 0;
+  for (mb = browser_list; mb; mb = mb->next)
+    {
+      browsers++;
+      if (browser_restart(mb) < 0)
+	failures++;
+    }
+
+  if (failures)
+    {
+      DPRINTF(E_WARN, L_MDNS, "mDNS rescan completed for %d browser(s), %d failed\n", browsers, failures);
+      return -1;
+    }
+
+  DPRINTF(E_INFO, L_MDNS, "mDNS rescan completed for %d browser(s)\n", browsers);
+  return 0;
 }
 
 static int
@@ -892,14 +1026,11 @@ browse_callback(AvahiServiceBrowser *b, AvahiIfIndex intf, AvahiProtocol proto, 
       case AVAHI_BROWSER_FAILURE:
 	DPRINTF(E_LOG, L_MDNS, "Avahi Browser failure: %s\n", MDNSERR);
 
+	if (b == mb->browser)
+	  mb->browser = NULL;
 	avahi_service_browser_free(b);
 
-	b = avahi_service_browser_new(mdns_client, mdns_interface, mb->protocol, mb->type, NULL, 0, browse_callback, mb);
-	if (!b)
-	  {
-	    DPRINTF(E_LOG, L_MDNS, "Failed to recreate service browser (service type %s): %s\n", mb->type, MDNSERR);
-	    return;
-	  }
+	browser_restart(mb);
 
 	break;
 
@@ -1083,7 +1214,6 @@ static void
 client_callback(AvahiClient *c, AvahiClientState state, AVAHI_GCC_UNUSED void * userdata)
 {
   struct mdns_browser *mb;
-  AvahiServiceBrowser *b;
   int error;
 
   switch (state)
@@ -1095,9 +1225,7 @@ client_callback(AvahiClient *c, AvahiClientState state, AVAHI_GCC_UNUSED void * 
 
 	for (mb = browser_list; mb; mb = mb->next)
 	  {
-	    b = avahi_service_browser_new(mdns_client, mdns_interface, mb->protocol, mb->type, NULL, 0, browse_callback, mb);
-	    if (!b)
-	      DPRINTF(E_LOG, L_MDNS, "Failed to recreate service browser (service type %s): %s\n", mb->type, MDNSERR);
+	    browser_restart(mb);
 	  }
         break;
 
@@ -1118,6 +1246,7 @@ client_callback(AvahiClient *c, AvahiClientState state, AVAHI_GCC_UNUSED void * 
 	    // All resolvers are lost, free our list. Must be done before freeing
 	    // mdns_client below, otherwise r->resolver will be invalid.
 	    resolver_remove_all(&resolver_list);
+	    browser_handles_clear(browser_list);
 
 	    avahi_client_free(mdns_client);
 	    mdns_group = NULL;
@@ -1144,22 +1273,112 @@ client_callback(AvahiClient *c, AvahiClientState state, AVAHI_GCC_UNUSED void * 
     }
 }
 
+static void
+mdns_rescan_cb(int fd, short event, void *arg)
+{
+  char buf[64];
+  ssize_t len;
+
+  while ((len = read(fd, buf, sizeof(buf))) > 0)
+    ;
+
+  if ((len < 0) && (errno != EAGAIN) && (errno != EWOULDBLOCK))
+    DPRINTF(E_WARN, L_MDNS, "Error draining mDNS rescan wakeup pipe: %s\n", strerror(errno));
+
+  if (!atomic_load(&mdns_rescan_pending))
+    return;
+
+  mdns_rescan();
+  atomic_store(&mdns_rescan_pending, false);
+}
+
+static int
+mdns_rescan_wakeup_init(void)
+{
+  int ret;
+
+  ret = pipe(mdns_rescan_pipe);
+  if (ret < 0)
+    {
+      DPRINTF(E_WARN, L_MDNS, "Could not create mDNS rescan wakeup pipe: %s\n", strerror(errno));
+      return -1;
+    }
+
+  ret = fd_nonblock_set(mdns_rescan_pipe[0]);
+  if (ret < 0)
+    {
+      DPRINTF(E_WARN, L_MDNS, "Could not make mDNS rescan wakeup read fd nonblocking: %s\n", strerror(errno));
+      goto error;
+    }
+
+  ret = fd_nonblock_set(mdns_rescan_pipe[1]);
+  if (ret < 0)
+    {
+      DPRINTF(E_WARN, L_MDNS, "Could not make mDNS rescan wakeup write fd nonblocking: %s\n", strerror(errno));
+      goto error;
+    }
+
+  mdns_rescan_ev = event_new(evbase_main, mdns_rescan_pipe[0], EV_READ | EV_PERSIST, mdns_rescan_cb, NULL);
+  if (!mdns_rescan_ev)
+    {
+      DPRINTF(E_WARN, L_MDNS, "Could not create mDNS rescan wakeup event\n");
+      goto error;
+    }
+
+  ret = event_add(mdns_rescan_ev, NULL);
+  if (ret < 0)
+    {
+      DPRINTF(E_WARN, L_MDNS, "Could not add mDNS rescan wakeup event\n");
+      event_free(mdns_rescan_ev);
+      mdns_rescan_ev = NULL;
+      goto error;
+    }
+
+  return 0;
+
+ error:
+  close(mdns_rescan_pipe[0]);
+  close(mdns_rescan_pipe[1]);
+  mdns_rescan_pipe[0] = -1;
+  mdns_rescan_pipe[1] = -1;
+  return -1;
+}
+
+static void
+mdns_rescan_wakeup_deinit(void)
+{
+  if (mdns_rescan_ev)
+    {
+      event_free(mdns_rescan_ev);
+      mdns_rescan_ev = NULL;
+    }
+
+  if (mdns_rescan_pipe[0] >= 0)
+    {
+      close(mdns_rescan_pipe[0]);
+      mdns_rescan_pipe[0] = -1;
+    }
+
+  if (mdns_rescan_pipe[1] >= 0)
+    {
+      close(mdns_rescan_pipe[1]);
+      mdns_rescan_pipe[1] = -1;
+    }
+
+  atomic_store(&mdns_rescan_pending, false);
+}
+
 
 /* mDNS interface - to be called only from the main thread */
 
 int
 mdns_init(void)
 {
-  const char *cfgaddr;
   int error;
 
   DPRINTF(E_DBG, L_MDNS, "Initializing Avahi mDNS\n");
 
-  cfgaddr = config_get_str("bind_address", NULL);
-  if (cfgaddr)
-    {
-      mdns_interface = interface_index_get(cfgaddr);
-    }
+  mdns_interface_refresh();
 
   mdns_client = avahi_client_new(&ev_poll_api, AVAHI_CLIENT_NO_FAIL, client_callback, NULL, &error);
   if (!mdns_client)
@@ -1168,12 +1387,16 @@ mdns_init(void)
       return -1;
     }
 
+  mdns_rescan_wakeup_init();
+
   return 0;
 }
 
 void
 mdns_deinit(void)
 {
+  mdns_rescan_wakeup_deinit();
+
   group_entry_remove_all(&group_entries);
   browser_remove_all(&browser_list);
   resolver_remove_all(&resolver_list);
@@ -1222,6 +1445,46 @@ mdns_register(char *name, char *type, int port, char **txt)
   return 0;
 }
 
+bool
+mdns_rescan_request(void)
+{
+  bool expected;
+  ssize_t len;
+  char byte;
+
+  if (mdns_rescan_pipe[1] < 0)
+    {
+      DPRINTF(E_WARN, L_MDNS, "mDNS rescan requested before mDNS rescan wakeup initialization completed\n");
+      return false;
+    }
+
+  expected = false;
+  if (!atomic_compare_exchange_strong(&mdns_rescan_pending, &expected, true))
+    {
+      DPRINTF(E_SPAM, L_MDNS, "mDNS rescan request already pending, ignoring duplicate\n");
+      return true;
+    }
+
+  byte = 'r';
+  len = write(mdns_rescan_pipe[1], &byte, sizeof(byte));
+  if (len == sizeof(byte))
+    {
+      DPRINTF(E_INFO, L_MDNS, "mDNS rescan has been requested\n");
+      return true;
+    }
+
+  if ((len < 0) && ((errno == EAGAIN) || (errno == EWOULDBLOCK)))
+    {
+      DPRINTF(E_SPAM, L_MDNS, "mDNS rescan wakeup pipe is full; request remains pending\n");
+      return true;
+    }
+
+  DPRINTF(E_WARN, L_MDNS, "Could not write to mDNS rescan wakeup pipe: %s\n",
+          (len < 0) ? strerror(errno) : "short write");
+  atomic_store(&mdns_rescan_pending, false);
+  return false;
+}
+
 int
 mdns_cname(char *name)
 {
@@ -1249,7 +1512,6 @@ int
 mdns_browse(char *type, mdns_browse_cb cb, enum mdns_options flags)
 {
   struct mdns_browser *mb;
-  AvahiServiceBrowser *b;
   int family;
 
   DPRINTF(E_DBG, L_MDNS, "Adding service browser for type %s\n", type);
@@ -1269,8 +1531,7 @@ mdns_browse(char *type, mdns_browse_cb cb, enum mdns_options flags)
   mb->next = browser_list;
   browser_list = mb;
 
-  b = avahi_service_browser_new(mdns_client, mdns_interface, mb->protocol, mb->type, NULL, 0, browse_callback, mb);
-  if (!b)
+  if (browser_restart(mb) < 0)
     {
       DPRINTF(E_LOG, L_MDNS, "Error '%s' when creating service browser for %s, check that Avahi is running\n", MDNSERR, type);
 

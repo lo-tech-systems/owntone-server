@@ -2,6 +2,8 @@
 #ifndef __MDNS_H__
 #define __MDNS_H__
 
+#include <stdbool.h>
+
 #include "misc.h"
 
 enum mdns_options
@@ -66,5 +68,13 @@ mdns_cname(char *name);
  */
 int
 mdns_browse(char *type, mdns_browse_cb cb, enum mdns_options flags);
+
+/*
+ * Request a rebrowse of existing service browsers.
+ * May be called from another thread; the backend must hand off actual mDNS
+ * work to the main thread.
+ */
+bool
+mdns_rescan_request(void);
 
 #endif /* !__MDNS_H__ */
