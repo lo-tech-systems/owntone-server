@@ -43,6 +43,7 @@ owntone@.service
 # ignore MkDocs generated documentation
 /site/
 /test/
+/docs/working/
 
 /.vscode/
 /.devcontainer/
