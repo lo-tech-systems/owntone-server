@@ -388,6 +388,8 @@ void
 logger_reinit(void)
 {
   FILE *fp;
+  char msg[1024];
+  int open_errno;
 
   if (!logfile)
     return;
@@ -397,13 +399,19 @@ logger_reinit(void)
   fp = fopen(logfilename, "a");
   if (!fp)
     {
-      fprintf(logfile, "Could not reopen logfile: %s\n", strerror(errno));
+      open_errno = errno;
+      snprintf(msg, sizeof(msg), "Could not reopen logfile '%s': %s\n",
+               logfilename, strerror(open_errno));
+      logger_write_with_label(E_LOG, L_MAIN, msg);
 
       goto out;
     }
 
   fclose(logfile);
   logfile = fp;
+  snprintf(msg, sizeof(msg), "%s version %s started new logfile '%s'\n",
+           PACKAGE_NAME, PACKAGE_VERSION, logfilename);
+  logger_write_with_label(E_LOG, L_MAIN, msg);
 
  out:
   LOGGER_CHECK_ERR(pthread_mutex_unlock(&logger_lck));
