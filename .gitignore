@@ -34,6 +34,7 @@ owntone.spec
 owntone.conf
 owntone.service
 owntone@.service
+/owntone
 
 /.settings
 /.cproject
