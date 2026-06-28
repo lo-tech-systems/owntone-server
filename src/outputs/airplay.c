@@ -3036,21 +3036,22 @@ start_retry(struct airplay_session *session)
     }
 
   // Some devices don't seem to work with ipv6, so if the error wasn't a hard
-  // failure (bad password) we fall back to ipv4 and flag device as bad for ipv6
-  if (session->family != AF_INET6 || (session->state & AIRPLAY_STATE_F_FAILED))
+  // failure (bad password) we fall back to ipv4 and flag device as bad for ipv6.
+  // Only retry if this was an ipv6 attempt that can actually fall back to a
+  // distinct ipv4 endpoint. Bail out (failing through the live session so the
+  // activation callback fires) when:
+  //   - this was already the ipv4 attempt (family != AF_INET6),
+  //   - the failure was hard (bad password), or
+  //   - v6_disabled is already set, i.e. we have retried before. The flag is
+  //     sticky (survives session recreation and mDNS re-advertisement), so this
+  //     makes the fallback strictly one-shot per device and guarantees we can
+  //     never spin in an unbounded GET /info retry loop, or
+  //   - there is no ipv4 address to fall back to. Retrying anyway would have
+  //     session_make() return NULL, orphaning the callback and leaving the
+  //     activation hung.
+  if (session->family != AF_INET6 || (session->state & AIRPLAY_STATE_F_FAILED)
+      || device->v6_disabled || !device->v4_address)
     {
-      session_failure(session);
-      return;
-    }
-
-  // The v6->v4 fallback is one-shot per device. v6_disabled is sticky (it
-  // survives session recreation and mDNS re-advertisement), so if it is already
-  // set we have retried before: fail instead of retrying again. This guarantees
-  // we can never spin in an unbounded GET /info retry loop, even if some other
-  // path were to leave the v6 endpoint selectable.
-  if (device->v6_disabled)
-    {
-      DPRINTF(E_LOG, L_AIRPLAY, "Retry over ipv4 for '%s' already attempted, giving up\n", session->devname);
       session_failure(session);
       return;
     }
