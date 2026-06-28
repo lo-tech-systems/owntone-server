@@ -278,7 +278,7 @@ curl -X GET "http://localhost:3689/api/config"
 {
   "product_name": "owntone-mini",
   "websocket_port": 0,
-  "version": "29.0-mini.4",
+  "version": "29.0-mini.5",
   "buildoptions": [
     "ffmpeg",
     "Without Spotify",
