@@ -664,7 +664,10 @@ effective_candidate_apply(struct output_device *canonical)
   canonical->password      = candidate->password;
   canonical->has_video     = candidate->has_video;
   canonical->requires_auth = candidate->requires_auth;
-  canonical->v6_disabled   = candidate->v6_disabled;
+  // v6_disabled is a permanent, sticky flag: once a backend has fallen back from
+  // IPv6 to IPv4 (see start_retry) it must not be cleared by a later mDNS
+  // re-advertisement, or the failed IPv6 endpoint would be retried indefinitely.
+  canonical->v6_disabled   = canonical->v6_disabled || candidate->v6_disabled;
   canonical->quality       = candidate->quality;
   canonical->selected_format = candidate->selected_format;
   canonical->default_format  = candidate->default_format;

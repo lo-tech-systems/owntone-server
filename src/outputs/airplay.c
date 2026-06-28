@@ -1385,7 +1385,7 @@ session_connection_setup(struct airplay_session *session, struct output_device *
 	break;
 
       case AF_INET6:
-	if (!device->v6_address)
+	if (!device->v6_address || device->v6_disabled)
 	  return -1;
 
 	address = device->v6_address;
@@ -3039,6 +3039,18 @@ start_retry(struct airplay_session *session)
   // failure (bad password) we fall back to ipv4 and flag device as bad for ipv6
   if (session->family != AF_INET6 || (session->state & AIRPLAY_STATE_F_FAILED))
     {
+      session_failure(session);
+      return;
+    }
+
+  // The v6->v4 fallback is one-shot per device. v6_disabled is sticky (it
+  // survives session recreation and mDNS re-advertisement), so if it is already
+  // set we have retried before: fail instead of retrying again. This guarantees
+  // we can never spin in an unbounded GET /info retry loop, even if some other
+  // path were to leave the v6 endpoint selectable.
+  if (device->v6_disabled)
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "Retry over ipv4 for '%s' already attempted, giving up\n", session->devname);
       session_failure(session);
       return;
     }
