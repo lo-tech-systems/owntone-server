@@ -113,6 +113,14 @@
 // https://github.com/owntone/owntone-server/issues/734#issuecomment-622959334
 #define AIRPLAY_KEEP_ALIVE_INTERVAL   25
 
+// Some devices (notably HomePod stereo pairs) briefly refuse new RTSP
+// connections for a few seconds after a TEARDOWN. On a soft start failure
+// (connection refused, GET /info negative, timeout) we retry up to
+// AIRPLAY_START_RETRY_MAX times, AIRPLAY_START_RETRY_WAIT_SEC apart. Bounded
+// and delayed so the start path can never spin (cf. the old GET /info loop).
+#define AIRPLAY_START_RETRY_MAX       3
+#define AIRPLAY_START_RETRY_WAIT_SEC  3
+
 // This is an arbitrary value which just needs to be kept in sync with the config
 #define AIRPLAY_CONFIG_MAX_VOLUME     11
 
@@ -247,6 +255,11 @@ struct airplay_session
 {
   uint64_t device_id;
   int callback_id;
+
+  // Number of soft start retries already performed for this start attempt.
+  // Carried across session recreation so the backoff stays bounded (see
+  // start_retry()).
+  int start_retries;
 
   struct airplay_master_session *master_session;
 
@@ -3022,11 +3035,84 @@ start_failure(struct airplay_session *session)
   session_failure(session);
 }
 
+// Context for a scheduled soft-start retry. The session that failed has already
+// been torn down, so the retry is keyed by device id and the pending player
+// callback id, and carries the attempt counter forward to keep the backoff
+// bounded.
+struct airplay_start_retry_ctx
+{
+  uint64_t device_id;
+  int callback_id;
+  int attempt;
+  struct event *timer;
+};
+
+static void
+start_retry_timer_cb(int fd, short what, void *arg)
+{
+  struct airplay_start_retry_ctx *ctx = arg;
+  struct output_device *device;
+  struct airplay_session *session;
+
+  device = outputs_device_get(ctx->device_id);
+
+  // Device disappeared, or something already started a session in the meantime.
+  // Resolve the still-pending activation callback as failed so it never hangs.
+  if (!device || device->session)
+    {
+      outputs_cb(ctx->callback_id, ctx->device_id, OUTPUT_STATE_FAILED);
+      goto out;
+    }
+
+  session = session_make(device, ctx->callback_id);
+  if (!session)
+    {
+      outputs_cb(ctx->callback_id, ctx->device_id, OUTPUT_STATE_FAILED);
+      goto out;
+    }
+
+  session->start_retries = ctx->attempt;
+
+  DPRINTF(E_INFO, L_AIRPLAY, "Retrying start for '%s' (attempt %d/%d)\n",
+          device->name, ctx->attempt, AIRPLAY_START_RETRY_MAX);
+
+  sequence_start(AIRPLAY_SEQ_START, session, NULL, "device_start (retry)");
+
+ out:
+  event_free(ctx->timer);
+  free(ctx);
+}
+
+// Schedule a delayed soft-start retry. On any failure to schedule, the pending
+// activation callback is resolved as failed rather than left hanging.
+static void
+start_retry_schedule(uint64_t device_id, int callback_id, int attempt)
+{
+  struct airplay_start_retry_ctx *ctx;
+  struct timeval tv = { AIRPLAY_START_RETRY_WAIT_SEC, 0 };
+
+  CHECK_NULL(L_AIRPLAY, ctx = calloc(1, sizeof(struct airplay_start_retry_ctx)));
+
+  ctx->device_id = device_id;
+  ctx->callback_id = callback_id;
+  ctx->attempt = attempt;
+  ctx->timer = evtimer_new(evbase_player, start_retry_timer_cb, ctx);
+  if (!ctx->timer)
+    {
+      free(ctx);
+      outputs_cb(callback_id, device_id, OUTPUT_STATE_FAILED);
+      return;
+    }
+
+  evtimer_add(ctx->timer, &tv);
+}
+
 static void
 start_retry(struct airplay_session *session)
 {
   struct output_device *device;
   int callback_id = session->callback_id;
+  int attempt = session->start_retries;
 
   device = outputs_device_get(session->device_id);
   if (!device)
@@ -3037,31 +3123,42 @@ start_retry(struct airplay_session *session)
 
   // Some devices don't seem to work with ipv6, so if the error wasn't a hard
   // failure (bad password) we fall back to ipv4 and flag device as bad for ipv6.
-  // Only retry if this was an ipv6 attempt that can actually fall back to a
-  // distinct ipv4 endpoint. Bail out (failing through the live session so the
-  // activation callback fires) when:
-  //   - this was already the ipv4 attempt (family != AF_INET6),
-  //   - the failure was hard (bad password), or
-  //   - v6_disabled is already set, i.e. we have retried before. The flag is
-  //     sticky (survives session recreation and mDNS re-advertisement), so this
-  //     makes the fallback strictly one-shot per device and guarantees we can
-  //     never spin in an unbounded GET /info retry loop, or
-  //   - there is no ipv4 address to fall back to. Retrying anyway would have
-  //     session_make() return NULL, orphaning the callback and leaving the
-  //     activation hung.
-  if (session->family != AF_INET6 || (session->state & AIRPLAY_STATE_F_FAILED)
-      || device->v6_disabled || !device->v4_address)
+  // Only do this one-shot fallback when this was an ipv6 attempt that can
+  // actually fall back to a distinct ipv4 endpoint. v6_disabled is sticky
+  // (survives session recreation and mDNS re-advertisement), so the fallback is
+  // strictly one-shot per device and can never spin.
+  if (session->family == AF_INET6 && !(session->state & AIRPLAY_STATE_F_FAILED)
+      && !device->v6_disabled && device->v4_address)
+    {
+      // This flag is permanent and will not be overwritten by mdns advertisements
+      device->v6_disabled = 1;
+
+      // Drop session, try again with ipv4
+      session_cleanup(session);
+      airplay_device_start(device, callback_id);
+      return;
+    }
+
+  // Hard failure (e.g. bad password): give up immediately, no backoff.
+  if (session->state & AIRPLAY_STATE_F_FAILED)
     {
       session_failure(session);
       return;
     }
 
-  // This flag is permanent and will not be overwritten by mdns advertisements
-  device->v6_disabled = 1;
+  // Soft failure (connection refused, GET /info negative, timeout). Retry a
+  // bounded number of times with a fixed backoff before reporting failure -
+  // gives e.g. a HomePod stereo pair time to finish its post-TEARDOWN reset.
+  // session_cleanup() drops the dead session WITHOUT firing the callback, so
+  // the player's activation stays pending across the retry.
+  if (attempt < AIRPLAY_START_RETRY_MAX)
+    {
+      start_retry_schedule(session->device_id, callback_id, attempt + 1);
+      session_cleanup(session);
+      return;
+    }
 
-  // Drop session, try again with ipv4
-  session_cleanup(session);
-  airplay_device_start(device, callback_id);
+  session_failure(session);
 }
 
 
