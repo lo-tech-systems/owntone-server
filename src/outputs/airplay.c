@@ -3618,7 +3618,7 @@ response_handler_pair_setup1(struct evrtsp_request *req, struct airplay_session 
       if (!device)
 	return AIRPLAY_SEQ_ABORT;
 
-      device->requires_auth = 1; // FIXME might be reset by mdns announcement
+      device->requires_auth = 1; // Sticky on the canonical, see effective_candidate_apply()
       session->pair_type = PAIR_CLIENT_HOMEKIT_NORMAL;
 
       return AIRPLAY_SEQ_PIN_START;

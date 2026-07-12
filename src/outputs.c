@@ -677,7 +677,12 @@ effective_candidate_apply(struct output_device *canonical)
   canonical->has_password  = candidate->has_password;
   canonical->password      = candidate->password;
   canonical->has_video     = candidate->has_video;
-  canonical->requires_auth = candidate->requires_auth;
+  // requires_auth is sticky: AirPlay 2 learns it at runtime on the canonical
+  // (HomeKit PIN pairing need surfaces mid-session, not from mDNS), so a fresh
+  // candidate - which never carries it for AirPlay 2 - must not clear it. RAOP
+  // candidates may legitimately carry it from the mDNS TXT record, hence OR
+  // rather than a plain overwrite.
+  canonical->requires_auth = canonical->requires_auth || candidate->requires_auth;
   // v6_disabled is a permanent, sticky flag: once a backend has fallen back from
   // IPv6 to IPv4 (see start_retry) it must not be cleared by a later mDNS
   // re-advertisement, or the failed IPv6 endpoint would be retried indefinitely.
