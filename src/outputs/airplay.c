@@ -3456,6 +3456,7 @@ response_handler_info_generic(struct evrtsp_request *req, struct airplay_session
   struct output_device *device;
   plist_t response;
   plist_t item;
+  char *response_str;
   int ret;
 
   device = outputs_device_get(session->device_id);
@@ -3479,6 +3480,13 @@ response_handler_info_generic(struct evrtsp_request *req, struct airplay_session
   item = plist_dict_get_item(response, "statusFlags");
   if (item)
     plist_get_uint_val(item, &session->statusflags);
+
+  // The full /info plist is the only place a receiver declares its audio
+  // capabilities (audioFormats, output device attributes), which we will need
+  // for multichannel output detection. Dump it so a debug log captures it.
+  response_str = wplist_to_xml(response);
+  DPRINTF(E_DBG, L_AIRPLAY, "GET /info response from '%s':\n%s\n", session->devname, response_str);
+  free(response_str);
 
   plist_free(response);
 
