@@ -106,6 +106,14 @@
 // This is an arbitrary value which just needs to be kept in sync with the config
 #define RAOP_CONFIG_MAX_VOLUME     11
 
+// Some devices (notably HomePod stereo pairs) briefly refuse new RTSP
+// connections for a few seconds after a TEARDOWN. On a soft start failure
+// (no response to a startup request) we retry up to RAOP_START_RETRY_MAX
+// times, RAOP_START_RETRY_WAIT_SEC apart. Bounded and delayed so the start
+// path can never spin.
+#define RAOP_START_RETRY_MAX       3
+#define RAOP_START_RETRY_WAIT_SEC  3
+
 enum raop_devtype {
   RAOP_DEV_APEX1_80211G,
   RAOP_DEV_APEX2_80211N,
@@ -188,6 +196,11 @@ struct raop_session
 {
   uint64_t device_id;
   int callback_id;
+
+  // Number of soft start retries already performed for this start attempt.
+  // Carried across session recreation so the backoff stays bounded (see
+  // raop_start_retry()).
+  int start_retries;
 
   struct raop_master_session *master_session;
 
@@ -353,6 +366,9 @@ static bool raop_uncompressed_alac;
 // Forwards
 static int
 raop_device_start(struct output_device *rd, int callback_id);
+
+static int
+raop_device_probe(struct output_device *rd, int callback_id);
 
 
 /* ------------------------------- MISC HELPERS ----------------------------- */
@@ -3277,6 +3293,133 @@ control_svc_cb(int fd, short what, void *arg)
 
 /* ------------------------------ Session startup --------------------------- */
 
+// Context for a scheduled soft-start retry. The session that failed has
+// already been torn down, so the retry is keyed by device id and the pending
+// player callback id, and carries the attempt counter forward to keep the
+// backoff bounded. only_probe records whether to re-run a probe or a full
+// start.
+struct raop_start_retry_ctx
+{
+  uint64_t device_id;
+  int callback_id;
+  int attempt;
+  bool only_probe;
+  struct event *timer;
+};
+
+static void
+raop_start_retry_timer_cb(int fd, short what, void *arg)
+{
+  struct raop_start_retry_ctx *ctx = arg;
+  struct output_device *device;
+  int ret;
+
+  device = outputs_device_get(ctx->device_id);
+
+  // Device disappeared, or something already started a session in the
+  // meantime. Resolve the still-pending activation callback as failed so it
+  // never hangs.
+  if (!device || device->session)
+    {
+      outputs_cb(ctx->callback_id, ctx->device_id, OUTPUT_STATE_FAILED);
+      goto out;
+    }
+
+  DPRINTF(E_INFO, L_RAOP, "Retrying start for '%s' (attempt %d/%d)\n",
+          device->name, ctx->attempt, RAOP_START_RETRY_MAX);
+
+  ret = ctx->only_probe ? raop_device_probe(device, ctx->callback_id) : raop_device_start(device, ctx->callback_id);
+  if (ret < 0 || !device->session)
+    {
+      outputs_cb(ctx->callback_id, ctx->device_id, OUTPUT_STATE_FAILED);
+      goto out;
+    }
+
+  // session_make() registers the new session with the device synchronously,
+  // so it is reachable here via device->session.
+  ((struct raop_session *)device->session)->start_retries = ctx->attempt;
+
+ out:
+  event_free(ctx->timer);
+  free(ctx);
+}
+
+// Schedule a delayed soft-start retry. On any failure to schedule, the
+// pending activation callback is resolved as failed rather than left hanging.
+static void
+raop_start_retry_schedule(uint64_t device_id, int callback_id, int attempt, bool only_probe)
+{
+  struct raop_start_retry_ctx *ctx;
+  struct timeval tv = { RAOP_START_RETRY_WAIT_SEC, 0 };
+
+  CHECK_NULL(L_RAOP, ctx = calloc(1, sizeof(struct raop_start_retry_ctx)));
+
+  ctx->device_id = device_id;
+  ctx->callback_id = callback_id;
+  ctx->attempt = attempt;
+  ctx->only_probe = only_probe;
+  ctx->timer = evtimer_new(evbase_player, raop_start_retry_timer_cb, ctx);
+  if (!ctx->timer)
+    {
+      free(ctx);
+      outputs_cb(callback_id, device_id, OUTPUT_STATE_FAILED);
+      return;
+    }
+
+  evtimer_add(ctx->timer, &tv);
+}
+
+// Soft (network-level) start failure: the device did not respond to a
+// startup request at all. Retried a bounded number of times with a fixed
+// backoff before reporting failure - gives e.g. a HomePod stereo pair time to
+// finish its post-TEARDOWN reset. session_cleanup() drops the dead session
+// WITHOUT firing the callback, so the player's activation stays pending
+// across the retry.
+static void
+raop_start_retry(struct raop_session *rs)
+{
+  struct output_device *device;
+  int callback_id = rs->callback_id;
+  int attempt = rs->start_retries;
+  bool only_probe = rs->only_probe;
+
+  device = outputs_device_get(rs->device_id);
+  if (!device)
+    {
+      session_failure(rs);
+      return;
+    }
+
+  // All callers are network-level no-response failures during startup. Some
+  // devices don't seem to work with ipv6, so first do a one-shot fallback to
+  // ipv4, like raop_startup_cancel() does for other startup errors. No point
+  // sending a TEARDOWN first, the device isn't responding on this address.
+  // v6_disabled is sticky (survives mdns re-advertisement), so this can never
+  // spin.
+  if (rs->family == AF_INET6 && !device->v6_disabled && device->v4_address)
+    {
+      // This flag is permanent and will not be overwritten by mdns advertisements
+      device->v6_disabled = 1;
+
+      // Drop session, try again with ipv4
+      session_cleanup(rs);
+      if (only_probe)
+	raop_device_probe(device, callback_id);
+      else
+	raop_device_start(device, callback_id);
+      return;
+    }
+
+  if (attempt < RAOP_START_RETRY_MAX)
+    {
+      raop_start_retry_schedule(rs->device_id, callback_id, attempt + 1, only_probe);
+      session_cleanup(rs);
+      return;
+    }
+
+  session_failure(rs);
+}
+
 static void
 raop_cb_startup_retry(struct evrtsp_request *req, void *arg)
 {
@@ -3375,7 +3518,10 @@ raop_cb_startup_volume(struct evrtsp_request *req, void *arg)
   rs->reqs_in_flight--;
 
   if (!req)
-    goto cleanup;
+    {
+      raop_start_retry(rs);
+      return;
+    }
 
   if (req->response_code != RTSP_OK)
     {
@@ -3420,7 +3566,10 @@ raop_cb_startup_record(struct evrtsp_request *req, void *arg)
   rs->reqs_in_flight--;
 
   if (!req)
-    goto cleanup;
+    {
+      raop_start_retry(rs);
+      return;
+    }
 
   if (req->response_code != RTSP_OK)
     {
@@ -3465,7 +3614,10 @@ raop_cb_startup_setup(struct evrtsp_request *req, void *arg)
   rs->reqs_in_flight--;
 
   if (!req)
-    goto cleanup;
+    {
+      raop_start_retry(rs);
+      return;
+    }
 
   if (req->response_code != RTSP_OK)
     {
@@ -3616,7 +3768,10 @@ raop_cb_startup_announce(struct evrtsp_request *req, void *arg)
   rs->reqs_in_flight--;
 
   if (!req)
-    goto cleanup;
+    {
+      raop_start_retry(rs);
+      return;
+    }
 
   if (req->response_code != RTSP_OK)
     {
@@ -3651,7 +3806,10 @@ raop_cb_startup_auth_setup(struct evrtsp_request *req, void *arg)
   rs->reqs_in_flight--;
 
   if (!req)
-    goto cleanup;
+    {
+      raop_start_retry(rs);
+      return;
+    }
 
   if (req->response_code != RTSP_OK)
     DPRINTF(E_WARN, L_RAOP, "Unexpected reply to auth-setup from '%s', proceeding anyway (%d %s)\n", rs->devname, req->response_code, req->response_code_line);
@@ -3681,7 +3839,8 @@ raop_cb_startup_options(struct evrtsp_request *req, void *arg)
     {
       DPRINTF(E_LOG, L_RAOP, "No response from '%s' (%s) to OPTIONS request\n", rs->devname, rs->address);
 
-      goto cleanup;
+      raop_start_retry(rs);
+      return;
     }
 
   if ((req->response_code != RTSP_OK) && (req->response_code != RTSP_UNAUTHORIZED) && (req->response_code != RTSP_FORBIDDEN))
@@ -3970,7 +4129,7 @@ raop_cb_pair_verify_step2(struct evrtsp_request *req, void *arg)
 
  error_noresponse:
   rs->state = RAOP_STATE_FAILED;
-  session_failure(rs);
+  raop_start_retry(rs);
 }
 
 static void
@@ -4018,7 +4177,7 @@ raop_cb_pair_verify_step1(struct evrtsp_request *req, void *arg)
   rs->pair_verify_ctx = NULL;
 
   rs->state = RAOP_STATE_FAILED;
-  session_failure(rs);
+  raop_start_retry(rs);
 }
 
 static int
