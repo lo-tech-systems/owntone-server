@@ -2961,7 +2961,13 @@ payload_make_pair_setup1(struct evrtsp_request *req, struct airplay_session *ses
       return -1;
     }
 
-  session->state = AIRPLAY_STATE_AUTH;
+  // Only PIN/password pairing means the user has something to enter. Transient
+  // pairing must not enter AUTH state: HomePods sporadically reject transient
+  // pair-setup right after a TEARDOWN, and if the session is in AUTH state that
+  // soft failure is reported as OUTPUT_STATE_PASSWORD, making clients prompt
+  // for a PIN that does not exist.
+  if (session->pair_type == PAIR_CLIENT_HOMEKIT_NORMAL)
+    session->state = AIRPLAY_STATE_AUTH;
 
   return payload_make_pair_generic(1, req, session);
 }
@@ -3774,7 +3780,11 @@ static struct airplay_seq_definition airplay_seq_definition[] =
   { AIRPLAY_SEQ_SEND_ARTWORK, NULL, session_failure },
   { AIRPLAY_SEQ_PAIR_SETUP, session_pair_success, session_failure },
   { AIRPLAY_SEQ_PAIR_VERIFY, session_pair_success, session_failure },
-  { AIRPLAY_SEQ_PAIR_TRANSIENT, session_pair_success, session_failure },
+  // Transient pairing only runs during session start (probe converts it to
+  // CONTINUE), so a failure here is a start failure. Use start_retry: HomePod
+  // stereo pairs sporadically reject transient pair-setup with an SRP auth
+  // error shortly after a TEARDOWN, and a delayed retry reliably succeeds.
+  { AIRPLAY_SEQ_PAIR_TRANSIENT, session_pair_success, start_retry },
   { AIRPLAY_SEQ_FEEDBACK, NULL, session_failure },
 };
 
