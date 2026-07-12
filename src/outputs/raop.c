@@ -3939,6 +3939,12 @@ raop_cb_pair_verify_step2(struct evrtsp_request *req, void *arg)
   ret = raop_pair_response_process(5, req, rs);
   if (ret < 0)
     {
+      if (!req || !req->response_code)
+	{
+	  DPRINTF(E_LOG, L_RAOP, "Verification step 5 to '%s' failed, device did not respond\n", rs->devname);
+	  goto error_noresponse;
+	}
+
       device = outputs_device_get(rs->device_id);
       if (!device)
 	goto error;
@@ -3960,6 +3966,11 @@ raop_cb_pair_verify_step2(struct evrtsp_request *req, void *arg)
  error:
   rs->state = RAOP_STATE_PASSWORD;
   session_failure(rs);
+  return;
+
+ error_noresponse:
+  rs->state = RAOP_STATE_FAILED;
+  session_failure(rs);
 }
 
 static void
@@ -3972,6 +3983,12 @@ raop_cb_pair_verify_step1(struct evrtsp_request *req, void *arg)
   ret = raop_pair_response_process(4, req, rs);
   if (ret < 0)
     {
+      if (!req || !req->response_code)
+	{
+	  DPRINTF(E_LOG, L_RAOP, "Verification step 4 to '%s' failed, device did not respond\n", rs->devname);
+	  goto error_noresponse;
+	}
+
       device = outputs_device_get(rs->device_id);
       if (!device)
 	goto error;
@@ -3993,6 +4010,14 @@ raop_cb_pair_verify_step1(struct evrtsp_request *req, void *arg)
   rs->pair_verify_ctx = NULL;
 
   rs->state = RAOP_STATE_PASSWORD;
+  session_failure(rs);
+  return;
+
+ error_noresponse:
+  pair_verify_free(rs->pair_verify_ctx);
+  rs->pair_verify_ctx = NULL;
+
+  rs->state = RAOP_STATE_FAILED;
   session_failure(rs);
 }
 
