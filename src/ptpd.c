@@ -124,6 +124,11 @@ ptpd_init(uint64_t clock_id_seed)
   if (ret < 0)
     {
       DPRINTF(E_LOG, L_AIRPLAY, "%s\n", airptp_errmsg_get());
+      // Must report failure: airplay_init() uses this to set
+      // airplay_ptp_is_disabled so devices fall back to NTP timing. Returning
+      // success here would leave use_ptp set with no PTP daemon running, and
+      // every session SETUP would then fail at the timing peer step.
+      return -1;
     }
 
   return 0;
