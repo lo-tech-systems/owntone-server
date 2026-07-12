@@ -4405,7 +4405,11 @@ raop_device_cb(const char *name, const char *type, const char *domain, const cha
 
   // Max volume
   rd->max_volume = devcfg ? cfg_getint(devcfg, "max_volume") : RAOP_CONFIG_MAX_VOLUME;
-  if ((rd->max_volume < 1) || (rd->max_volume > RAOP_CONFIG_MAX_VOLUME))
+  // 0 means max_volume is not set in the config (the settings backend returns
+  // 0 for missing keys), so use the default without complaining
+  if (rd->max_volume == 0)
+    rd->max_volume = RAOP_CONFIG_MAX_VOLUME;
+  else if ((rd->max_volume < 1) || (rd->max_volume > RAOP_CONFIG_MAX_VOLUME))
     {
       DPRINTF(E_LOG, L_RAOP, "Config has bad max_volume (%d) for device '%s', using default instead\n", rd->max_volume, device_name);
       rd->max_volume = RAOP_CONFIG_MAX_VOLUME;

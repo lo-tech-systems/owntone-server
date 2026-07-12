@@ -1827,6 +1827,11 @@ volume_max_get(const char *name)
   if (airplay)
     max_volume = cfg_getint(airplay, "max_volume");
 
+  // 0 means max_volume is not set in the config (the settings backend returns
+  // 0 for missing keys), so use the default without complaining
+  if (max_volume == 0)
+    return AIRPLAY_CONFIG_MAX_VOLUME;
+
   if ((max_volume < 1) || (max_volume > AIRPLAY_CONFIG_MAX_VOLUME))
     {
       DPRINTF(E_LOG, L_AIRPLAY, "Config has bad max_volume (%d) for device '%s', using default instead\n", max_volume, name);
