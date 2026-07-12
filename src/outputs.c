@@ -602,6 +602,20 @@ effective_type_resolve(struct output_device *device)
   if (outputs_device_is_stereo_leader(device) && ap2)
     return OUTPUT_TYPE_AIRPLAY;
 
+  // A removal candidate is a presumed-transient dropout (grace period): if the
+  // slot for the canonical's currently active type is mid-grace, stick with
+  // that type rather than flipping to the other protocol. This avoids e.g. an
+  // AirPlay 2 device falling over to RAOP (and demanding a fresh RAOP PIN)
+  // merely because of a momentary mDNS flap. Once GC frees the candidate the
+  // slot goes NULL and normal resolution below takes over (permanent switch).
+  // Only applies once the canonical has been applied at least once (name set).
+  if (device->name)
+    {
+      struct output_device **cur_slot = candidate_slot(device, device->type);
+      if (cur_slot && *cur_slot && (*cur_slot)->removal_candidate)
+        return device->type;
+    }
+
   if (device->preferred_mode == OUTPUT_MODE_RAOP && raop)
     return OUTPUT_TYPE_RAOP;
   if (device->preferred_mode == OUTPUT_MODE_AIRPLAY2 && ap2)
