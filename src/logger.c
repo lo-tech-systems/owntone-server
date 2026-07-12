@@ -488,7 +488,17 @@ logger_init(char *file, char *domains, int severity, char *logformat)
   if (ret < 0)
     fprintf(stderr, "Failed to set permissions on logfile: %s\n", strerror(errno));
 
-  logfilename = file;
+  /* Own a copy of the path; the caller's string may live in the config JSON
+   * tree, which is freed and rebuilt on config_reload() */
+  logfilename = strdup(file);
+  if (!logfilename)
+    {
+      fprintf(stderr, "Out of memory for logfile name\n");
+
+      fclose(logfile);
+      logfile = NULL;
+      return -1;
+    }
 
   /* logging w/o locks before initialized complete */
   CHECK_ERR(L_MISC, mutex_init(&logger_lck));
@@ -506,6 +516,9 @@ logger_deinit(void)
       fclose(logfile);
       logfile = NULL;
     }
+
+  free(logfilename);
+  logfilename = NULL;
 
   if(logger_initialized)
     {
