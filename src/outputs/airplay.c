@@ -506,6 +506,8 @@ static bool airplay_ptp_is_disabled;
 // Forwards
 static int
 airplay_device_start(struct output_device *device, int callback_id);
+static int
+airplay_device_probe(struct output_device *device, int callback_id);
 static void
 sequence_start(enum airplay_seq_type seq_type, struct airplay_session *session, void *arg, const char *log_caller);
 static void
@@ -3041,15 +3043,17 @@ start_failure(struct airplay_session *session)
   session_failure(session);
 }
 
-// Context for a scheduled soft-start retry. The session that failed has already
-// been torn down, so the retry is keyed by device id and the pending player
-// callback id, and carries the attempt counter forward to keep the backoff
-// bounded.
+// Context for a scheduled soft-start/probe retry. The session that failed has
+// already been torn down, so the retry is keyed by device id and the pending
+// player callback id, and carries the attempt counter forward to keep the
+// backoff bounded. seq_type records which sequence to re-run (AIRPLAY_SEQ_START
+// or AIRPLAY_SEQ_PROBE).
 struct airplay_start_retry_ctx
 {
   uint64_t device_id;
   int callback_id;
   int attempt;
+  enum airplay_seq_type seq_type;
   struct event *timer;
 };
 
@@ -3079,20 +3083,24 @@ start_retry_timer_cb(int fd, short what, void *arg)
 
   session->start_retries = ctx->attempt;
 
-  DPRINTF(E_INFO, L_AIRPLAY, "Retrying start for '%s' (attempt %d/%d)\n",
+  DPRINTF(E_INFO, L_AIRPLAY, "Retrying %s for '%s' (attempt %d/%d)\n",
+          (ctx->seq_type == AIRPLAY_SEQ_PROBE) ? "probe" : "start",
           device->name, ctx->attempt, AIRPLAY_START_RETRY_MAX);
 
-  sequence_start(AIRPLAY_SEQ_START, session, NULL, "device_start (retry)");
+  if (ctx->seq_type == AIRPLAY_SEQ_PROBE)
+    sequence_start(AIRPLAY_SEQ_PROBE, session, NULL, "device_probe (retry)");
+  else
+    sequence_start(AIRPLAY_SEQ_START, session, NULL, "device_start (retry)");
 
  out:
   event_free(ctx->timer);
   free(ctx);
 }
 
-// Schedule a delayed soft-start retry. On any failure to schedule, the pending
-// activation callback is resolved as failed rather than left hanging.
+// Schedule a delayed soft-start/probe retry. On any failure to schedule, the
+// pending activation callback is resolved as failed rather than left hanging.
 static void
-start_retry_schedule(uint64_t device_id, int callback_id, int attempt)
+start_retry_schedule(uint64_t device_id, int callback_id, int attempt, enum airplay_seq_type seq_type)
 {
   struct airplay_start_retry_ctx *ctx;
   struct timeval tv = { AIRPLAY_START_RETRY_WAIT_SEC, 0 };
@@ -3102,6 +3110,7 @@ start_retry_schedule(uint64_t device_id, int callback_id, int attempt)
   ctx->device_id = device_id;
   ctx->callback_id = callback_id;
   ctx->attempt = attempt;
+  ctx->seq_type = seq_type;
   ctx->timer = evtimer_new(evbase_player, start_retry_timer_cb, ctx);
   if (!ctx->timer)
     {
@@ -3114,7 +3123,7 @@ start_retry_schedule(uint64_t device_id, int callback_id, int attempt)
 }
 
 static void
-start_retry(struct airplay_session *session)
+start_retry_impl(struct airplay_session *session, enum airplay_seq_type seq_type)
 {
   struct output_device *device;
   int callback_id = session->callback_id;
@@ -3141,7 +3150,10 @@ start_retry(struct airplay_session *session)
 
       // Drop session, try again with ipv4
       session_cleanup(session);
-      airplay_device_start(device, callback_id);
+      if (seq_type == AIRPLAY_SEQ_PROBE)
+        airplay_device_probe(device, callback_id);
+      else
+        airplay_device_start(device, callback_id);
       return;
     }
 
@@ -3159,12 +3171,24 @@ start_retry(struct airplay_session *session)
   // the player's activation stays pending across the retry.
   if (attempt < AIRPLAY_START_RETRY_MAX)
     {
-      start_retry_schedule(session->device_id, callback_id, attempt + 1);
+      start_retry_schedule(session->device_id, callback_id, attempt + 1, seq_type);
       session_cleanup(session);
       return;
     }
 
   session_failure(session);
+}
+
+static void
+start_retry(struct airplay_session *session)
+{
+  start_retry_impl(session, AIRPLAY_SEQ_START);
+}
+
+static void
+probe_retry(struct airplay_session *session)
+{
+  start_retry_impl(session, AIRPLAY_SEQ_PROBE);
 }
 
 
@@ -3771,7 +3795,7 @@ static struct airplay_seq_definition airplay_seq_definition[] =
 {
   { AIRPLAY_SEQ_START, NULL, start_retry },
   { AIRPLAY_SEQ_START_PLAYBACK, session_connected, start_failure },
-  { AIRPLAY_SEQ_PROBE, session_success, session_failure },
+  { AIRPLAY_SEQ_PROBE, session_success, probe_retry },
   { AIRPLAY_SEQ_FLUSH, session_status, session_failure },
   { AIRPLAY_SEQ_STOP, session_success, session_failure },
   { AIRPLAY_SEQ_FAILURE, session_success, session_failure},
