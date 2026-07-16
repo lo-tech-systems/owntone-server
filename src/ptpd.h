@@ -21,4 +21,10 @@ ptpd_init(uint64_t clock_id_seed);
 void
 ptpd_deinit(void);
 
+// Reads CLOCK_MONOTONIC, since that is the timescale libairptp distributes
+// as PTP grandmaster (see src/libairptp/src/ptp_msg_handle.c). *frac is the
+// fraction of a second as a 2^64 fixed-point value.
+int
+ptpd_network_time_get(uint64_t *secs, uint64_t *frac);
+
 #endif /* !__PTPD_H__ */

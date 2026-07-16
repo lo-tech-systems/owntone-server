@@ -24,11 +24,16 @@
 
 extern const char __thread *airptp_errmsg;
 
-// The log2 of the announce message interval in seconds. The ATV uses -2, which
-// would be 0.25 sec, my amp uses 0, so 1 sec, as does nqptp.
-// See nqptp-ptp-definitions.h.
-#define AIRPTP_LOGMESSAGEINT_ANNOUNCE 0
-#define AIRPTP_INTERVAL_MS_ANNOUNCE 1000
+// The log2 of the announce message interval in seconds. AirPlay 2 receivers
+// expect a grandmaster to announce at 0.25 sec (-2), matching the interval an
+// AirPlay 2 sender advertises.
+#define AIRPTP_LOGMESSAGEINT_ANNOUNCE -2
+// Must match the interval implied by AIRPTP_LOGMESSAGEINT_ANNOUNCE above: a
+// PTP receiver times out a grandmaster once it stops hearing announces within
+// a small multiple of the advertised interval, so advertising 0.25 sec while
+// actually sending every 1 sec causes the receiver to declare the grandmaster
+// gone and refuse to slave to its timeline.
+#define AIRPTP_INTERVAL_MS_ANNOUNCE 250
 // Both iOS, ATV, amp and nqptp use -3, so 0.125 sec.
 #define AIRPTP_LOGMESSAGEINT_SYNC -3
 #define AIRPTP_INTERVAL_MS_SYNC 125

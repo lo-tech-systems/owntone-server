@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "libairptp/airptp.h"
@@ -139,4 +140,24 @@ void
 ptpd_deinit(void)
 {
   airptp_end(ptpd_hdl);
+}
+
+// Reads CLOCK_MONOTONIC, since that is the timescale libairptp distributes
+// as PTP grandmaster (see src/libairptp/src/ptp_msg_handle.c). Callers must
+// not assume this lines up with wall-clock time.
+int
+ptpd_network_time_get(uint64_t *secs, uint64_t *frac)
+{
+  struct timespec ts;
+  uint64_t frac_hi32;
+
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0)
+    return -1;
+
+  *secs = ts.tv_sec;
+
+  frac_hi32 = ((uint64_t)ts.tv_nsec << 32) / 1000000000ULL;
+  *frac = frac_hi32 << 32;
+
+  return 0;
 }

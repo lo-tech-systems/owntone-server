@@ -261,6 +261,14 @@ evrtsp_method(enum evrtsp_cmd_type type)
 	  method = "SETPEERS";
 	  break;
 
+	case EVRTSP_REQ_SETRATEANCHORTIME:
+	  method = "SETRATEANCHORTIME";
+	  break;
+
+	case EVRTSP_REQ_FLUSHBUFFERED:
+	  method = "FLUSHBUFFERED";
+	  break;
+
 	default:
 	  method = NULL;
 	  break;

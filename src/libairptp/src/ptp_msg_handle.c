@@ -303,20 +303,35 @@ msg_announce_make(struct ptp_announce_message *msg, uint64_t clock_id, uint16_t 
 
   header_init(&msg->header, PTP_MSGTYPE_ANNOUNCE, sizeof(struct ptp_announce_message), clock_id, sequence_id, AIRPTP_LOGMESSAGEINT_ANNOUNCE, flags);
 
+  // IEEE 1588 table 23 specifies controlField=5 ("All others") for Announce
+  // messages; header_init() leaves every message type defaulted to 0 (Sync),
+  // so Announce needs its own override here.
+  msg->header.controlField = 0x05;
+
   msg->originTimestamp = ptp_timestamp_htobe(&ts);
 
-  msg->currentUtcOffset = 0;
+  // An AirPlay 2 sender portrays itself as an ordinary oscillator-based
+  // grandmaster, not a GPS-disciplined one: currentUtcOffset 37 (the current
+  // TAI-UTC offset), clockClass 248 (default/uncalibrated) with timeSource
+  // 0xA0 (INTERNAL_OSCILLATOR).
+  msg->currentUtcOffset = htobe16(37);
   msg->reserved = 0;
-  msg->grandmasterPriority1 = 128;
+  // priority1 must be low enough to win BMCA against a receiver that also
+  // announces a grandmaster candidate of its own; a receiver that wins the
+  // election will not slave its clock to us, and every anchor placed on our
+  // timeline is then rejected in-band. 247 wins against a same-priority-class
+  // competing announce while still describing an ordinary (non-GPS) clock.
+  msg->grandmasterPriority1 = 247;
 
-  // Clock quality: class=6 (GPS), accuracy=0x21 (100ns), variance=0x436A (same as used by Apple)
-  msg->grandmasterClockQuality = htobe32(0x06210000 | 0x436A);
-  msg->grandmasterPriority2 = 128;
+  // Clock quality: class=248 (default, uncalibrated), accuracy=0x21 (100ns),
+  // variance=0x436A (same as used by Apple)
+  msg->grandmasterClockQuality = htobe32(0xF8210000 | 0x436A);
+  msg->grandmasterPriority2 = 246;
 
   msg->grandmasterIdentity = be64_clock_id;
 
   msg->stepsRemoved = 0;
-  msg->timeSource = 0x20; // GPS
+  msg->timeSource = 0xA0; // INTERNAL_OSCILLATOR
 
   // iOS adding the clock ID again as TLV, wtf?
   msg_tlv_write(msg->tlv_path_trace, sizeof(msg->tlv_path_trace), PTP_TLV_PATH_TRACE, sizeof(be64_clock_id), &be64_clock_id);
