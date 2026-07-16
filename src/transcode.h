@@ -10,8 +10,22 @@ enum transcode_profile
 {
   // Decodes/resamples the best audio stream into PCM16 (no wav headers)
   XCODE_PCM16,
+  // Decodes/resamples the best audio stream into PCM32 (no wav headers).
+  // Used ahead of a 24-bit encoder so a >16-bit source isn't truncated to
+  // 16 bits before encoding.
+  XCODE_PCM32,
   // Transcodes the best audio stream to raw ALAC (no container)
   XCODE_ALAC,
+  // Transcodes/upmixes the best audio stream to raw AAC-LC 48kHz 5.1 (no
+  // container), using ffmpeg's "surround" filter (frequency-domain steering)
+  // to derive the surround channels from a stereo source
+  XCODE_AAC48K_51_DECODE,
+  // Raw AAC-LC 48kHz stereo (no container) - the buffered AirPlay 2 stereo
+  // payload for bufferStream format 23
+  XCODE_AAC48K_STEREO,
+  // Raw ALAC 48kHz/24-bit stereo (no container) - the buffered AirPlay 2
+  // stereo payload for bufferStream format 21
+  XCODE_ALAC48K_24_STEREO,
 };
 
 enum transcode_seek_type
@@ -75,6 +89,20 @@ transcode_encode_cleanup(struct encode_ctx **ctx);
  */
 int
 transcode_encode(struct evbuffer *evbuf, struct encode_ctx *ctx, transcode_frame *frame, int eof);
+
+/* Pops the byte size of the next individual encoder packet contained in the
+ * output most recently produced by transcode_encode(). One transcode_encode()
+ * call can write several encoder packets back to back (e.g. two 352-sample
+ * ALAC frames), and some consumers (AirPlay buffered audio) must frame each
+ * one separately. Only meaningful for raw ("data") output profiles, where the
+ * muxer writes packet payloads verbatim so the sizes add up to the bytes
+ * returned by transcode_encode().
+ *
+ * @in  ctx        Encode context
+ * @return         Size in bytes of the next packet, 0 if none tracked
+ */
+int
+transcode_encode_packet_size_next(struct encode_ctx *ctx);
 
 /* Converts a buffer with raw data to a frame that can be passed directly to the
  * transcode_encode() function. It does not copy, so if you free the data the

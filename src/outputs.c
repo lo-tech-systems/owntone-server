@@ -971,7 +971,9 @@ device_stop_cb(struct output_device *device, enum output_device_state state)
 static enum transcode_profile
 quality_to_xcode(struct media_quality *quality)
 {
-  /* Pipe input is always 16-bit PCM; other depths are not supported. */
+  if (quality->bits_per_sample == 32)
+    return XCODE_PCM32; // e.g. the ALAC24 buffered subscription (48000/32/2)
+
   if (quality->bits_per_sample != 16)
     DPRINTF(E_WARN, L_PLAYER, "Unsupported bit depth %d, falling back to 16-bit encoding\n", quality->bits_per_sample);
 

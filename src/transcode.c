@@ -78,8 +78,16 @@ struct settings_ctx
   int bit_rate;
   int frame_size;
   enum AVSampleFormat sample_format;
+  // 0 leaves the codec's own default (derived from sample_format) alone;
+  // only XCODE_ALAC48K_24_STEREO sets this, to get 24-bit-in-32-bit-container
+  // ALAC instead of the encoder's full 32-bit default for AV_SAMPLE_FMT_S32P
+  int bits_per_raw_sample;
   bool with_wav_header;
   bool without_libav_header;
+  // Extra filter to insert between abuffer and aformat in the audio filter
+  // graph, e.g. to upmix stereo to 5.1 (ffmpeg filter syntax "name=args").
+  // NULL if no extra filter is required by the profile.
+  const char *upmix_filter;
 
   // Video settings
   enum AVCodecID video_codec;
@@ -145,6 +153,17 @@ struct encode_ctx
   // Contains the most recent packet from avcodec_receive_packet()
   AVPacket *encoded_pkt;
 
+  // FIFO of the byte sizes of audio packets written by encode_write(), so a
+  // caller of transcode_encode() can split the returned blob back into the
+  // individual encoded packets (one avcodec packet = one codec frame). Needed
+  // by AirPlay's buffered ALAC24 path, where one transcode_encode() call can
+  // flush more than one 352-sample frame and each must be framed separately.
+  // Ring buffer; on overflow the oldest entry is dropped (consumers fall back
+  // to treating the blob as a single packet, which is the old behaviour).
+  uint32_t packet_sizes[64];
+  int packet_sizes_head;
+  int packet_sizes_len;
+
   // How many output bytes we have processed in total
   off_t bytes_processed;
 
@@ -182,6 +201,15 @@ struct filters
 static int
 init_settings(struct settings_ctx *settings, enum transcode_profile profile, struct media_quality *quality)
 {
+  // These profiles always produce a fixed output format (48kHz/stereo or
+  // 48kHz/5.1), regardless of the input quality, because they are the fixed
+  // buffered AirPlay 2 payloads (optionally upmixed through a filter graph).
+  // So unlike the other profiles, media_quality (which describes the
+  // caller's *input*) must not override sample_rate/channels/bits_per_sample
+  // below.
+  bool fixed_output = (profile == XCODE_AAC48K_51_DECODE || profile == XCODE_AAC48K_STEREO
+                       || profile == XCODE_ALAC48K_24_STEREO);
+
   memset(settings, 0, sizeof(struct settings_ctx));
 
   switch (profile)
@@ -193,6 +221,13 @@ init_settings(struct settings_ctx *settings, enum transcode_profile profile, str
 	settings->sample_format = AV_SAMPLE_FMT_S16;
 	break;
 
+      case XCODE_PCM32:
+	settings->encode_audio = true;
+	settings->format = "s32le";
+	settings->audio_codec = AV_CODEC_ID_PCM_S32LE;
+	settings->sample_format = AV_SAMPLE_FMT_S32;
+	break;
+
       case XCODE_ALAC:
 	settings->encode_audio = true;
 	settings->format = "data"; // Means we get the raw packet from the encoder, no muxing
@@ -201,17 +236,80 @@ init_settings(struct settings_ctx *settings, enum transcode_profile profile, str
 	settings->frame_size = 352;
 	break;
 
+      case XCODE_AAC48K_51_DECODE:
+	settings->encode_audio = true;
+	settings->format = "data"; // Raw AAC frames from the encoder, no ADTS muxing
+	settings->audio_codec = AV_CODEC_ID_AAC;
+	settings->sample_format = AV_SAMPLE_FMT_FLTP;
+	settings->sample_rate = 48000;
+	settings->bit_rate = 448000;
+	// Frame size is intentionally left at 0 (unset): the aac encoder's own
+	// frame_size (1024) will stand, and open_filters() will make the
+	// buffersink group filtered samples into that many per frame.
+	// Must be the BACK variant ("5.1", not "5.1(side)"): ffmpeg's aac
+	// encoder can express 5.1-back as standard channelConfiguration 6, but
+	// 5.1-side forces an in-band PCE, which AirPlay 2 receivers reject.
+#if USE_CH_LAYOUT
+	av_channel_layout_from_mask(&settings->channel_layout, AV_CH_LAYOUT_5POINT1_BACK);
+#else
+	settings->channel_layout = AV_CH_LAYOUT_5POINT1_BACK;
+	settings->nb_channels = 6;
+#endif
+	// ffmpeg's "surround" filter derives the rear/center/LFE channels from
+	// a stereo source using frequency-domain steering, rather than a
+	// static pan matrix.
+	settings->upmix_filter = "surround=chl_in=stereo:chl_out=5.1:lfe=1:lfe_low=80:lfe_high=120";
+	break;
+
+      // Raw AAC-LC frames at 48kHz stereo (no container) - the buffered
+      // AirPlay 2 payload for bufferStream format 23.
+      case XCODE_AAC48K_STEREO:
+	settings->encode_audio = true;
+	settings->format = "data";
+	settings->audio_codec = AV_CODEC_ID_AAC;
+	settings->sample_format = AV_SAMPLE_FMT_FLTP;
+	settings->sample_rate = 48000;
+	settings->bit_rate = 256000;
+#if USE_CH_LAYOUT
+	av_channel_layout_from_mask(&settings->channel_layout, AV_CH_LAYOUT_STEREO);
+#else
+	settings->channel_layout = AV_CH_LAYOUT_STEREO;
+	settings->nb_channels = 2;
+#endif
+	break;
+
+      // Raw ALAC 48kHz/24-bit stereo (no container) - the buffered AirPlay 2
+      // payload for bufferStream format 21. frame_size MUST be 352, same as
+      // the realtime XCODE_ALAC profile: AirPlay buffered ALAC frames are
+      // 352 samples regardless of transport, so any other frame size fails
+      // to decode on the receiver.
+      case XCODE_ALAC48K_24_STEREO:
+	settings->encode_audio = true;
+	settings->frame_size = 352;
+	settings->format = "data"; // Means we get the raw packet from the encoder, no muxing
+	settings->audio_codec = AV_CODEC_ID_ALAC;
+	settings->sample_format = AV_SAMPLE_FMT_S32P;
+	settings->bits_per_raw_sample = 24;
+	settings->sample_rate = 48000;
+#if USE_CH_LAYOUT
+	av_channel_layout_from_mask(&settings->channel_layout, AV_CH_LAYOUT_STEREO);
+#else
+	settings->channel_layout = AV_CH_LAYOUT_STEREO;
+	settings->nb_channels = 2;
+#endif
+	break;
+
       default:
 	DPRINTF(E_LOG, L_XCODE, "Bug! Unknown transcoding profile\n");
 	return -1;
     }
 
-  if (quality && quality->sample_rate)
+  if (quality && quality->sample_rate && !fixed_output)
     {
       settings->sample_rate    = quality->sample_rate;
     }
 
-  if (quality && quality->channels)
+  if (quality && quality->channels && !fixed_output)
     {
 #if USE_CH_LAYOUT
       av_channel_layout_default(&settings->channel_layout, quality->channels);
@@ -221,12 +319,12 @@ init_settings(struct settings_ctx *settings, enum transcode_profile profile, str
 #endif
     }
 
-  if (quality && quality->bit_rate)
+  if (quality && quality->bit_rate && !fixed_output)
     {
       settings->bit_rate    = quality->bit_rate;
     }
 
-  if (quality && quality->bits_per_sample && (quality->bits_per_sample != 8 * av_get_bytes_per_sample(settings->sample_format)))
+  if (quality && quality->bits_per_sample && !fixed_output && (quality->bits_per_sample != 8 * av_get_bytes_per_sample(settings->sample_format)))
     {
       DPRINTF(E_LOG, L_XCODE, "Bug! Mismatch between profile (%d bps) and media quality (%d bps)\n", 8 * av_get_bytes_per_sample(settings->sample_format), quality->bits_per_sample);
       return -1;
@@ -289,6 +387,7 @@ stream_settings_set(struct stream_ctx *s, struct settings_ctx *settings, enum AV
       s->codec->sample_fmt     = settings->sample_format;
       s->codec->time_base      = (AVRational){1, settings->sample_rate};
       s->codec->bit_rate       = settings->bit_rate;
+      s->codec->bits_per_raw_sample = settings->bits_per_raw_sample; // 0 (all profiles but XCODE_ALAC48K_24_STEREO) leaves the codec default alone
     }
   else if (type == AVMEDIA_TYPE_VIDEO)
     {
@@ -500,12 +599,28 @@ encode_write(struct encode_ctx *ctx, struct stream_ctx *s, AVFrame *filt_frame)
 
       packet_prepare(ctx->encoded_pkt, s);
 
+      int pkt_size = ctx->encoded_pkt->size; // read before the muxer takes the packet
+
       ret = av_interleaved_write_frame(ctx->ofmt_ctx, ctx->encoded_pkt);
       if (ret < 0)
         {
 	  DPRINTF(E_WARN, L_XCODE, "av_interleaved_write_frame() failed: %s\n", err2str(ret));
 	  break;
         }
+
+      // Track per-packet sizes for transcode_encode_packet_size_next(). Audio
+      // only, and only meaningful for raw ("data") output where the muxer
+      // writes packet payloads verbatim.
+      if (s == &ctx->audio_stream)
+	{
+	  if (ctx->packet_sizes_len == ARRAY_SIZE(ctx->packet_sizes)) // Full, drop oldest
+	    {
+	      ctx->packet_sizes_head = (ctx->packet_sizes_head + 1) % ARRAY_SIZE(ctx->packet_sizes);
+	      ctx->packet_sizes_len--;
+	    }
+	  ctx->packet_sizes[(ctx->packet_sizes_head + ctx->packet_sizes_len) % ARRAY_SIZE(ctx->packet_sizes)] = (uint32_t)pkt_size;
+	  ctx->packet_sizes_len++;
+	}
     }
 
   return ret;
@@ -883,6 +998,33 @@ filter_def_abuffersink(struct filter_def *def, struct stream_ctx *out_stream, st
   return 0;
 }
 
+// Generic passthrough for a caller-supplied "name=args" ffmpeg filter spec,
+// e.g. deffn_arg = "surround=chl_in=stereo:...". Used for injecting a
+// profile-specific upmix filter into the audio chain.
+static int
+filter_def_custom(struct filter_def *def, struct stream_ctx *out_stream, struct stream_ctx *in_stream, const char *deffn_arg)
+{
+  const char *eq;
+  size_t namelen;
+
+  eq = strchr(deffn_arg, '=');
+  if (!eq)
+    {
+      DPRINTF(E_LOG, L_XCODE, "Bug! Custom filter spec '%s' is missing '='\n", deffn_arg);
+      return -1;
+    }
+
+  namelen = eq - deffn_arg;
+  if (namelen >= sizeof(def->name))
+    namelen = sizeof(def->name) - 1;
+
+  memcpy(def->name, deffn_arg, namelen);
+  def->name[namelen] = '\0';
+
+  snprintf(def->args, sizeof(def->args), "%s", eq + 1);
+  return 0;
+}
+
 static int
 filter_def_buffer(struct filter_def *def, struct stream_ctx *out_stream, struct stream_ctx *in_stream, const char *deffn_arg)
 {
@@ -921,12 +1063,26 @@ filter_def_buffersink(struct filter_def *def, struct stream_ctx *out_stream, str
   return 0;
 }
 
+// Builds the audio filter chain abuffer -> [upmix_filter] -> aformat ->
+// abuffersink. upmix_filter is optional (NULL for profiles that don't need
+// one); when given, it is inserted right after abuffer, e.g. to upmix
+// stereo to 5.1 before aformat resamples/reformats to the target output.
 static int
-define_audio_filters(struct filters *filters, size_t filters_len)
+define_audio_filters(struct filters *filters, size_t filters_len, const char *upmix_filter)
 {
-  filters[0].deffn = filter_def_abuffer;
-  filters[1].deffn = filter_def_aformat;
-  filters[2].deffn = filter_def_abuffersink;
+  int i = 0;
+
+  filters[i++].deffn = filter_def_abuffer;
+
+  if (upmix_filter)
+    {
+      filters[i].deffn = filter_def_custom;
+      filters[i].deffn_arg = upmix_filter;
+      i++;
+    }
+
+  filters[i++].deffn = filter_def_aformat;
+  filters[i++].deffn = filter_def_abuffersink;
 
   return 0;
 }
@@ -1039,7 +1195,7 @@ open_filters(struct encode_ctx *ctx, struct decode_ctx *src_ctx)
 
   if (ctx->settings.encode_audio)
     {
-      ret = define_audio_filters(filters, ARRAY_SIZE(filters));
+      ret = define_audio_filters(filters, ARRAY_SIZE(filters), ctx->settings.upmix_filter);
       if (ret < 0)
 	goto out_fail;
 
@@ -1256,6 +1412,21 @@ transcode_encode(struct evbuffer *evbuf, struct encode_ctx *ctx, transcode_frame
   evbuffer_add_buffer(evbuf, ctx->obuf);
 
   return ret;
+}
+
+int
+transcode_encode_packet_size_next(struct encode_ctx *ctx)
+{
+  uint32_t size;
+
+  if (!ctx || ctx->packet_sizes_len == 0)
+    return 0;
+
+  size = ctx->packet_sizes[ctx->packet_sizes_head];
+  ctx->packet_sizes_head = (ctx->packet_sizes_head + 1) % ARRAY_SIZE(ctx->packet_sizes);
+  ctx->packet_sizes_len--;
+
+  return (int)size;
 }
 
 transcode_frame *
