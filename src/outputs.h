@@ -57,13 +57,29 @@ enum output_types
 };
 
 // User preference for which protocol to use when a device supports more than one.
-// AUTO = 0 is the default. RAOP and AIRPLAY2 double as bitmask values for
-// the supported_modes field on struct output_device.
+// AUTO = 0 is the default. Every other value doubles as a bitmask bit for the
+// supported_modes field on struct output_device.
+//
+// AIRPLAY2 is the realtime transport (audio pushed to the device as it plays).
+// The AIRPLAY2_BUFFERED* and AIRPLAY2_SURROUND* values select the buffered
+// (type 103) transport instead, which lets the receiver hold a queue of audio
+// ahead of playout:
+//   - AIRPLAY2_BUFFERED is AAC-LC 48kHz stereo (bufferStream format 23), the
+//     baseline buffered profile essentially every AirPlay 2 receiver accepts.
+//   - AIRPLAY2_BUFFERED_24 is ALAC 48kHz/24-bit stereo (format 21), for
+//     lossless sources.
+//   - AIRPLAY2_SURROUND_STEREO and AIRPLAY2_SURROUND_UPMIX both stream 5.1
+//     (format 39): the former pans a stereo source to front-left/front-right/
+//     LFE, the latter decode-upmixes to all six channels.
 enum output_mode
 {
-  OUTPUT_MODE_AUTO     = 0,
-  OUTPUT_MODE_RAOP     = (1 << 0),
-  OUTPUT_MODE_AIRPLAY2 = (1 << 1),
+  OUTPUT_MODE_AUTO                     = 0,
+  OUTPUT_MODE_RAOP                     = (1 << 0),
+  OUTPUT_MODE_AIRPLAY2                 = (1 << 1),
+  OUTPUT_MODE_AIRPLAY2_BUFFERED        = (1 << 2),
+  OUTPUT_MODE_AIRPLAY2_BUFFERED_24     = (1 << 3),
+  OUTPUT_MODE_AIRPLAY2_SURROUND_STEREO = (1 << 4),
+  OUTPUT_MODE_AIRPLAY2_SURROUND_UPMIX  = (1 << 5),
 };
 
 /* Output session state */
@@ -151,17 +167,24 @@ struct output_device
   uint32_t supported_formats;
 
   // Protocol mode preference and availability. supported_modes is a bitmask of
-  // OUTPUT_MODE_RAOP / OUTPUT_MODE_AIRPLAY2, set when the device supports more
-  // than one protocol. preferred_mode is the user preference (AUTO by default).
-  // Stereo-paired AirPlay 2 outputs may expose a narrower client-facing mode
-  // set than the raw candidate set, but the underlying candidates are still
-  // stored here. candidate_raop / candidate_airplay2 hold the per-protocol
-  // discovery data; the canonical device borrows extra_device_info from
-  // whichever is active.
+  // OUTPUT_MODE_RAOP / OUTPUT_MODE_AIRPLAY2 / the buffered and surround bits,
+  // set when the device supports more than one protocol or transport.
+  // preferred_mode is the user preference (AUTO by default). Stereo-paired
+  // AirPlay 2 outputs may expose a narrower client-facing mode set than the
+  // raw candidate set, but the underlying candidates are still stored here.
+  // candidate_raop / candidate_airplay2 hold the per-protocol discovery data;
+  // the canonical device borrows extra_device_info from whichever is active.
   enum output_mode preferred_mode;
   uint32_t supported_modes;
   struct output_device *candidate_raop;
   struct output_device *candidate_airplay2;
+
+  // Bitmask subset of the OUTPUT_MODE_AIRPLAY2_BUFFERED*/SURROUND* bits,
+  // learned from the AirPlay 2 receiver's advertised buffered-transport
+  // capability (GET /info) and persisted so it survives a restart. Merged
+  // into supported_modes; reconciled (bits set AND cleared) on every /info
+  // exchange so a receiver that stops advertising a format loses the bit.
+  uint32_t buffered_modes;
 
   // For user config of speaker start
   int offset_ms;
@@ -337,6 +360,14 @@ outputs_device_session_add(uint64_t device_id, void *session);
 
 void
 outputs_device_session_remove(uint64_t device_id);
+
+// Updates a device's learned buffered-transport capability bitmask and
+// recomputes supported_modes to include it. Called by a backend after
+// parsing the receiver's advertised capability; does not persist by itself
+// (the caller is responsible for that, the same way it owns auth_key
+// persistence).
+void
+outputs_device_buffered_modes_set(struct output_device *device, uint32_t buffered_modes);
 
 int
 outputs_quality_subscribe(struct media_quality *quality);

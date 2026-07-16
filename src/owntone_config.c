@@ -106,6 +106,7 @@ config_defaults_build(void)
   json_object_object_add(defaults, "ipv6", json_object_new_boolean(true));
   json_object_object_add(defaults, "start_buffer_ms", json_object_new_int(2250));
   json_object_object_add(defaults, "uncompressed_alac", json_object_new_boolean(false));
+  json_object_object_add(defaults, "buffered_audio_enabled", json_object_new_boolean(false));
   json_object_object_add(defaults, "device_removal_grace_period", json_object_new_int(180));
   json_object_object_add(defaults, "airplay_timing_port", json_object_new_int(0));
   json_object_object_add(defaults, "airplay_control_port", json_object_new_int(0));
@@ -506,6 +507,36 @@ config_set_device_str(const char *device, const char *key, const char *value)
     }
 
   json_object_object_add(dev, key, value ? json_object_new_string(value) : NULL);
+
+  return config_write();
+}
+
+int
+config_set_device_int(const char *device, const char *key, int value)
+{
+  json_object *devices;
+  json_object *dev;
+
+  if (!root || !device || !key)
+    return -1;
+
+  if (!json_object_object_get_ex(root, "airplay_devices", &devices))
+    {
+      devices = json_object_new_object();
+      if (!devices)
+        return -1;
+      json_object_object_add(root, "airplay_devices", devices);
+    }
+
+  if (!json_object_object_get_ex(devices, device, &dev))
+    {
+      dev = json_object_new_object();
+      if (!dev)
+        return -1;
+      json_object_object_add(devices, device, dev);
+    }
+
+  json_object_object_add(dev, key, json_object_new_int(value));
 
   return config_write();
 }

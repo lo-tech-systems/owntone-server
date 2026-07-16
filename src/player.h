@@ -29,8 +29,9 @@ struct player_speaker_info {
   enum media_format format;
   uint32_t supported_formats;
 
-  // Protocol mode preference and availability (see enum output_mode)
-  char mode[16];
+  // Protocol mode preference and availability (see enum output_mode). Sized
+  // for the longest token, "airplay2_surround_stereo".
+  char mode[32];
   uint32_t supported_modes;
 
   bool selected;

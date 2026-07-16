@@ -104,6 +104,11 @@ bool        config_get_device_bool(const char *device, const char *key, bool fal
 // Creates the device entry and "airplay_devices" block if absent.
 int         config_set_device_str(const char *device, const char *key, const char *value);
 
+// Persist a per-device integer value (e.g. the learned buffered-transport
+// capability bitmask) into the JSON file. Same semantics as
+// config_set_device_str().
+int         config_set_device_int(const char *device, const char *key, int value);
+
 // Tri-state reconnect setting per device: -1=auto-detect, 0=disabled, 1=enabled.
 // Absent or null in JSON means -1 (auto).
 int         config_get_device_reconnect(const char *device);

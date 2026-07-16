@@ -409,8 +409,9 @@ struct airplay_session
   unsigned short events_port;
 
   // Buffered AirPlay 2 (type 103) transport. wants_buffered_51/wants_buffered_alac24
-  // are the provisional decision (Stage E wires them from device config);
-  // device_supports_buffered_51 reflects the /info capability gate
+  // are the provisional decision, derived in session_make() from the device's
+  // selected output mode (and the global buffered_audio_enabled switch under
+  // "auto"); device_supports_buffered_51 reflects the /info capability gate
   // (response_handler_info_generic); buffered_mode is the final decision, also
   // made there, which is what everything downstream (SETUP payload, write
   // path, flush) acts on.
@@ -1834,13 +1835,28 @@ session_make(struct output_device *device, int callback_id)
   session->wanted_metadata = extra->wanted_metadata;
   session->supports_encryption = extra->supports_encryption;
 
-  // Buffered AirPlay 2 opt-in: not yet wired to any config, so this is always
-  // false and the buffered path below can never be selected. wants_buffered_51
-  // is the single flag response_handler_info_generic() checks to decide
-  // whether to attempt the buffered transport at all; wants_buffered_alac24
-  // additionally selects the ALAC 48k/24 profile over AAC-LC stereo.
-  session->wants_buffered_51 = false;
-  session->wants_buffered_alac24 = false;
+  // Buffered AirPlay 2 opt-in, derived from the device's selected output mode.
+  // wants_buffered_51 is the single flag response_handler_info_generic()
+  // checks to decide whether to attempt the buffered transport at all;
+  // wants_buffered_alac24 additionally selects the ALAC 48k/24 profile over
+  // AAC-LC stereo. Surround modes are not implemented yet, so they and a bare
+  // realtime selection all leave both flags false (realtime path).
+  {
+    enum output_mode mode = device->preferred_mode;
+    bool wants_aac = (mode == OUTPUT_MODE_AIRPLAY2_BUFFERED);
+    bool wants_alac24 = (mode == OUTPUT_MODE_AIRPLAY2_BUFFERED_24);
+
+    // Under "auto", the global buffered-audio switch opts every AirPlay 2
+    // device with a learned AAC-buffered capability into the buffered
+    // transport ahead of realtime; explicit selections are never influenced
+    // by the switch.
+    if (mode == OUTPUT_MODE_AUTO && config_get_bool("buffered_audio_enabled", false)
+        && (device->supported_modes & OUTPUT_MODE_AIRPLAY2_BUFFERED))
+      wants_aac = true;
+
+    session->wants_buffered_51 = wants_aac || wants_alac24;
+    session->wants_buffered_alac24 = wants_alac24;
+  }
   session->buffered_mode = false;
   session->buffered_format_id = session->wants_buffered_alac24 ? AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO : AIRPLAY_FORMAT_ID_AAC_STEREO;
 
@@ -4299,6 +4315,66 @@ response_handler_teardown_failure(struct evrtsp_request *req, struct airplay_ses
   return AIRPLAY_SEQ_CONTINUE;
 }
 
+// Parses the receiver's advertised buffered-transport (type 103) capability
+// from a GET /info response into an output_mode bitmask (the
+// OUTPUT_MODE_AIRPLAY2_BUFFERED*/SURROUND* bits). Receivers declare it two
+// ways: supportedAudioFormatsExtended/bufferStream as an array of format ids,
+// or supportedFormats/bufferStream as an integer bitmask with the format ids
+// as bit positions (the same convention SETUP(stream)'s audioFormat field
+// uses, see AIRPLAY_BUFFERED_AUDIOFORMAT). Surround (format 39) is not parsed
+// yet; that support-detection lands with the surround output modes.
+static uint32_t
+buffered_modes_parse(plist_t response)
+{
+  uint32_t modes = 0;
+  plist_t item;
+  plist_t buffer_stream;
+
+  item = plist_dict_get_item(response, "supportedAudioFormatsExtended");
+  if (item)
+    {
+      buffer_stream = plist_dict_get_item(item, "bufferStream");
+      if (buffer_stream)
+	{
+	  uint32_t n = plist_array_get_size(buffer_stream);
+	  plist_t elm;
+	  uint64_t fmt;
+	  uint32_t idx;
+
+	  for (idx = 0; idx < n; idx++)
+	    {
+	      elm = plist_array_get_item(buffer_stream, idx);
+	      if (!elm)
+		continue;
+
+	      plist_get_uint_val(elm, &fmt);
+	      if (fmt == AIRPLAY_FORMAT_ID_AAC_STEREO)
+		modes |= OUTPUT_MODE_AIRPLAY2_BUFFERED;
+	      else if (fmt == AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO)
+		modes |= OUTPUT_MODE_AIRPLAY2_BUFFERED_24;
+	    }
+	}
+    }
+
+  item = plist_dict_get_item(response, "supportedFormats");
+  if (item)
+    {
+      buffer_stream = plist_dict_get_item(item, "bufferStream");
+      if (buffer_stream)
+	{
+	  uint64_t mask = 0;
+
+	  plist_get_uint_val(buffer_stream, &mask);
+	  if (mask & AIRPLAY_BUFFERED_AUDIOFORMAT(AIRPLAY_FORMAT_ID_AAC_STEREO))
+	    modes |= OUTPUT_MODE_AIRPLAY2_BUFFERED;
+	  if (mask & AIRPLAY_BUFFERED_AUDIOFORMAT(AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO))
+	    modes |= OUTPUT_MODE_AIRPLAY2_BUFFERED_24;
+	}
+    }
+
+  return modes;
+}
+
 static enum airplay_seq_type
 response_handler_info_generic(struct evrtsp_request *req, struct airplay_session *session)
 {
@@ -4330,54 +4406,24 @@ response_handler_info_generic(struct evrtsp_request *req, struct airplay_session
   if (item)
     plist_get_uint_val(item, &session->statusflags);
 
-  // Buffered AirPlay 2 capability gate. supportedAudioFormatsExtended/
-  // bufferStream is a list of format ids the receiver accepts over the
-  // buffered (type 103) transport; generic over whichever format id
-  // session->buffered_format_id resolved to (AAC-LC stereo or ALAC 48k/24).
-  item = plist_dict_get_item(response, "supportedAudioFormatsExtended");
-  if (item)
-    {
-      plist_t buffer_stream = plist_dict_get_item(item, "bufferStream");
-      if (buffer_stream)
-	{
-	  uint32_t n = plist_array_get_size(buffer_stream);
-	  plist_t elm;
-	  uint64_t fmt;
-	  uint32_t idx;
+  // Buffered AirPlay 2 capability gate. Parse the full bufferStream capability
+  // list into an output_mode bitmask (not just whichever format id this
+  // session happens to want), so the result can both drive this session's
+  // decision and be cached/persisted on the device for the mode-selection API.
+  {
+    uint32_t advertised_buffered_modes = buffered_modes_parse(response);
 
-	  for (idx = 0; idx < n; idx++)
-	    {
-	      elm = plist_array_get_item(buffer_stream, idx);
-	      if (!elm)
-		continue;
+    session->device_supports_buffered_51 =
+      (session->buffered_format_id == AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO)
+        ? (advertised_buffered_modes & OUTPUT_MODE_AIRPLAY2_BUFFERED_24)
+        : (advertised_buffered_modes & OUTPUT_MODE_AIRPLAY2_BUFFERED);
 
-	      plist_get_uint_val(elm, &fmt);
-	      if (fmt == session->buffered_format_id)
-		{
-		  session->device_supports_buffered_51 = true;
-		  break;
-		}
-	    }
-	}
-    }
-
-  // Some receivers declare the same capability differently: supportedFormats/
-  // bufferStream is an integer bitmask with the format ids as bit positions
-  // (same convention as the SETUP(stream) audioFormat field, see
-  // AIRPLAY_BUFFERED_AUDIOFORMAT)
-  item = plist_dict_get_item(response, "supportedFormats");
-  if (item && !session->device_supports_buffered_51)
-    {
-      plist_t buffer_stream = plist_dict_get_item(item, "bufferStream");
-      if (buffer_stream)
-	{
-	  uint64_t mask = 0;
-
-	  plist_get_uint_val(buffer_stream, &mask);
-	  if (mask & AIRPLAY_BUFFERED_AUDIOFORMAT(session->buffered_format_id))
-	    session->device_supports_buffered_51 = true;
-	}
-    }
+    if (advertised_buffered_modes != device->buffered_modes)
+      {
+        outputs_device_buffered_modes_set(device, advertised_buffered_modes);
+        db_speaker_save(device);
+      }
+  }
 
   // The full /info plist is the only place a receiver declares its audio
   // capabilities (audioFormats, output device attributes), which we will need

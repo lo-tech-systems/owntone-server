@@ -7,8 +7,10 @@
  *      → satisfied by queue.h (our in-memory single-pipe queue)
  *
  *   2. db_speaker_save(device)
- *      → persists device->auth_key to owntone-settings.json so that AirPlay 2
- *        HomeKit pairing survives a server restart; implemented in db.c
+ *      → persists device->auth_key and device->buffered_modes to
+ *        owntone-settings.json so that AirPlay 2 HomeKit pairing and the
+ *        learned buffered-transport capability both survive a server
+ *        restart; implemented in db.c
  *
  *   3. CHAR_BIT (missing <limits.h> in upstream airplay.c)
  *      → pulled in here so the upstream file compiles unmodified
@@ -27,8 +29,9 @@
  * ordering problem for files that include db.h early (e.g. player.h). */
 struct output_device;
 
-/* Persist device->auth_key to the JSON config file so AirPlay pairing
- * survives a server restart.  Implemented in db.c. */
+/* Persist device->auth_key and device->buffered_modes to the JSON config file
+ * so AirPlay pairing and the learned buffered-transport capability both
+ * survive a server restart.  Implemented in db.c. */
 void db_speaker_save(struct output_device *device);
 
 #endif /* !__DB_H__ */

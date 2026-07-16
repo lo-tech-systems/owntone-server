@@ -458,11 +458,22 @@ speaker_to_json(struct player_speaker_info *spk)
 
   // supported_modes lists concrete protocols (not "auto"); auto is always
   // a valid preference regardless and is omitted from the capability list.
+  // airplay2_buffered (AAC-LC) is offered for any AirPlay 2-capable device,
+  // even before the device's own /info response has confirmed it, since it
+  // is a near-universal baseline; the session itself falls back to realtime
+  // if the receiver turns out not to support it. airplay2_buffered_24 is only
+  // listed once actually learned/persisted. The surround modes are not
+  // reported yet.
   supported_modes = json_object_new_array();
   if (spk->supported_modes & OUTPUT_MODE_RAOP)
     json_object_array_add(supported_modes, json_object_new_string("raop"));
   if (spk->supported_modes & OUTPUT_MODE_AIRPLAY2)
-    json_object_array_add(supported_modes, json_object_new_string("airplay2"));
+    {
+      json_object_array_add(supported_modes, json_object_new_string("airplay2"));
+      json_object_array_add(supported_modes, json_object_new_string("airplay2_buffered"));
+    }
+  if (spk->supported_modes & OUTPUT_MODE_AIRPLAY2_BUFFERED_24)
+    json_object_array_add(supported_modes, json_object_new_string("airplay2_buffered_24"));
 
   snprintf(output_id, sizeof(output_id), "%" PRIu64, spk->id);
   json_object_object_add(output, "id", json_object_new_string(output_id));
@@ -607,10 +618,18 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
 
       // Unknown mode strings are a bad request; unsupported-but-valid modes
       // are handled inside player_speaker_mode_set (warn + no-op).
+      // airplay2_surround_stereo/_upmix are accepted here even though they
+      // are not yet functional: selecting them falls through to realtime
+      // rather than erroring, so there is no reason to reject them at the API
+      // boundary.
       if (!mode_str ||
           (strcmp(mode_str, "auto") != 0 &&
            strcmp(mode_str, "raop") != 0 &&
-           strcmp(mode_str, "airplay2") != 0))
+           strcmp(mode_str, "airplay2") != 0 &&
+           strcmp(mode_str, "airplay2_buffered") != 0 &&
+           strcmp(mode_str, "airplay2_buffered_24") != 0 &&
+           strcmp(mode_str, "airplay2_surround_stereo") != 0 &&
+           strcmp(mode_str, "airplay2_surround_upmix") != 0))
         goto error;
 
       mode = output_mode_from_string(mode_str);

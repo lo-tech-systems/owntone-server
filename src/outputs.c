@@ -141,9 +141,13 @@ output_mode_to_string(enum output_mode mode)
 {
   switch (mode)
     {
-      case OUTPUT_MODE_RAOP:     return "raop";
-      case OUTPUT_MODE_AIRPLAY2: return "airplay2";
-      default:                   return "auto";
+      case OUTPUT_MODE_RAOP:                     return "raop";
+      case OUTPUT_MODE_AIRPLAY2:                 return "airplay2";
+      case OUTPUT_MODE_AIRPLAY2_BUFFERED:        return "airplay2_buffered";
+      case OUTPUT_MODE_AIRPLAY2_BUFFERED_24:     return "airplay2_buffered_24";
+      case OUTPUT_MODE_AIRPLAY2_SURROUND_STEREO: return "airplay2_surround_stereo";
+      case OUTPUT_MODE_AIRPLAY2_SURROUND_UPMIX:  return "airplay2_surround_upmix";
+      default:                                   return "auto";
     }
 }
 
@@ -156,6 +160,14 @@ output_mode_from_string(const char *str)
     return OUTPUT_MODE_RAOP;
   if (strcmp(str, "airplay2") == 0)
     return OUTPUT_MODE_AIRPLAY2;
+  if (strcmp(str, "airplay2_buffered") == 0)
+    return OUTPUT_MODE_AIRPLAY2_BUFFERED;
+  if (strcmp(str, "airplay2_buffered_24") == 0)
+    return OUTPUT_MODE_AIRPLAY2_BUFFERED_24;
+  if (strcmp(str, "airplay2_surround_stereo") == 0)
+    return OUTPUT_MODE_AIRPLAY2_SURROUND_STEREO;
+  if (strcmp(str, "airplay2_surround_upmix") == 0)
+    return OUTPUT_MODE_AIRPLAY2_SURROUND_UPMIX;
   return OUTPUT_MODE_AUTO;
 }
 
@@ -584,6 +596,10 @@ supported_modes_recompute(struct output_device *device)
     device->supported_modes |= OUTPUT_MODE_RAOP;
   if (device->candidate_airplay2 && !device->candidate_airplay2->removal_candidate)
     device->supported_modes |= OUTPUT_MODE_AIRPLAY2;
+
+  // Merge in the buffered/surround capability learned from the device's own
+  // advertisement (GET /info), which mDNS discovery cannot see.
+  device->supported_modes |= device->buffered_modes;
 }
 
 // Resolves the effective output type from preferred_mode and available
@@ -618,7 +634,11 @@ effective_type_resolve(struct output_device *device)
 
   if (device->preferred_mode == OUTPUT_MODE_RAOP && raop)
     return OUTPUT_TYPE_RAOP;
-  if (device->preferred_mode == OUTPUT_MODE_AIRPLAY2 && ap2)
+
+  // Any AirPlay 2 preference - realtime, buffered, or surround - resolves to
+  // the AirPlay backend; which transport it actually uses is decided inside
+  // that backend from the same preference value.
+  if (device->preferred_mode != OUTPUT_MODE_AUTO && device->preferred_mode != OUTPUT_MODE_RAOP && ap2)
     return OUTPUT_TYPE_AIRPLAY;
 
   // AUTO or preferred protocol unavailable: highest priority wins
@@ -663,9 +683,10 @@ effective_candidate_apply(struct output_device *canonical)
     {
       bool avail_raop = canonical->candidate_raop && !canonical->candidate_raop->removal_candidate;
       bool avail_ap2  = canonical->candidate_airplay2 && !canonical->candidate_airplay2->removal_candidate;
+      bool preferred_is_airplay2 = (canonical->preferred_mode != OUTPUT_MODE_AUTO && canonical->preferred_mode != OUTPUT_MODE_RAOP);
       bool preferred_unavailable =
-        (canonical->preferred_mode == OUTPUT_MODE_RAOP    && !avail_raop) ||
-        (canonical->preferred_mode == OUTPUT_MODE_AIRPLAY2 && !avail_ap2);
+        (canonical->preferred_mode == OUTPUT_MODE_RAOP && !avail_raop) ||
+        (preferred_is_airplay2 && !avail_ap2);
       if (preferred_unavailable)
         DPRINTF(E_DBG, L_PLAYER, "Preferred protocol for '%s' unavailable, using %s\n",
                 candidate->name, candidate->type_name);
@@ -1509,6 +1530,11 @@ outputs_device_add(struct output_device *add, bool new_deselect)
           device->auth_key = strdup(saved_key);
       }
 
+      /* Restore the persisted buffered-transport capability bitmask, so that
+       * supported_modes already reflects it for a previously seen device,
+       * before the first /info exchange of this run reconciles it again. */
+      device->buffered_modes = (uint32_t)config_get_device_int(add->name, "buffered_modes", 0);
+
       if (keep_offset_ms != 0)
 	device->offset_ms = keep_offset_ms;
 
@@ -1811,7 +1837,9 @@ outputs_device_mode_set(struct output_device *device, enum output_mode mode)
   uint32_t mode_bit;
 
   // Validate: only enumerated values are accepted
-  if (mode != OUTPUT_MODE_AUTO && mode != OUTPUT_MODE_RAOP && mode != OUTPUT_MODE_AIRPLAY2)
+  if (mode != OUTPUT_MODE_AUTO && mode != OUTPUT_MODE_RAOP && mode != OUTPUT_MODE_AIRPLAY2 &&
+      mode != OUTPUT_MODE_AIRPLAY2_BUFFERED && mode != OUTPUT_MODE_AIRPLAY2_BUFFERED_24 &&
+      mode != OUTPUT_MODE_AIRPLAY2_SURROUND_STEREO && mode != OUTPUT_MODE_AIRPLAY2_SURROUND_UPMIX)
     return -1;
 
   if (outputs_device_is_stereo_leader(device) && mode == OUTPUT_MODE_RAOP)
@@ -1825,6 +1853,15 @@ outputs_device_mode_set(struct output_device *device, enum output_mode mode)
   if (mode != OUTPUT_MODE_AUTO)
     {
       mode_bit = (uint32_t)mode;
+
+      // AAC-LC buffered is a near-universal baseline for any AirPlay 2
+      // receiver, so it is accepted as soon as the device supports AirPlay 2
+      // at all, without waiting for the buffered capability bit to have been
+      // learned from a prior /info exchange. The session itself falls back to
+      // realtime if the receiver turns out not to advertise it after all.
+      if (mode == OUTPUT_MODE_AIRPLAY2_BUFFERED)
+        mode_bit = OUTPUT_MODE_AIRPLAY2;
+
       if (!(outputs_device_supported_modes(device) & mode_bit))
         {
           DPRINTF(E_WARN, L_PLAYER, "Ignoring requested mode '%s' for output '%s': protocol not available\n",
@@ -1845,6 +1882,16 @@ outputs_device_mode_set(struct output_device *device, enum output_mode mode)
 
   // Return 1 only when the effective backend would actually change
   return (effective_type_resolve(device) != device->type) ? 1 : 0;
+}
+
+void
+outputs_device_buffered_modes_set(struct output_device *device, uint32_t buffered_modes)
+{
+  if (!device)
+    return;
+
+  device->buffered_modes = buffered_modes;
+  supported_modes_recompute(device);
 }
 
 int
