@@ -57,6 +57,7 @@
 #include "outputs.h"
 
 #include "airplay_events.h"
+#include "airplay_buffered.h"
 #include "pair_ap/pair.h"
 
 /* List of TODO's for AirPlay 2
@@ -100,6 +101,56 @@
 
 // How many RTP packets to buffer for retransmission
 #define AIRPLAY_PACKET_BUFFER_SIZE    1000
+
+// Buffered AirPlay 2 (type 103) format ids. These are the bufferStream
+// capability ids a receiver advertises in /info and the per-packet format
+// selector negotiated in SETUP(stream); the AAC-LC stereo id is also the
+// universal baseline every AirPlay 2 receiver is expected to accept over the
+// buffered transport.
+#define AIRPLAY_FORMAT_ID_AAC_STEREO        23
+// ALAC 48kHz/24-bit stereo, for lossless sources. The bufferStream capability
+// list encodes each format id as a bit position (format id N is bit N of the
+// mask), the same convention SETUP(stream)'s audioFormat field uses.
+#define AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO 21
+#define AIRPLAY_BUFFERED_SPF                 1024
+// Samples per frame for the ALAC 48k/24 profile. ALAC decoders are
+// initialised from a magic cookie carrying frameLength=352 - the classic ALAC
+// frame size - not the larger frame size a generic encoder would default to,
+// which a receiver's ALAC decoder will not recognise. Must match
+// settings->frame_size in transcode.c's XCODE_ALAC48K_24_STEREO.
+#define AIRPLAY_BUFFERED_SPF_ALAC24          352
+// RTP SSRC for buffered ALAC 48k/24. Receivers select their decoder for the
+// buffered stream from the SSRC field rather than negotiation alone, so the
+// codec has to be stamped into it. owntone otherwise leaves the PTP session's
+// SSRC at 0, which receivers tolerate for AAC but not for ALAC.
+#define AIRPLAY_SSRC_ID_ALAC48K_24          0x15000000
+// Scratch buffer for one encoded buffered frame. A raw AAC-LC frame at 1024
+// samples is normally 1-2KB, but a near-incompressible ALAC24 frame can be
+// much larger; sized with headroom above the worst case for either profile.
+#define AIRPLAY_BUFFERED_FRAME_MAX           32768
+// Implied by the format ids (the buffered SETUP carries no explicit "sr");
+// this is the timescale of the buffered rtptime and the anchor's rtpTime.
+#define AIRPLAY_BUFFERED_SAMPLE_RATE         48000
+// SETUP(stream) audioFormat is a 64-bit bitmask in which the bufferStream
+// format ids are BIT POSITIONS (same convention as the receiver's advertised
+// capability mask), so the field value is 1 << format id.
+#define AIRPLAY_BUFFERED_AUDIOFORMAT(format_id) (UINT64_C(1) << (format_id))
+// RTP "type" value for SETUP(stream) when using the buffered transport (see
+// the AIRPLAY_RTP_PAYLOADTYPE comment above: 0x60 real time, 0x67 buffered)
+#define AIRPLAY_BUFFERED_RTP_TYPE             0x67
+// Some receivers reject a SETRATEANCHORTIME in-band (RTSP 200 with a nonzero
+// plist status) when it is placed before their clock has locked onto our PTP
+// timeline; the anchor is retried a bounded number of times before the
+// session is failed outright. Audio queued in the meantime is simply held by
+// the receiver, so streaming state is unaffected while a retry is pending.
+#define AIRPLAY_BUFFERED_ANCHOR_RETRIES_MAX   4
+#define AIRPLAY_BUFFERED_ANCHOR_RETRY_WAIT_MS 1500
+// A session joining an already-anchored master session gets an anchor this
+// many frames past the current write head, and delivery to it is held until
+// the write head reaches that point - so its first delivered frame matches
+// its anchor exactly. Must comfortably exceed the anchor request/response
+// round trip; 48 frames is about 1s at 1024 spf / 48kHz.
+#define AIRPLAY_BUFFERED_JOIN_SLACK_FRAMES    48
 
 #define AIRPLAY_MD_DELAY_STARTUP      15360
 #define AIRPLAY_MD_DELAY_SWITCH       (AIRPLAY_MD_DELAY_STARTUP * 2)
@@ -181,6 +232,8 @@ enum airplay_seq_type
   AIRPLAY_SEQ_PAIR_VERIFY,
   AIRPLAY_SEQ_PAIR_TRANSIENT,
   AIRPLAY_SEQ_FEEDBACK,
+  AIRPLAY_SEQ_SEND_ANCHOR,
+  AIRPLAY_SEQ_FLUSH_BUFFERED,
   AIRPLAY_SEQ_CONTINUE, // Must be last element
 };
 
@@ -248,6 +301,39 @@ struct airplay_master_session
   // compared to the rtptimes of the corresponding RTP packages we are sending)
   uint32_t output_buffer_samples;
 
+  // Buffered AirPlay 2 (type 103) transport. When buffered is set, encode_ctx
+  // above is an AAC-LC stereo or ALAC 48k/24 encoder (not realtime ALAC) and
+  // packets are framed via buffered_seqnum/buffered_rtptime and handed to
+  // airplay_buffered_write() instead of rtp_session/rtp_packet_next
+  // (rtp_session is still created and used for input quality subscription and
+  // metadata rtptime calculations). buffered_alac24 selects the ALAC profile;
+  // otherwise the AAC-LC stereo profile is used.
+  bool buffered;
+  bool buffered_alac24;
+  // Samples per buffered frame for this ams's encoder: AIRPLAY_BUFFERED_SPF
+  // for the AAC-LC profile, AIRPLAY_BUFFERED_SPF_ALAC24 for buffered_alac24.
+  // Set once in master_session_make() and used everywhere buffered_rtptime/
+  // buffered_seqnum advance by one frame.
+  uint32_t buffered_spf;
+  uint32_t buffered_seqnum;
+  uint32_t buffered_rtptime;
+  bool buffered_marker_pending;
+  // rtptime of the first frame actually written since session start or the
+  // last FLUSHBUFFERED - i.e. the start of the audio sitting in the
+  // receiver's buffer. SETRATEANCHORTIME's rtpTime must point here (the
+  // anchor names the start of the buffered audio, not the write head).
+  uint32_t buffered_anchor_rtptime;
+  // Shared rtptime->networkTime mapping. The first anchor computed for any
+  // session on this ams stores its (rtpTime, networkTime) point; anchors for
+  // sessions joining later are DERIVED from it (same line, rate=1), so every
+  // receiver places a given rtptime at the same wall-clock instant. Invalidated
+  // by FLUSHBUFFERED (playback resumes at a new wall time) and by a rejected
+  // first anchor (the retry must pick a fresh future time).
+  bool buffered_anchor_mapped;
+  uint32_t buffered_anchor_map_rtptime;
+  uint64_t buffered_anchor_map_secs;
+  uint64_t buffered_anchor_map_frac;
+
   struct airplay_master_session *next;
 };
 
@@ -281,10 +367,22 @@ struct airplay_session
   int cseq;
 
   uint32_t session_id;
+  // Names the buffered stream's data connection in SETUP(stream). Kept
+  // separate from session_id because that one also forms session_url, and
+  // because this field carries a full signed 64-bit value.
+  int64_t stream_connection_id;
   char session_url[128];
   char session_uuid[37];
 
   char group_uuid[37];
+  // Always false for a generated group_uuid; reserved for a future stereo-pair
+  // group id override.
+  bool group_contains_leader;
+
+  // Set when a request failed for a reason that is definitely NOT
+  // authentication (the device replied, we could not use the reply). Stops
+  // start_failure() from discarding perfectly good pairing keys.
+  bool protocol_error;
 
   char *realm;
   char *nonce;
@@ -309,6 +407,44 @@ struct airplay_session
   unsigned short data_port;
   unsigned short control_port;
   unsigned short events_port;
+
+  // Buffered AirPlay 2 (type 103) transport. wants_buffered_51/wants_buffered_alac24
+  // are the provisional decision (Stage E wires them from device config);
+  // device_supports_buffered_51 reflects the /info capability gate
+  // (response_handler_info_generic); buffered_mode is the final decision, also
+  // made there, which is what everything downstream (SETUP payload, write
+  // path, flush) acts on.
+  bool wants_buffered_51;
+  // Selects the ALAC 48k/24 profile (format 21) instead of AAC-LC stereo
+  // (format 23) when wants_buffered_51 is set. Kept as its own field only so
+  // master_session_make() can be told which profile to select.
+  bool wants_buffered_alac24;
+  // bufferStream format id this session will stream when buffered: either
+  // AIRPLAY_FORMAT_ID_AAC_STEREO or AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO,
+  // depending on wants_buffered_alac24.
+  uint32_t buffered_format_id;
+  bool device_supports_buffered_51;
+  bool buffered_mode;
+  // Set whenever a fresh SETRATEANCHORTIME is needed (buffered_mode just
+  // decided, or after a FLUSHBUFFERED, which invalidates the receiver's
+  // previous anchor)
+  bool anchor_pending;
+  // Set once the receiver accepts SETRATEANCHORTIME. No audio is written to
+  // the data connection before this: it keeps the anchor-rejection retry path
+  // alive (a failed data write kills the session), and it makes anchor and
+  // data failures distinguishable in the logs.
+  bool anchor_confirmed;
+  // The rtptime named by this session's anchor - delivery starts exactly at
+  // this frame (see the gate in buffered_frame_send). Equals the write head
+  // for a first/frozen anchor, or a slightly-future join point when joining
+  // an already-anchored master session.
+  uint32_t buffered_start_rtptime;
+  // Timer + budget for retrying a rejected SETRATEANCHORTIME, see
+  // response_handler_send_anchor()
+  struct event *anchorev;
+  int anchor_retries_left;
+  unsigned short buffered_data_port;
+  struct airplay_buffered_stream *buffered;
 
   /* Pairing, see pair.h */
   enum pair_type pair_type;
@@ -1166,20 +1302,47 @@ master_session_cleanup(struct airplay_master_session *ams)
 }
 
 static struct airplay_master_session *
-master_session_make(struct media_quality *quality, bool use_ptp)
+master_session_make(struct media_quality *quality, bool use_ptp, bool buffered, bool alac24)
 {
   struct airplay_master_session *ams;
+  struct media_quality alac24_quality;
   uint64_t buffer_duration_ms;
-  struct transcode_encode_setup_args encode_args = { .profile = XCODE_ALAC, .quality = quality };
+  enum transcode_profile profile;
+  struct transcode_encode_setup_args encode_args;
   uint64_t clock_id;
   int ret;
+
+  // For the ALAC 48k/24 profile the session subscribes at 48k/32-bit/2ch
+  // instead of the device default, so a >16-bit source reaches the encoder
+  // without truncation and without a resample away from 48k. 16-bit sources
+  // arrive converted/zero-padded by the player, same audible result as
+  // before. Must be set before the reuse check below so equality compares the
+  // real subscription quality.
+  if (alac24)
+    {
+      memset(&alac24_quality, 0, sizeof(alac24_quality));
+      alac24_quality.sample_rate = 48000;
+      alac24_quality.bits_per_sample = 32;
+      alac24_quality.channels = 2;
+      quality = &alac24_quality;
+    }
 
   // First check if we already have a suitable session
   for (ams = airplay_master_sessions; ams; ams = ams->next)
     {
-      if (quality_is_equal(quality, &ams->rtp_session->quality) && use_ptp == ams->use_ptp)
+      if (quality_is_equal(quality, &ams->rtp_session->quality) && use_ptp == ams->use_ptp
+          && buffered == ams->buffered && alac24 == ams->buffered_alac24)
 	return ams;
     }
+
+  // The buffered transport uses an AAC-LC stereo or ALAC 48k/24 encode
+  // profile instead of realtime ALAC; everything else about master session
+  // creation (input quality subscribe, rawbuf sized for
+  // AIRPLAY_SAMPLES_PER_PACKET input samples, rtp_session) is unchanged - the
+  // rtp_session is kept for input quality subscription and metadata rtptime
+  // calculations, buffered packets don't use rtp_packet_next.
+  profile = !buffered ? XCODE_ALAC : alac24 ? XCODE_ALAC48K_24_STEREO : XCODE_AAC48K_STEREO;
+  encode_args = (struct transcode_encode_setup_args){ .profile = profile, .quality = quality };
 
   // Let's create a master session
   ret = outputs_quality_subscribe(quality);
@@ -1199,7 +1362,13 @@ master_session_make(struct media_quality *quality, bool use_ptp)
       goto error;
     }
 
-  encode_args.src_ctx = transcode_decode_setup_raw(XCODE_PCM16, quality);
+  // Buffered receivers select their decoder from the RTP SSRC (see
+  // AIRPLAY_SSRC_ID_ALAC48K_24). rtp_session_new() leaves ssrc_id 0 on PTP
+  // sessions, which is fine for AAC but means ALAC frames are never decoded.
+  if (alac24)
+    ams->rtp_session->ssrc_id = AIRPLAY_SSRC_ID_ALAC48K_24;
+
+  encode_args.src_ctx = transcode_decode_setup_raw(alac24 ? XCODE_PCM32 : XCODE_PCM16, quality);
   if (!encode_args.src_ctx)
     {
       DPRINTF(E_LOG, L_AIRPLAY, "Could not create decoding context\n");
@@ -1210,7 +1379,7 @@ master_session_make(struct media_quality *quality, bool use_ptp)
   transcode_decode_cleanup(&encode_args.src_ctx);
   if (!ams->encode_ctx)
     {
-      DPRINTF(E_LOG, L_AIRPLAY, "Will not be able to stream AirPlay 2, ffmpeg has no ALAC encoder\n");
+      DPRINTF(E_LOG, L_AIRPLAY, "Will not be able to stream AirPlay 2, ffmpeg has no %s encoder\n", !buffered ? "ALAC" : alac24 ? "ALAC 24-bit" : "AAC");
       goto error;
     }
 
@@ -1226,6 +1395,14 @@ master_session_make(struct media_quality *quality, bool use_ptp)
   ams->samples_per_packet = AIRPLAY_SAMPLES_PER_PACKET;
   ams->rawbuf_size = STOB(ams->samples_per_packet, quality->bits_per_sample, quality->channels);
   ams->output_buffer_samples = (buffer_duration_ms - AIRPLAY_AUDIO_LATENCY_MS) * quality->sample_rate / 1000;
+
+  ams->buffered = buffered;
+  ams->buffered_alac24 = alac24;
+  ams->buffered_spf = alac24 ? AIRPLAY_BUFFERED_SPF_ALAC24 : AIRPLAY_BUFFERED_SPF;
+  ams->buffered_seqnum = 0;
+  ams->buffered_rtptime = 0;
+  ams->buffered_marker_pending = true;
+  ams->buffered_anchor_mapped = false;
 
   CHECK_NULL(L_AIRPLAY, ams->rawbuf = malloc(ams->rawbuf_size));
   CHECK_NULL(L_AIRPLAY, ams->input_buffer = evbuffer_new());
@@ -1258,6 +1435,11 @@ session_free(struct airplay_session *session)
 
   if (session->deferredev)
     event_free(session->deferredev);
+
+  if (session->anchorev)
+    event_free(session->anchorev);
+
+  airplay_buffered_stop(session->buffered);
 
   if (session->server_fd >= 0)
     close(session->server_fd);
@@ -1335,6 +1517,21 @@ deferred_session_failure(struct airplay_session *session)
 
   evutil_timerclear(&tv);
   evtimer_add(session->deferredev, &tv);
+}
+
+// Retries a SETRATEANCHORTIME that the receiver rejected (see
+// response_handler_send_anchor). If the session was flushed or torn down
+// while the timer was pending, the regular anchor_pending machinery owns the
+// next anchor and this retry must not fire a stale one.
+static void
+anchor_retry_cb(int fd, short what, void *arg)
+{
+  struct airplay_session *session = arg;
+
+  if (session->state != AIRPLAY_STATE_STREAMING || !session->buffered_mode || session->anchor_pending)
+    return;
+
+  sequence_start(AIRPLAY_SEQ_SEND_ANCHOR, session, NULL, "anchor_retry");
 }
 
 static void
@@ -1553,6 +1750,7 @@ session_ids_set(struct airplay_session *session)
   uuid_make(session->group_uuid);
 
   gcry_randomize(&session->session_id, sizeof(session->session_id), GCRY_STRONG_RANDOM);
+  gcry_randomize(&session->stream_connection_id, sizeof(session->stream_connection_id), GCRY_STRONG_RANDOM);
 
   ret = snprintf(session->session_url, sizeof(session->session_url), (family == AF_INET) ? "rtsp://%s/%u" : "rtsp://[%s]/%u", address, session->session_id);
   if ((ret < 0) || (ret >= sizeof(session->session_url)))
@@ -1613,6 +1811,9 @@ session_make(struct output_device *device, int callback_id)
 
   CHECK_NULL(L_AIRPLAY, session = calloc(1, sizeof(struct airplay_session)));
   CHECK_NULL(L_AIRPLAY, session->deferredev = evtimer_new(evbase_player, deferred_session_failure_cb, session));
+  CHECK_NULL(L_AIRPLAY, session->anchorev = evtimer_new(evbase_player, anchor_retry_cb, session));
+
+  session->anchor_retries_left = AIRPLAY_BUFFERED_ANCHOR_RETRIES_MAX;
 
   session->devname = strdup(device->name);
   session->volume = device->volume;
@@ -1633,6 +1834,16 @@ session_make(struct output_device *device, int callback_id)
   session->wanted_metadata = extra->wanted_metadata;
   session->supports_encryption = extra->supports_encryption;
 
+  // Buffered AirPlay 2 opt-in: not yet wired to any config, so this is always
+  // false and the buffered path below can never be selected. wants_buffered_51
+  // is the single flag response_handler_info_generic() checks to decide
+  // whether to attempt the buffered transport at all; wants_buffered_alac24
+  // additionally selects the ALAC 48k/24 profile over AAC-LC stereo.
+  session->wants_buffered_51 = false;
+  session->wants_buffered_alac24 = false;
+  session->buffered_mode = false;
+  session->buffered_format_id = session->wants_buffered_alac24 ? AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO : AIRPLAY_FORMAT_ID_AAC_STEREO;
+
   session->next_seq = AIRPLAY_SEQ_CONTINUE;
   session->timing_svc = &airplay_timing_svc;
   session->control_svc = &airplay_control_svc;
@@ -1645,7 +1856,10 @@ session_make(struct output_device *device, int callback_id)
 	goto error;
     }
 
-  session->master_session = master_session_make(&device->quality, extra->use_ptp);
+  // Always starts out on the realtime ALAC master session; if the device is
+  // configured for buffered mode and the device's /info response confirms
+  // support, response_handler_info_generic() swaps this for a buffered one.
+  session->master_session = master_session_make(&device->quality, extra->use_ptp, false, false);
   if (!session->master_session)
     {
       DPRINTF(E_LOG, L_AIRPLAY, "Could not attach a master session for device '%s'\n", device->name);
@@ -1653,8 +1867,9 @@ session_make(struct output_device *device, int callback_id)
     }
 
   DPRINTF(E_DBG, L_AIRPLAY,
-          "Stream mode for '%s': payload_type=%u (realtime), timing=%s, reason=default_sender_path\n",
-          session->devname, AIRPLAY_RTP_PAYLOADTYPE, session->master_session->use_ptp ? "PTP" : "NTP");
+          "Stream mode for '%s': payload_type=%u (realtime), timing=%s, reason=%s\n",
+          session->devname, AIRPLAY_RTP_PAYLOADTYPE, session->master_session->use_ptp ? "PTP" : "NTP",
+          session->wants_buffered_51 ? "buffered_configured_pending_capability_check" : "default_sender_path");
   DPRINTF(E_DBG, L_AIRPLAY, "Session group UUID for '%s': %s (source=generated)\n",
           session->devname, session->group_uuid);
 
@@ -2156,6 +2371,152 @@ packets_send(struct airplay_master_session *ams)
   return 0;
 }
 
+// Buffered AirPlay 2 (type 103) counterpart to packets_send(). alac_encode()
+// is profile-agnostic (it just drives transcode_frame_new/transcode_encode);
+// for a buffered ams, ams->encode_ctx was set up with the AAC-LC stereo or
+// ALAC 48k/24 profile in master_session_make(). There is no retransmit buffer
+// and no rtp_packet_next/RTP header for the buffered transport; framing uses
+// ams->buffered_seqnum/buffered_rtptime directly.
+// Sends ONE encoded buffered frame (already extracted into buf) to every
+// ready session on the ams, advancing seqnum/rtptime by exactly one frame.
+// Split out of buffered_packets_send() because one alac_encode() call can
+// flush more than one encoded frame - see the loop there.
+static int
+buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
+{
+  struct airplay_session *session;
+  bool wrote = false;
+  bool gated = false;
+  int ret;
+
+  // Start of a (re)primed buffer: remember where it begins so the anchor can
+  // point at it (see buffered_anchor_rtptime).
+  if (ams->buffered_marker_pending)
+    ams->buffered_anchor_rtptime = ams->buffered_rtptime;
+
+  for (session = airplay_sessions; session; session = session->next)
+    {
+      if (session->master_session != ams || !session->buffered_mode)
+	continue;
+
+      if (session->state != AIRPLAY_STATE_CONNECTED && session->state != AIRPLAY_STATE_STREAMING)
+	continue;
+
+      // The receiver's decode chain doesn't start until it accepts a rate=1
+      // anchor, and audio received before it has processed one is simply
+      // discarded rather than queued - the sender's job is to hold off
+      // delivering anything until the anchor is confirmed accepted, so the
+      // first delivered frame's rtptime lands exactly on the anchor's
+      // rtpTime. The counters are frozen below while holding.
+      if (!session->anchor_confirmed)
+	{
+	  gated = true;
+	  continue;
+	}
+
+      // A session that joined an already-anchored ams has an anchor naming a
+      // slightly-future frame (see AIRPLAY_BUFFERED_JOIN_SLACK_FRAMES); hold
+      // delivery until the write head reaches it so the first delivered frame
+      // matches the anchor exactly. NOT counted as gated: the counters must
+      // keep advancing (frozen counters would never reach the join point).
+      if ((int32_t)(ams->buffered_rtptime - session->buffered_start_rtptime) < 0)
+	continue;
+
+      if (ams->buffered_rtptime == session->buffered_start_rtptime)
+	DPRINTF(E_INFO, L_AIRPLAY, "Anchor point reached for '%s': delivering from seq %u, rtptime %u\n",
+	        session->devname, ams->buffered_seqnum & 0x7fffff, ams->buffered_rtptime);
+
+      ret = airplay_buffered_write(session->buffered, buf, len, ams->buffered_seqnum & 0x7fffff, ams->buffered_rtptime, true);
+      if (ret < 0)
+	{
+	  DPRINTF(E_LOG, L_AIRPLAY, "Error writing buffered frame to '%s'\n", session->devname);
+
+	  // Can't free it right away, it would make the ->next in this loop
+	  // and the calling ams loop in airplay_write() invalid
+	  deferred_session_failure(session);
+	  continue;
+	}
+
+      if (ams->buffered_marker_pending)
+	DPRINTF(E_INFO, L_AIRPLAY, "First buffered frame to '%s': seq %u, rtptime %u, len %d\n",
+	        session->devname, ams->buffered_seqnum & 0x7fffff, ams->buffered_rtptime, len);
+      else if ((ams->buffered_seqnum % 250) == 0)
+	DPRINTF(E_DBG, L_AIRPLAY, "Buffered stream to '%s': seq %u, rtptime %u, send queue %zu bytes\n",
+	        session->devname, ams->buffered_seqnum & 0x7fffff, ams->buffered_rtptime, airplay_buffered_pending(session->buffered));
+
+      wrote = true;
+    }
+
+  // Only a frame actually delivered consumes the marker: the counters advance
+  // even while no session is ready to receive (e.g. during negotiation), and
+  // the marker bit plus buffered_anchor_rtptime must land on the first frame
+  // the receiver really gets
+  if (wrote)
+    ams->buffered_marker_pending = false;
+
+  // While a session is waiting for its anchor to be accepted the counters
+  // freeze at the anchor's rtpTime (payload_make_send_anchor anchors at the
+  // write head), so the first frame delivered after acceptance carries
+  // exactly the rtptime the receiver was told to wait for. The frame content
+  // produced while frozen is dropped (a few tens of ms at stream start).
+  // If another session on the same ams is already streaming, delivery to it
+  // takes priority and the waiting session loses the frames instead.
+  if (gated && !wrote)
+    return 0;
+
+  ams->buffered_seqnum++;
+  ams->buffered_rtptime += ams->buffered_spf;
+
+  return 0;
+}
+
+static int
+buffered_packets_send(struct airplay_master_session *ams)
+{
+  uint8_t buf[AIRPLAY_BUFFERED_FRAME_MAX];
+  int pkt_len;
+  int len;
+  int ret;
+
+  len = alac_encode(ams->encoded_buffer, ams->encode_ctx, ams->rawbuf, ams->rawbuf_size, ams->samples_per_packet, &ams->quality);
+  if (len < 0)
+    return -1;
+
+  if (len == 0)
+    return 0; // Not enough input samples yet to complete an encoded frame
+
+  // One alac_encode() call can flush MORE than one encoded frame: the ALAC24
+  // profile's 352-sample output frames are shorter than the input pushed per
+  // call, so more than one can flush back to back. Each must go out as its
+  // own buffered frame with its own seqnum/rtptime - delivering two under one
+  // seqnum loses the second at the receiver. Split the blob on the encoder's
+  // per-packet sizes; the fallback of taking the remainder as one frame is
+  // exact for AAC, whose frames can never arrive more than one per call.
+  while (len > 0)
+    {
+      pkt_len = transcode_encode_packet_size_next(ams->encode_ctx);
+      if (pkt_len <= 0 || pkt_len > len)
+	pkt_len = len;
+
+      if ((size_t)pkt_len > sizeof(buf))
+	{
+	  DPRINTF(E_LOG, L_AIRPLAY, "Bug! Encoded buffered frame (%d bytes) exceeds temp buffer (%zu)\n", pkt_len, sizeof(buf));
+	  evbuffer_drain(ams->encoded_buffer, len);
+	  return -1;
+	}
+
+      evbuffer_remove(ams->encoded_buffer, buf, pkt_len);
+
+      ret = buffered_frame_send(ams, buf, pkt_len);
+      if (ret < 0)
+	return ret;
+
+      len -= pkt_len;
+    }
+
+  return 0;
+}
+
 // Overview of rtptimes as they should be when starting a stream, and assuming
 // the first rtptime (pos) is 88200:
 //   sync pkt:  cur_pos = 0, rtptime = 88200
@@ -2456,6 +2817,278 @@ payload_make_flush(struct evrtsp_request *req, struct airplay_session *session, 
   return 0;
 }
 
+// Buffered AirPlay 2 (type 103) counterpart to FLUSH. Invalidates the
+// receiver's current anchor (see response_handler_flush_buffered): playback
+// resumes at a new wall time, so a fresh SETRATEANCHORTIME must follow before
+// any more audio is written.
+static int
+payload_make_flush_buffered(struct evrtsp_request *req, struct airplay_session *session, void *arg)
+{
+  struct airplay_master_session *ams = session->master_session;
+  plist_t root;
+  uint8_t *data;
+  size_t len;
+  uint32_t flush_until_seq;
+  int ret;
+
+  flush_until_seq = ams->buffered_seqnum & 0x7fffff;
+
+  root = plist_new_dict();
+  wplist_dict_add_uint(root, "flushUntilSeq", flush_until_seq);
+  wplist_dict_add_uint(root, "flushUntilTS", ams->buffered_rtptime);
+
+  DPRINTF(E_DBG, L_AIRPLAY, "FLUSHBUFFERED payload for '%s': flushUntilSeq=%u, flushUntilTS=%u\n",
+          session->devname, flush_until_seq, ams->buffered_rtptime);
+
+  ret = wplist_to_bin(&data, &len, root);
+  plist_free(root);
+
+  if (ret < 0)
+    return -1;
+
+  evbuffer_add(req->output_buffer, data, len);
+
+  return 0;
+}
+
+// Buffered receivers expect the MediaRemote command table and audio-mode POST
+// before rendering: an empty updateMRSupportedCommands and a POST /audioMode
+// {audioMode: "default"} bracket SETUP(stream). Buffered mode only - skipped
+// otherwise.
+static int
+payload_make_command_supported_commands(struct evrtsp_request *req, struct airplay_session *session, void *arg)
+{
+  plist_t root;
+  plist_t params;
+  uint8_t *data;
+  size_t len;
+  int ret;
+
+  if (!session->buffered_mode)
+    return 1; // Skip this request in the sequence
+
+  params = plist_new_dict();
+  plist_dict_set_item(params, "mrSupportedCommandsFromSender", plist_new_array());
+
+  root = plist_new_dict();
+  wplist_dict_add_string(root, "type", "updateMRSupportedCommands");
+  plist_dict_set_item(root, "params", params);
+
+  ret = wplist_to_bin(&data, &len, root);
+  plist_free(root);
+
+  if (ret < 0)
+    return -1;
+
+  evbuffer_add(req->output_buffer, data, len);
+
+  return 0;
+}
+
+// The full MediaRemote command table, sent right after the empty one above.
+// mrSupportedCommandsFromSender is an array of serialized CommandInfo binary
+// plists: {kCommandInfoCommandKey: <MRMediaRemoteCommand id>,
+// kCommandInfoEnabledKey: true}. A MediaRemote-centric receiver may gate
+// rendering on the sender publishing a usable command table. The per-command
+// options are omitted, which is still a valid CommandInfo. Buffered mode only.
+static int
+payload_make_command_supported_commands_full(struct evrtsp_request *req, struct airplay_session *session, void *arg)
+{
+  static const uint32_t command_ids[] = {
+      0x61bd, 0x61bc, 0x95, 0x87, 0x86, 0x84, 0x83, 0x82, 0x81, 0x80, 0x7f,
+      0x7d, 0x7a, 0x1a, 0x19, 0x18, 0x16, 0x15, 0x13, 0x12, 0x11, 0x0a, 0x0b,
+      0x08, 0x09, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x00,
+  };
+  plist_t root;
+  plist_t params;
+  plist_t commands;
+  plist_t cmdinfo;
+  uint8_t *blob;
+  size_t blob_len;
+  uint8_t *data;
+  size_t len;
+  int i;
+  int ret;
+
+  if (!session->buffered_mode)
+    return 1; // Skip this request in the sequence
+
+  commands = plist_new_array();
+  for (i = 0; i < ARRAY_SIZE(command_ids); i++)
+    {
+      cmdinfo = plist_new_dict();
+      wplist_dict_add_uint(cmdinfo, "kCommandInfoCommandKey", command_ids[i]);
+      wplist_dict_add_bool(cmdinfo, "kCommandInfoEnabledKey", true);
+
+      ret = wplist_to_bin(&blob, &blob_len, cmdinfo);
+      plist_free(cmdinfo);
+      if (ret < 0)
+	{
+	  plist_free(commands);
+	  return -1;
+	}
+
+      plist_array_append_item(commands, plist_new_data((const char *)blob, blob_len));
+      free(blob);
+    }
+
+  params = plist_new_dict();
+  plist_dict_set_item(params, "mrSupportedCommandsFromSender", commands);
+
+  root = plist_new_dict();
+  wplist_dict_add_string(root, "type", "updateMRSupportedCommands");
+  plist_dict_set_item(root, "params", params);
+
+  ret = wplist_to_bin(&data, &len, root);
+  plist_free(root);
+
+  if (ret < 0)
+    return -1;
+
+  evbuffer_add(req->output_buffer, data, len);
+
+  return 0;
+}
+
+// POST /audioMode after SETUP(stream). Buffered receivers expect this before
+// rendering. Buffered mode only - skipped otherwise.
+static int
+payload_make_audio_mode(struct evrtsp_request *req, struct airplay_session *session, void *arg)
+{
+  plist_t root;
+  uint8_t *data;
+  size_t len;
+  int ret;
+
+  if (!session->buffered_mode)
+    return 1; // Skip this request in the sequence
+
+  root = plist_new_dict();
+  wplist_dict_add_string(root, "audioMode", "default");
+
+  ret = wplist_to_bin(&data, &len, root);
+  plist_free(root);
+
+  if (ret < 0)
+    return -1;
+
+  evbuffer_add(req->output_buffer, data, len);
+
+  return 0;
+}
+
+// The receiver's decode chain doesn't start until it gets a rate=1 anchor -
+// audio queued before that point is simply held, so it is fine to start
+// writing buffered packets right after SETUP without waiting for this to
+// complete. Timescale is CLOCK_MONOTONIC (see ptpd_network_time_get()). The
+// first anchor on a master session points a lead time into the future (the
+// start_buffer_ms setting - this becomes the receiver's cushion) and stores
+// the (rtpTime, networkTime) point in the ams; anchors for sessions joining
+// the same ams later are derived from that stored point so all receivers
+// share one rtptime->networkTime mapping (multi-room sync).
+static int
+payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *session, void *arg)
+{
+  struct airplay_master_session *ams = session->master_session;
+  plist_t root;
+  uint8_t *data;
+  size_t len;
+  uint64_t secs;
+  uint64_t frac;
+  uint64_t frac_before;
+  uint32_t anchor_rtptime;
+  uint64_t lead_ms;
+  uint32_t delta;
+  int ret;
+
+  if (ams->buffered_anchor_mapped)
+    {
+      // A session joining an already-anchored master session. Its counters
+      // are NOT frozen (another session is live), so anchoring at the
+      // current write head would name a frame this session never gets
+      // delivered - the head moves on while the anchor is in flight. Name a
+      // slightly-future frame instead and hold delivery until the write head
+      // reaches it (see the buffered_start_rtptime gate in
+      // buffered_frame_send), so the first delivered frame matches exactly.
+      anchor_rtptime = ams->buffered_rtptime + AIRPLAY_BUFFERED_JOIN_SLACK_FRAMES * ams->buffered_spf;
+
+      // Extend the stored mapping to the anchor frame: rtptime advances at
+      // AIRPLAY_BUFFERED_SAMPLE_RATE per networkTime second (rate=1).
+      // 384307168202282 is floor(2^64 / 48000), i.e. frac units per sample;
+      // detect carry into secs via unsigned overflow.
+      delta = anchor_rtptime - ams->buffered_anchor_map_rtptime;
+      secs = ams->buffered_anchor_map_secs + delta / AIRPLAY_BUFFERED_SAMPLE_RATE;
+      frac_before = ams->buffered_anchor_map_frac;
+      frac = frac_before + (uint64_t)(delta % AIRPLAY_BUFFERED_SAMPLE_RATE) * (uint64_t)384307168202282ULL;
+      if (frac < frac_before)
+	secs++;
+    }
+  else
+    {
+      ret = ptpd_network_time_get(&secs, &frac);
+      if (ret < 0)
+	{
+	  DPRINTF(E_LOG, L_AIRPLAY, "Could not read network time for anchor to '%s'\n", session->devname);
+	  return -1;
+	}
+
+      // First anchor on this ams: the counters are frozen until it is
+      // accepted, so the write head is exactly the first delivered frame
+      anchor_rtptime = ams->buffered_rtptime;
+
+      // Add the lead. frac is a 2^64 fixed-point fraction of a second;
+      // 18446744073709551 is floor(2^64 / 1000), i.e. frac units per 1ms.
+      // Whole seconds go into secs directly - the ms-to-frac product
+      // overflows uint64 for lead_ms >= 1000. Detect carry via unsigned
+      // overflow.
+      lead_ms = outputs_buffer_duration_ms_get();
+      secs += lead_ms / 1000;
+      frac_before = frac;
+      frac += (lead_ms % 1000) * (uint64_t)18446744073709551ULL;
+      if (frac < frac_before)
+	secs++;
+
+      ams->buffered_anchor_mapped = true;
+      ams->buffered_anchor_map_rtptime = anchor_rtptime;
+      ams->buffered_anchor_map_secs = secs;
+      ams->buffered_anchor_map_frac = frac;
+    }
+
+  session->buffered_start_rtptime = anchor_rtptime;
+
+  root = plist_new_dict();
+  wplist_dict_add_uint(root, "networkTimeSecs", secs);
+  // frac and the timeline ID can exceed INT64_MAX (the timeline ID always
+  // does - libairptp's clock ids start 0xFFFF). plist_new_uint() would then
+  // emit them as 16-byte bplist integers; these fields must be serialized as
+  // 8-byte signed ints or some receivers reject the anchor. Force the 8-byte
+  // encoding via the signed-int path; the receiver reads the bits back as
+  // uint64.
+  wplist_dict_add_int(root, "networkTimeFrac", (int64_t)frac);
+  wplist_dict_add_int(root, "networkTimeTimelineID", (int64_t)ptpd_clock_id_get());
+  wplist_dict_add_uint(root, "networkTimeFlags", 0);
+  // The anchor names exactly the first frame this session will be delivered
+  // (see anchor_rtptime above) - the strictest reading of the anchor-then-data
+  // ordering, and safe against receivers discarding audio received before the
+  // anchor or stalling on a missing anchor frame.
+  wplist_dict_add_uint(root, "rtpTime", anchor_rtptime);
+  wplist_dict_add_uint(root, "rate", 1);
+
+  DPRINTF(E_DBG, L_AIRPLAY, "SETRATEANCHORTIME payload for '%s': networkTimeSecs=%" PRIu64 ", networkTimeFrac=%" PRIu64 ", networkTimeTimelineID=%" PRIu64 ", rtpTime=%u (%s), rate=1\n",
+          session->devname, secs, frac, ptpd_clock_id_get(), anchor_rtptime,
+          anchor_rtptime == session->master_session->buffered_rtptime ? "write head" : "join point");
+
+  ret = wplist_to_bin(&data, &len, root);
+  plist_free(root);
+
+  if (ret < 0)
+    return -1;
+
+  evbuffer_add(req->output_buffer, data, len);
+
+  return 0;
+}
+
 // Sending an empty plist seems to mean close connection. At least according to
 // shairport-sync handle_teardown_2(). iOS seems to send first a teardown with
 // stream (to close that), then with an empty plist.
@@ -2660,27 +3293,69 @@ payload_make_setup_stream(struct evrtsp_request *req, struct airplay_session *se
   int ret;
 
   stream = plist_new_dict();
-  wplist_dict_add_uint(stream, "audioFormat", 262144); // 0x40000 ALAC/44100/16/2
-  wplist_dict_add_string(stream, "audioMode", "default");
-  wplist_dict_add_uint(stream, "controlPort", session->control_svc->port);
-  wplist_dict_add_uint(stream, "ct", 2); // Compression type, 1 LPCM, 2 ALAC, 3 AAC, 4 AAC ELD, 32 OPUS
-  wplist_dict_add_bool(stream, "isMedia", true); // ?
-  wplist_dict_add_uint(stream, "latencyMax", 88200); // TODO how do these latencys work?
-  wplist_dict_add_uint(stream, "latencyMin", 11025); // AIRPLAY_AUDIO_LATENCY_MS in samples, see comment in rtp_sync_packet_next()
-  wplist_dict_add_data(stream, "shk", session->shared_secret, AIRPLAY_AUDIO_KEY_LEN);
-  wplist_dict_add_uint(stream, "spf", AIRPLAY_SAMPLES_PER_PACKET); // frames per packet
-  wplist_dict_add_uint(stream, "sr", AIRPLAY_QUALITY_SAMPLE_RATE_DEFAULT); // sample rate
-  wplist_dict_add_uint(stream, "type", AIRPLAY_RTP_PAYLOADTYPE); // RTP type, 0x60 = 96 real time, 103 buffered
-  wplist_dict_add_bool(stream, "supportsDynamicStreamID", false);
-  wplist_dict_add_uint(stream, "streamConnectionID", session->session_id); // Hopefully fine since we have one stream per session
+
+  if (session->buffered_mode)
+    {
+      // Compression type: 1 LPCM, 2 ALAC, 4 AAC-LC, 8 AAC-ELD. The ALAC 48k/24
+      // profile (format 21) is ct=2, same as the realtime ALAC stream below;
+      // the AAC-LC stereo profile (format 23) is ct=4.
+      unsigned int buffered_ct = (session->buffered_format_id == AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO) ? 2 : 4;
+
+      wplist_dict_add_uint(stream, "audioFormat", AIRPLAY_BUFFERED_AUDIOFORMAT(session->buffered_format_id)); // 1 << format id, see comment on the #define
+      wplist_dict_add_uint(stream, "audioFormatIndex", session->buffered_format_id);
+      wplist_dict_add_string(stream, "audioMode", "default");
+      wplist_dict_add_uint(stream, "ct", buffered_ct);
+      wplist_dict_add_data(stream, "shk", session->shared_secret, AIRPLAY_AUDIO_KEY_LEN);
+      wplist_dict_add_uint(stream, "spf", session->master_session->buffered_spf); // frames per packet
+      wplist_dict_add_uint(stream, "type", AIRPLAY_BUFFERED_RTP_TYPE); // RTP type, 0x60 = 96 real time, 0x67 = 103 buffered
+
+      // streamConnections tells the receiver how to key the buffered data
+      // connection; streamConnectionKeyUseStreamEncryptionKey=true means "use
+      // the shk key already handed over above" rather than some other key
+      // exchange. Some receivers require this to be present even though the
+      // effect is the same as the implicit default.
+      plist_t stream_connections = plist_new_dict();
+      plist_t stream_connection_rtp = plist_new_dict();
+      wplist_dict_add_bool(stream_connection_rtp, "streamConnectionKeyUseStreamEncryptionKey", true);
+      plist_dict_set_item(stream_connections, "streamConnectionTypeRTP", stream_connection_rtp);
+      plist_dict_set_item(stream, "streamConnections", stream_connections);
+
+      wplist_dict_add_bool(stream, "supportsDynamicStreamID", true);
+      wplist_dict_add_string(stream, "clientID", "com.apple.Music");
+      // A full signed 64-bit value is expected here, not the 32-bit session id
+      wplist_dict_add_int(stream, "streamConnectionID", session->stream_connection_id);
+
+      DPRINTF(E_DBG, L_AIRPLAY,
+              "SETUP(stream) payload for '%s': audioFormat=%" PRIu64 ", audioFormatIndex=%u, ct=%u, spf=%u, type=%u (buffered), supportsDynamicStreamID=1, clientID=com.apple.Music, streamConnectionID=%" PRId64 ", streamConnections=RTP/useStreamEncryptionKey\n",
+              session->devname, (uint64_t)AIRPLAY_BUFFERED_AUDIOFORMAT(session->buffered_format_id), (unsigned)session->buffered_format_id,
+              buffered_ct, (unsigned)session->master_session->buffered_spf,
+              (unsigned)AIRPLAY_BUFFERED_RTP_TYPE, session->stream_connection_id);
+    }
+  else
+    {
+      wplist_dict_add_uint(stream, "audioFormat", 262144); // 0x40000 ALAC/44100/16/2
+      wplist_dict_add_string(stream, "audioMode", "default");
+      wplist_dict_add_uint(stream, "controlPort", session->control_svc->port);
+      wplist_dict_add_uint(stream, "ct", 2); // Compression type, 1 LPCM, 2 ALAC, 4 AAC-LC, 8 AAC-ELD
+      wplist_dict_add_bool(stream, "isMedia", true); // ?
+      wplist_dict_add_uint(stream, "latencyMax", 88200); // TODO how do these latencys work?
+      wplist_dict_add_uint(stream, "latencyMin", 11025); // AIRPLAY_AUDIO_LATENCY_MS in samples, see comment in rtp_sync_packet_next()
+      wplist_dict_add_data(stream, "shk", session->shared_secret, AIRPLAY_AUDIO_KEY_LEN);
+      wplist_dict_add_uint(stream, "spf", AIRPLAY_SAMPLES_PER_PACKET); // frames per packet
+      wplist_dict_add_uint(stream, "sr", AIRPLAY_QUALITY_SAMPLE_RATE_DEFAULT); // sample rate
+      wplist_dict_add_uint(stream, "type", AIRPLAY_RTP_PAYLOADTYPE); // RTP type, 0x60 = 96 real time, 103 buffered
+      wplist_dict_add_bool(stream, "supportsDynamicStreamID", false);
+      wplist_dict_add_uint(stream, "streamConnectionID", session->session_id); // Hopefully fine since we have one stream per session
+
+      DPRINTF(E_DBG, L_AIRPLAY,
+              "SETUP(stream) payload for '%s': audioFormat=%u, controlPort=%u, latencyMin=%u, latencyMax=%u, spf=%u, sr=%u, type=%u (realtime), supportsDynamicStreamID=%u, streamConnectionID=%u\n",
+              session->devname, 262144U, session->control_svc->port, 11025U, 88200U,
+              AIRPLAY_SAMPLES_PER_PACKET, AIRPLAY_QUALITY_SAMPLE_RATE_DEFAULT,
+              AIRPLAY_RTP_PAYLOADTYPE, 0U, session->session_id);
+    }
+
   streams = plist_new_array();
   plist_array_append_item(streams, stream);
-
-  DPRINTF(E_DBG, L_AIRPLAY,
-          "SETUP(stream) payload for '%s': audioFormat=%u, controlPort=%u, latencyMin=%u, latencyMax=%u, spf=%u, sr=%u, type=%u (realtime), supportsDynamicStreamID=%u, streamConnectionID=%u\n",
-          session->devname, 262144U, session->control_svc->port, 11025U, 88200U,
-          AIRPLAY_SAMPLES_PER_PACKET, AIRPLAY_QUALITY_SAMPLE_RATE_DEFAULT,
-          AIRPLAY_RTP_PAYLOADTYPE, 0U, session->session_id);
 
   root = plist_new_dict();
   plist_dict_set_item(root, "streams", streams);
@@ -2716,7 +3391,8 @@ payload_make_setpeers(struct evrtsp_request *req, struct airplay_session *sessio
 
   root = plist_new_array();
 
-  plist_array_append_item(root, plist_new_string(session->address));
+  // SETPEERS lists our own addresses, so the receiver can pick a PTP path
+  // back to us; it does not include the receiver's own address.
   if (session->local_v4_address)
     plist_array_append_item(root, plist_new_string(session->local_v4_address));
   if (session->local_v6_address)
@@ -2789,7 +3465,9 @@ payload_make_setup_session_ptp(struct evrtsp_request *req, struct airplay_sessio
   wplist_dict_add_string(timingpeerinfo, "ID", airplay_ptp_clock_uuid); // iOS sends a UUID, but where does it come from?
   wplist_dict_add_uint(timingpeerinfo, "DeviceType", 0);
   wplist_dict_add_int(timingpeerinfo, "ClockID", (int64_t)ptpd_clock_id_get()); // ClockID in plist is signed, so e.g. 0xf842885f71750008 -> -557733460333756408
-  wplist_dict_add_bool(timingpeerinfo, "SupportsClockPortMatchingOverride", false); // iOS says true, no idea what it means
+  // iOS sends true; only set for buffered sessions to keep the realtime
+  // path byte-identical to the existing behavior.
+  wplist_dict_add_bool(timingpeerinfo, "SupportsClockPortMatchingOverride", session->buffered_mode);
   plist_dict_set_item(timingpeerinfo, "Addresses", addresses);
 
   timingpeerlist = plist_new_array();
@@ -2803,7 +3481,7 @@ payload_make_setup_session_ptp(struct evrtsp_request *req, struct airplay_sessio
   wplist_dict_add_string(root, "macAddress", session->local_mac_address);
 
   wplist_dict_add_string(root, "groupUUID", session->group_uuid);
-  wplist_dict_add_bool(root, "groupContainsGroupLeader", false); // iOS Music app sets this to false, let's roll with that
+  wplist_dict_add_bool(root, "groupContainsGroupLeader", session->group_contains_leader); // Always false: group_uuid is always a generated per-session UUID
 
   plist_dict_set_item(root, "timingPeerInfo", timingpeerinfo);
   plist_dict_set_item(root, "timingPeerList", timingpeerlist);
@@ -2811,7 +3489,7 @@ payload_make_setup_session_ptp(struct evrtsp_request *req, struct airplay_sessio
   DPRINTF(E_DBG, L_AIRPLAY,
           "SETUP(session/PTP) payload for '%s': deviceID=%s, sessionUUID=%s, timingProtocol=PTP, macAddress=%s, groupUUID=%s, groupContainsGroupLeader=%u\n",
           session->devname, device_id_colon, session->session_uuid,
-          session->local_mac_address, session->group_uuid, 0U);
+          session->local_mac_address, session->group_uuid, (unsigned)session->group_contains_leader);
 
   ret = wplist_to_bin(&data, &len, root);
   plist_free(root);
@@ -3035,14 +3713,24 @@ start_failure(struct airplay_session *session)
     }
 
   // If our key was incorrect, or the device reset its pairings, then this
-  // function was called because the encrypted request (SETUP) timed out
-  if (device->auth_key)
+  // function was called because the encrypted request (SETUP) timed out.
+  //
+  // But not every start failure is an auth failure. If the receiver answered
+  // us and we simply could not use the answer, the keys are fine and throwing
+  // them away is actively harmful: the device drops to requires_auth and the
+  // user is sent chasing PIN prompts on a speaker that was never unpaired.
+  // Only clear the keys when the failure could plausibly BE an auth failure.
+  if (device->auth_key && !session->protocol_error)
     {
       DPRINTF(E_LOG, L_AIRPLAY, "Clearing '%s' pairing keys, you need to pair again\n", session->devname);
 
       free(device->auth_key);
       device->auth_key = NULL;
       device->requires_auth = 1;
+    }
+  else if (session->protocol_error)
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "Keeping '%s' pairing keys: the device answered, we could not use the reply\n", session->devname);
     }
 
   session_failure(session);
@@ -3221,6 +3909,8 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
   plist_t response;
   plist_t streams;
   plist_t stream;
+  plist_t stream_connections;
+  plist_t stream_connection_rtp;
   plist_t item;
   uint64_t uintval;
   int ret;
@@ -3248,13 +3938,6 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
       goto error;
     }
 
-  item = plist_dict_get_item(stream, "dataPort");
-  if (item)
-    {
-      plist_get_uint_val(item, &uintval);
-      session->data_port = uintval;
-    }
-
   item = plist_dict_get_item(stream, "controlPort");
   if (item)
     {
@@ -3262,19 +3945,83 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
       session->control_port = uintval;
     }
 
-  if (session->data_port == 0 || session->control_port == 0)
+  if (session->buffered_mode)
     {
-      DPRINTF(E_LOG, L_AIRPLAY, "Missing port number in reply from '%s' (d=%u, c=%u)\n", session->devname, session->data_port, session->control_port);
-      goto error;
+      // A receiver that honours the streamConnections dict we sent in
+      // SETUP(stream) answers in kind: the data port comes back as
+      // streamConnections.streamConnectionTypeRTP.streamConnectionKeyPort
+      // rather than as a flat dataPort. Prefer that, and fall back to
+      // dataPort for receivers that ignore streamConnections.
+      stream_connections = plist_dict_get_item(stream, "streamConnections");
+      if (stream_connections)
+	{
+	  stream_connection_rtp = plist_dict_get_item(stream_connections, "streamConnectionTypeRTP");
+	  if (stream_connection_rtp)
+	    {
+	      item = plist_dict_get_item(stream_connection_rtp, "streamConnectionKeyPort");
+	      if (item)
+		{
+		  plist_get_uint_val(item, &uintval);
+		  session->buffered_data_port = uintval;
+		  DPRINTF(E_DBG, L_AIRPLAY, "Buffered data port from streamConnections for '%s': %u\n",
+		          session->devname, session->buffered_data_port);
+		}
+	    }
+	}
+
+      if (session->buffered_data_port == 0)
+	{
+	  item = plist_dict_get_item(stream, "dataPort");
+	  if (item)
+	    {
+	      plist_get_uint_val(item, &uintval);
+	      session->buffered_data_port = uintval;
+	    }
+	}
+
+      if (session->buffered_data_port == 0)
+	{
+	  // A missing data port means the receiver answered but we cannot use
+	  // the reply; this is not an auth failure, so pairing keys are kept
+	  // (see session->protocol_error and start_failure()).
+	  session->protocol_error = true;
+	  DPRINTF(E_LOG, L_AIRPLAY, "Missing data port in buffered SETUP reply from '%s'\n", session->devname);
+	  goto error;
+	}
+
+      DPRINTF(E_DBG, L_AIRPLAY, "Negotiated buffered streaming session; ports d=%u c=%u e=%u\n", session->buffered_data_port, session->control_port, session->events_port);
+
+      ret = airplay_buffered_start(&session->buffered, evbase_player, session->address, session->buffered_data_port,
+                                    session->shared_secret, session->shared_secret_len, session->buffered_format_id << 24);
+      if (ret < 0)
+	{
+	  DPRINTF(E_LOG, L_AIRPLAY, "Could not start buffered AirPlay stream to '%s'\n", session->devname);
+	  goto error;
+	}
     }
-
-  DPRINTF(E_DBG, L_AIRPLAY, "Negotiated UDP streaming session; ports d=%u c=%u e=%u\n", session->data_port, session->control_port, session->events_port);
-
-  session->server_fd = net_connect(session->address, session->data_port, SOCK_DGRAM, "AirPlay data");
-  if (session->server_fd < 0)
+  else
     {
-      DPRINTF(E_LOG, L_AIRPLAY, "Could not connect to data port of '%s'\n", session->devname);
-      goto error;
+      item = plist_dict_get_item(stream, "dataPort");
+      if (item)
+	{
+	  plist_get_uint_val(item, &uintval);
+	  session->data_port = uintval;
+	}
+
+      if (session->data_port == 0 || session->control_port == 0)
+	{
+	  DPRINTF(E_LOG, L_AIRPLAY, "Missing port number in reply from '%s' (d=%u, c=%u)\n", session->devname, session->data_port, session->control_port);
+	  goto error;
+	}
+
+      DPRINTF(E_DBG, L_AIRPLAY, "Negotiated UDP streaming session; ports d=%u c=%u e=%u\n", session->data_port, session->control_port, session->events_port);
+
+      session->server_fd = net_connect(session->address, session->data_port, SOCK_DGRAM, "AirPlay data");
+      if (session->server_fd < 0)
+	{
+	  DPRINTF(E_LOG, L_AIRPLAY, "Could not connect to data port of '%s'\n", session->devname);
+	  goto error;
+	}
     }
 
   session->state = AIRPLAY_STATE_SETUP;
@@ -3435,6 +4182,108 @@ response_handler_flush(struct evrtsp_request *req, struct airplay_session *sessi
   return AIRPLAY_SEQ_CONTINUE;
 }
 
+// A FLUSHBUFFERED invalidates the receiver's anchor, so a fresh
+// SETRATEANCHORTIME must be sent before playback resumes (anchor_pending);
+// airplay_write() picks this up on the next CONNECTED->STREAMING transition.
+static enum airplay_seq_type
+response_handler_flush_buffered(struct evrtsp_request *req, struct airplay_session *session)
+{
+  session->state = AIRPLAY_STATE_CONNECTED;
+  session->anchor_pending = true;
+  session->anchor_confirmed = false; // Resumed audio must wait for the fresh anchor
+  session->master_session->buffered_marker_pending = true;
+  // Playback resumes at a new wall time, so the old rtptime->networkTime
+  // mapping no longer holds; the next anchor establishes a fresh one
+  session->master_session->buffered_anchor_mapped = false;
+  return AIRPLAY_SEQ_CONTINUE;
+}
+
+static bool
+master_session_has_confirmed_anchor(struct airplay_master_session *ams)
+{
+  struct airplay_session *session;
+
+  for (session = airplay_sessions; session; session = session->next)
+    {
+      if (session->master_session == ams && session->buffered_mode && session->anchor_confirmed)
+	return true;
+    }
+
+  return false;
+}
+
+// Runs with proceed_on_rtsp_not_ok, since a rejected anchor is retryable: the
+// suspected cause of an in-band or RTSP-level rejection is that the anchor
+// raced the receiver's lock onto our PTP timeline (it can arrive under a
+// second after SETPEERS). Audio written in the meantime is just held by the
+// receiver, so streaming state is unaffected while we retry.
+static enum airplay_seq_type
+response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session *session)
+{
+  struct timeval tv = { AIRPLAY_BUFFERED_ANCHOR_RETRY_WAIT_MS / 1000, (AIRPLAY_BUFFERED_ANCHOR_RETRY_WAIT_MS % 1000) * 1000 };
+  plist_t response = NULL;
+  char *xml;
+  size_t len;
+  int64_t inband_status = 0;
+
+  // Some receivers can return 200 OK while rejecting the anchor IN-BAND with
+  // a plist body carrying a nonzero status. Parse the body once up front;
+  // acceptance requires 200 AND in-band status 0.
+  len = evbuffer_get_length(req->input_buffer);
+  if (len > 0 && wplist_from_evbuf(&response, req->input_buffer) == 0)
+    {
+      plist_t item = plist_dict_get_item(response, "status");
+      if (item)
+	plist_get_int_val(item, &inband_status);
+    }
+
+  if (req->response_code == RTSP_OK && inband_status == 0)
+    {
+      if (response)
+	plist_free(response);
+      DPRINTF(E_INFO, L_AIRPLAY, "SETRATEANCHORTIME accepted by '%s', starting buffered audio\n", session->devname);
+      session->anchor_confirmed = true;
+      session->anchor_retries_left = AIRPLAY_BUFFERED_ANCHOR_RETRIES_MAX;
+      return AIRPLAY_SEQ_CONTINUE;
+    }
+
+  // The response body may say why the anchor was rejected
+  if (response)
+    {
+      xml = wplist_to_xml(response);
+      if (xml)
+	{
+	  DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME error response from '%s' (rtsp %d, in-band status %" PRIi64 "):\n%s\n",
+	          session->devname, req->response_code, inband_status, xml);
+	  free(xml);
+	}
+      plist_free(response);
+    }
+  else if (len > 0)
+    DHEXDUMP(E_LOG, L_AIRPLAY, evbuffer_pullup(req->input_buffer, -1), (int)len, "SETRATEANCHORTIME error response (not a plist)\n");
+
+  if (session->anchor_retries_left <= 0)
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME repeatedly rejected by '%s', giving up\n", session->devname);
+      return AIRPLAY_SEQ_ABORT;
+    }
+
+  session->anchor_retries_left--;
+  DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME rejected by '%s' (%d %s), retrying in %d ms (%d retries left)\n",
+          session->devname, req->response_code, req->response_code_line, AIRPLAY_BUFFERED_ANCHOR_RETRY_WAIT_MS, session->anchor_retries_left);
+
+  // If no receiver is playing off the stored mapping yet, drop it so the
+  // retry computes a fresh now+lead anchor (a stale point drifts into the
+  // past across retries). Once any session has a confirmed anchor the mapping
+  // is live and the retry must re-send the same point.
+  if (!master_session_has_confirmed_anchor(session->master_session))
+    session->master_session->buffered_anchor_mapped = false;
+
+  evtimer_add(session->anchorev, &tv);
+
+  return AIRPLAY_SEQ_CONTINUE;
+}
+
 static enum airplay_seq_type
 response_handler_teardown(struct evrtsp_request *req, struct airplay_session *session)
 {
@@ -3481,6 +4330,55 @@ response_handler_info_generic(struct evrtsp_request *req, struct airplay_session
   if (item)
     plist_get_uint_val(item, &session->statusflags);
 
+  // Buffered AirPlay 2 capability gate. supportedAudioFormatsExtended/
+  // bufferStream is a list of format ids the receiver accepts over the
+  // buffered (type 103) transport; generic over whichever format id
+  // session->buffered_format_id resolved to (AAC-LC stereo or ALAC 48k/24).
+  item = plist_dict_get_item(response, "supportedAudioFormatsExtended");
+  if (item)
+    {
+      plist_t buffer_stream = plist_dict_get_item(item, "bufferStream");
+      if (buffer_stream)
+	{
+	  uint32_t n = plist_array_get_size(buffer_stream);
+	  plist_t elm;
+	  uint64_t fmt;
+	  uint32_t idx;
+
+	  for (idx = 0; idx < n; idx++)
+	    {
+	      elm = plist_array_get_item(buffer_stream, idx);
+	      if (!elm)
+		continue;
+
+	      plist_get_uint_val(elm, &fmt);
+	      if (fmt == session->buffered_format_id)
+		{
+		  session->device_supports_buffered_51 = true;
+		  break;
+		}
+	    }
+	}
+    }
+
+  // Some receivers declare the same capability differently: supportedFormats/
+  // bufferStream is an integer bitmask with the format ids as bit positions
+  // (same convention as the SETUP(stream) audioFormat field, see
+  // AIRPLAY_BUFFERED_AUDIOFORMAT)
+  item = plist_dict_get_item(response, "supportedFormats");
+  if (item && !session->device_supports_buffered_51)
+    {
+      plist_t buffer_stream = plist_dict_get_item(item, "bufferStream");
+      if (buffer_stream)
+	{
+	  uint64_t mask = 0;
+
+	  plist_get_uint_val(buffer_stream, &mask);
+	  if (mask & AIRPLAY_BUFFERED_AUDIOFORMAT(session->buffered_format_id))
+	    session->device_supports_buffered_51 = true;
+	}
+    }
+
   // The full /info plist is the only place a receiver declares its audio
   // capabilities (audioFormats, output device attributes), which we will need
   // for multichannel output detection. Dump it so a debug log captures it.
@@ -3493,6 +4391,51 @@ response_handler_info_generic(struct evrtsp_request *req, struct airplay_session
   DPRINTF(E_DBG, L_AIRPLAY, "Status flags from '%s' was %" PRIu64 ": cable attached %d, one time pairing %d, password %d, PIN %d\n",
     session->devname, session->statusflags, (bool)(session->statusflags & AIRPLAY_FLAG_AUDIO_CABLE_ATTACHED), (bool)(session->statusflags & AIRPLAY_FLAG_ONE_TIME_PAIRING_REQUIRED),
     (bool)(session->statusflags & AIRPLAY_FLAG_PASSWORD_REQUIRED), (bool)(session->statusflags & AIRPLAY_FLAG_PIN_REQUIRED));
+
+  // Buffered mode decision: only relevant if the device is configured for it
+  // (session->wants_buffered_51). If the device also advertises the
+  // capability (checked against whichever format id session->buffered_format_id
+  // resolved to, including ALAC 48k/24 - the capability check above is
+  // generic), swap in a buffered master session; a failure to do so aborts
+  // the session outright (no silent downgrade mid negotiation). If the device
+  // doesn't advertise it, we simply proceed with the realtime ALAC master
+  // session created in session_make().
+  if (session->wants_buffered_51)
+    {
+      if (session->device_supports_buffered_51)
+	{
+	  struct airplay_master_session *new_ams;
+	  struct airplay_master_session *old_ams;
+
+	  new_ams = master_session_make(&device->quality, session->master_session->use_ptp, true, session->wants_buffered_alac24);
+	  if (!new_ams)
+	    {
+	      DPRINTF(E_LOG, L_AIRPLAY, "Could not create buffered master session for '%s'\n", session->devname);
+	      return AIRPLAY_SEQ_ABORT;
+	    }
+
+	  // Swap the pointer before cleaning up the old master session: cleanup
+	  // only frees a master session that no session references any more, so
+	  // it must run after this session has been repointed at new_ams, or it
+	  // will see this session still attached to old_ams and refuse to free
+	  // it (leaking it, since nothing else may ever reference it again).
+	  old_ams = session->master_session;
+	  session->master_session = new_ams;
+	  master_session_cleanup(old_ams);
+
+	  session->buffered_mode = true;
+	  session->anchor_pending = true;
+
+	  DPRINTF(E_INFO, L_AIRPLAY, "Device '%s' advertises buffered format id %u; streaming via buffered protocol (%s)\n",
+	          session->devname, session->buffered_format_id,
+	          session->buffered_format_id == AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO ? "ALAC24" : "AAC-LC stereo");
+	}
+      else
+	{
+	  DPRINTF(E_INFO, L_AIRPLAY, "Device '%s' is configured for buffered mode, but does not advertise buffered format id %u; falling back to realtime ALAC\n",
+	          session->devname, session->buffered_format_id);
+	}
+    }
 
   // Identify next sequence based on response
   if (session->statusflags & AIRPLAY_FLAG_ONE_TIME_PAIRING_REQUIRED)
@@ -3825,11 +4768,16 @@ static struct airplay_seq_definition airplay_seq_definition[] =
   // error shortly after a TEARDOWN, and a delayed retry reliably succeeds.
   { AIRPLAY_SEQ_PAIR_TRANSIENT, session_pair_success, start_retry },
   { AIRPLAY_SEQ_FEEDBACK, NULL, session_failure },
+  { AIRPLAY_SEQ_SEND_ANCHOR, NULL, session_failure },
+  { AIRPLAY_SEQ_FLUSH_BUFFERED, session_status, session_failure },
 };
 
 // The size of the second array dimension MUST at least be the size of largest
-// sequence + 1, because then we can count on a zero terminator when iterating
-static struct airplay_seq_request airplay_seq_request[][7] =
+// sequence + 1, because then we can count on a zero terminator when iterating.
+// The buffered start adds three POSTs to START_PLAYBACK (which is also the
+// longest sequence), so size for that plus the optional auth-setup step and
+// the terminator.
+static struct airplay_seq_request airplay_seq_request[][10] =
 {
   {
     { AIRPLAY_SEQ_START, "GET /info", EVRTSP_REQ_GET, NULL, response_handler_info_start, NULL, "/info", false },
@@ -3843,7 +4791,14 @@ static struct airplay_seq_request airplay_seq_request[][7] =
     { AIRPLAY_SEQ_START_PLAYBACK, "SETUP (session)", EVRTSP_REQ_SETUP, payload_make_setup_session, response_handler_setup_session, "application/x-apple-binary-plist", NULL, true },
     { AIRPLAY_SEQ_START_PLAYBACK, "RECORD", EVRTSP_REQ_RECORD, payload_make_record, response_handler_record, NULL, NULL, false },
     { AIRPLAY_SEQ_START_PLAYBACK, "SETPEERS", EVRTSP_REQ_SETPEERS, payload_make_setpeers, NULL, "/peer-list-changed", NULL, false },
+    // Buffered mode only (payload_make skips them otherwise): the MediaRemote
+    // command table and audio-mode POST bracket SETUP(stream), see
+    // payload_make_command_supported_commands
+    { AIRPLAY_SEQ_START_PLAYBACK, "POST /command", EVRTSP_REQ_POST, payload_make_command_supported_commands, NULL, "application/x-apple-binary-plist", "/command", false },
+    // The empty command table is followed by the full one
+    { AIRPLAY_SEQ_START_PLAYBACK, "POST /command (full)", EVRTSP_REQ_POST, payload_make_command_supported_commands_full, NULL, "application/x-apple-binary-plist", "/command", false },
     { AIRPLAY_SEQ_START_PLAYBACK, "SETUP (stream)", EVRTSP_REQ_SETUP, payload_make_setup_stream, response_handler_setup_stream, "application/x-apple-binary-plist", NULL, false },
+    { AIRPLAY_SEQ_START_PLAYBACK, "POST /audioMode", EVRTSP_REQ_POST, payload_make_audio_mode, NULL, "application/x-apple-binary-plist", "/audioMode", false },
     // Some devices (e.g. Sonos Symfonisk) don't register the volume if it isn't last
     { AIRPLAY_SEQ_START_PLAYBACK, "SET_PARAMETER (volume)", EVRTSP_REQ_SET_PARAMETER, payload_make_set_volume, response_handler_volume_start, "text/parameters", NULL, true },
   },
@@ -3891,6 +4846,12 @@ static struct airplay_seq_request airplay_seq_request[][7] =
   },
   {
     { AIRPLAY_SEQ_FEEDBACK, "POST /feedback", EVRTSP_REQ_POST, NULL, NULL, NULL, "/feedback", true },
+  },
+  {
+    { AIRPLAY_SEQ_SEND_ANCHOR, "SETRATEANCHORTIME", EVRTSP_REQ_SETRATEANCHORTIME, payload_make_send_anchor, response_handler_send_anchor, "application/x-apple-binary-plist", NULL, true },
+  },
+  {
+    { AIRPLAY_SEQ_FLUSH_BUFFERED, "FLUSHBUFFERED", EVRTSP_REQ_FLUSHBUFFERED, payload_make_flush_buffered, response_handler_flush_buffered, "application/x-apple-binary-plist", NULL, false },
   },
 };
 
@@ -4582,7 +5543,7 @@ airplay_device_flush(struct output_device *device, int callback_id)
 
   session->callback_id = callback_id;
 
-  sequence_start(AIRPLAY_SEQ_FLUSH, session, NULL, "flush");
+  sequence_start(session->buffered_mode ? AIRPLAY_SEQ_FLUSH_BUFFERED : AIRPLAY_SEQ_FLUSH, session, NULL, "flush");
 
   return 1;
 }
@@ -4640,8 +5601,11 @@ airplay_write(struct output_buffer *obuf)
 	  // rtptime corresponds to the pts we are given by the player.
 	  timestamp_set(ams, obuf->pts);
 
-	  // Sends sync packets to new sessions, and if it is sync time then also to old sessions
-	  packets_sync_send(ams);
+	  // Sends sync packets to new sessions, and if it is sync time then also
+	  // to old sessions. Buffered sessions have no UDP sync/retransmit
+	  // buffer, so this is realtime-only.
+	  if (!ams->buffered)
+	    packets_sync_send(ams);
 
 	  // TODO avoid this copy
 	  evbuffer_add(ams->input_buffer, obuf->data[i].buffer, obuf->data[i].bufsize);
@@ -4653,7 +5617,10 @@ airplay_write(struct output_buffer *obuf)
 	      evbuffer_remove(ams->input_buffer, ams->rawbuf, ams->rawbuf_size);
 	      ams->input_buffer_samples -= ams->samples_per_packet;
 
-	      packets_send(ams);
+	      if (ams->buffered)
+		buffered_packets_send(ams);
+	      else
+		packets_send(ams);
 	    }
 	}
     }
@@ -4662,14 +5629,27 @@ airplay_write(struct output_buffer *obuf)
   // initialization sync and rtp packets via packets_sync_send and packets_send)
   for (session = airplay_sessions; session; session = session->next)
     {
-      if (session->state != AIRPLAY_STATE_CONNECTED)
-	continue;
+      if (session->state == AIRPLAY_STATE_CONNECTED)
+	{
+	  // Start sending progress to keep ATV's alive
+	  if (!event_pending(keep_alive_timer, EV_TIMEOUT, NULL))
+	    evtimer_add(keep_alive_timer, &keep_alive_tv);
 
-      // Start sending progress to keep ATV's alive
-      if (!event_pending(keep_alive_timer, EV_TIMEOUT, NULL))
-	evtimer_add(keep_alive_timer, &keep_alive_tv);
+	  session->state = AIRPLAY_STATE_STREAMING;
+	}
 
-      session->state = AIRPLAY_STATE_STREAMING;
+      // Buffered receivers don't start playing until they've received a
+      // rate=1 SETRATEANCHORTIME, and audio is held until the receiver
+      // accepts it (see the anchor_confirmed gate in buffered_frame_send) so
+      // the first delivered frame carries exactly the anchor's rtpTime.
+      // anchor_pending is set when buffered_mode is first decided and again
+      // after every FLUSHBUFFERED, which invalidates the receiver's previous
+      // anchor.
+      if (session->state == AIRPLAY_STATE_STREAMING && session->buffered_mode && session->anchor_pending)
+	{
+	  sequence_start(AIRPLAY_SEQ_SEND_ANCHOR, session, NULL, "anchor");
+	  session->anchor_pending = false;
+	}
       // Make a cb?
     }
 }
