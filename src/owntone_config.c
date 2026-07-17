@@ -127,6 +127,7 @@ static const char *api_settable_keys[] = {
   "start_buffer_ms",
   "uncompressed_alac",
   "device_removal_grace_period",
+  "buffered_audio_enabled",
   NULL
 };
 

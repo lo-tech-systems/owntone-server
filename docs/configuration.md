@@ -50,7 +50,9 @@ Path to the directory or directories containing the media to index (your library
 
 ### general: buffered_audio_enabled
 
-Boolean, default `false`. Config-file setting only (no live-reload endpoint).
+Boolean, default `false`. Also settable at runtime via
+`PUT /api/settings/player/buffered_audio_enabled` (takes effect on the next
+output start, no restart required).
 
 When `true`, an AirPlay 2 output left on the `auto` mode preference prefers
 buffered AAC-LC playback (`airplay2_buffered`) over realtime on any device

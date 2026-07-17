@@ -188,6 +188,7 @@ static const struct setting_entry settings_table[] = {
   { "player", "start_buffer_ms",   SETTING_TYPE_INT,  "start_buffer_ms"   },
   { "player", "uncompressed_alac",           SETTING_TYPE_BOOL, "uncompressed_alac"           },
   { "player", "device_removal_grace_period", SETTING_TYPE_INT,  "device_removal_grace_period" },
+  { "player", "buffered_audio_enabled",      SETTING_TYPE_BOOL, "buffered_audio_enabled"      },
 };
 
 static const struct setting_entry *

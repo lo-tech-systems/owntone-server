@@ -386,6 +386,7 @@ There are no category-listing or option-listing endpoints in this build.
 | `/api/settings/misc/ipv6` | boolean | IPv6 enable/disable, restart required |
 | `/api/settings/player/start_buffer_ms` | integer | Start buffer in milliseconds, valid range `300` to `3500`, restart required |
 | `/api/settings/player/uncompressed_alac` | boolean | ALAC output preference, restart required |
+| `/api/settings/player/buffered_audio_enabled` | boolean | Prefer buffered AAC-LC over realtime for AirPlay 2 outputs left on `auto`; takes effect on the next output start |
 
 ### Get a setting
 
