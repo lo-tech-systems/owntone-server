@@ -88,6 +88,11 @@ struct settings_ctx
   // graph, e.g. to upmix stereo to 5.1 (ffmpeg filter syntax "name=args").
   // NULL if no extra filter is required by the profile.
   const char *upmix_filter;
+  // AAC quantization search ("aac_coder" private option), NULL for the
+  // encoder default (twoloop). The default's rate-distortion search is
+  // signal-dependent and can exceed realtime for 6 active full-band channels
+  // on small in-order cores, so the 5.1 profiles select "fast".
+  const char *aac_coder;
 
   // Video settings
   enum AVCodecID video_codec;
@@ -259,6 +264,9 @@ init_settings(struct settings_ctx *settings, enum transcode_profile profile, str
 	// a stereo source using frequency-domain steering, rather than a
 	// static pan matrix.
 	settings->upmix_filter = "surround=chl_in=stereo:chl_out=5.1:lfe=1:lfe_low=80:lfe_high=120";
+	// Six active full-band channels make the default quantization search
+	// slower than realtime on small in-order cores; see settings_ctx.
+	settings->aac_coder = "fast";
 	break;
 
       // Raw AAC-LC frames at 48kHz 5.1 (no container), same layout and
@@ -288,6 +296,7 @@ init_settings(struct settings_ctx *settings, enum transcode_profile profile, str
 	// reference an input channel, so silence must be written as an explicit
 	// zero gain (FC=0*FL), not a bare constant (FC=0).
 	settings->upmix_filter = "pan=5.1|FL=1.0*FL|FR=1.0*FR|FC=0*FL|LFE=0.5*FL+0.5*FR|BL=0*FL|BR=0*FL";
+	settings->aac_coder = "fast";
 	break;
 
       // Raw AAC-LC frames at 48kHz stereo (no container) - the buffered
@@ -539,6 +548,9 @@ stream_add(struct encode_ctx *ctx, struct stream_ctx *s, enum AVCodecID codec_id
   // an issue because outputs/cast.c relies on 20 ms frames)
   if (codec_id == AV_CODEC_ID_OPUS)
     av_dict_set(&options, "frame_duration", "20", 0);
+
+  if (codec_id == AV_CODEC_ID_AAC && ctx->settings.aac_coder)
+    av_dict_set(&options, "aac_coder", ctx->settings.aac_coder, 0);
 
   ret = avcodec_open2(s->codec, NULL, &options);
   if (ret < 0)

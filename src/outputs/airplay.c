@@ -324,6 +324,9 @@ struct airplay_master_session
   // Non-NULL iff buffered_kind != AIRPLAY_BUFFERED_KIND_NONE. Owns the encode
   // context and PCM/frame queues for this ams; runs on its own thread.
   struct airplay_encoder *encoder;
+  // An encoder failure is acted on once; the ams lives for a few more ticks
+  // until the deferred session teardown frees it.
+  bool encoder_failure_handled;
 
   struct rtp_session *rtp_session;
 
@@ -5875,8 +5878,10 @@ airplay_write(struct output_buffer *obuf)
 	      frame = next_frame;
 	    }
 
-	  if (airplay_encoder_failed(ams->encoder))
+	  if (airplay_encoder_failed(ams->encoder) && !ams->encoder_failure_handled)
 	    {
+	      ams->encoder_failure_handled = true;
+
 	      DPRINTF(E_LOG, L_AIRPLAY, "Buffered encoder (kind %d) failed, ending its sessions\n", ams->buffered_kind);
 
 	      for (session = airplay_sessions; session; session = session->next)
