@@ -972,9 +972,12 @@ jsonapi_request(struct httpd_request *hreq)
       case HTTP_NOTFOUND:            /* 404 Not Found */
 	httpd_send_error(hreq, status_code, "Not Found");
 	break;
-      case HTTP_SERVUNAVAIL:            /* 503 */
-        httpd_send_error(hreq, status_code, "Service Unavailable");
-        break;
+      case HTTP_SERVUNAVAIL:            /* 503 Service Unavailable */
+	if (evbuffer_get_length(hreq->out_body) > 0)
+	  httpd_send_reply(hreq, status_code, "Service Unavailable", HTTPD_SEND_NO_GZIP);
+	else
+	  httpd_send_error(hreq, status_code, "Service Unavailable");
+	break;
       case HTTP_INTERNAL:            /* 500 Internal Server Error */
 	if (evbuffer_get_length(hreq->out_body) > 0)
 	  httpd_send_reply(hreq, status_code, "Internal Server Error", HTTPD_SEND_NO_GZIP);
