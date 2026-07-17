@@ -91,7 +91,8 @@ struct settings_ctx
   // AAC quantization search ("aac_coder" private option), NULL for the
   // encoder default (twoloop). The default's rate-distortion search is
   // signal-dependent and can exceed realtime for 6 active full-band channels
-  // on small in-order cores, so the 5.1 profiles select "fast".
+  // on small in-order cores, so the 5.1 profiles select the coder by CPU
+  // class (aac_coder_select).
   const char *aac_coder;
 
   // Video settings
@@ -203,6 +204,62 @@ struct filters
 
 /* -------------------------- PROFILE CONFIGURATION ------------------------ */
 
+// Picks the AAC quantization search for the multichannel profiles by CPU
+// class. The encoder default (twoloop) gives the best quality but its
+// signal-dependent search cost can exceed realtime for six active full-band
+// channels on small in-order ARM cores (ARM11, Cortex-A7/A35/A53/A55 - e.g.
+// Pi Zero 2 W / Pi 3); those get "fast". Any out-of-order core (Cortex-A57/
+// A72 and later - e.g. Pi 4/5) or a non-ARM host keeps the default. Decided
+// from the "CPU part" ids in /proc/cpuinfo; on big.LITTLE one big core is
+// enough to keep the default.
+static const char *
+aac_coder_select(void)
+{
+  static bool decided;
+  static const char *coder;
+  FILE *fp;
+  char line[256];
+  unsigned int part;
+  bool small_only = true;
+  bool any_part = false;
+
+  if (decided)
+    return coder;
+
+  fp = fopen("/proc/cpuinfo", "r");
+  if (fp)
+    {
+      while (fgets(line, sizeof(line), fp))
+	{
+	  // Line format "CPU part\t: 0xd03"; %x accepts the 0x prefix and the
+	  // format's spaces match any run of whitespace
+	  if (sscanf(line, "CPU part : %x", &part) != 1)
+	    continue;
+
+	  any_part = true;
+	  switch (part)
+	    {
+	      case 0xb76: // ARM1176
+	      case 0xc07: // Cortex-A7
+	      case 0xd04: // Cortex-A35
+	      case 0xd03: // Cortex-A53
+	      case 0xd05: // Cortex-A55
+		break;
+	      default:
+		small_only = false;
+	    }
+	}
+      fclose(fp);
+    }
+
+  coder = (any_part && small_only) ? "fast" : NULL;
+  decided = true;
+
+  DPRINTF(E_INFO, L_XCODE, "Multichannel AAC quantization search: %s\n", coder ? coder : "encoder default");
+
+  return coder;
+}
+
 static int
 init_settings(struct settings_ctx *settings, enum transcode_profile profile, struct media_quality *quality)
 {
@@ -264,9 +321,7 @@ init_settings(struct settings_ctx *settings, enum transcode_profile profile, str
 	// a stereo source using frequency-domain steering, rather than a
 	// static pan matrix.
 	settings->upmix_filter = "surround=chl_in=stereo:chl_out=5.1:lfe=1:lfe_low=80:lfe_high=120";
-	// Six active full-band channels make the default quantization search
-	// slower than realtime on small in-order cores; see settings_ctx.
-	settings->aac_coder = "fast";
+	settings->aac_coder = aac_coder_select();
 	break;
 
       // Raw AAC-LC frames at 48kHz 5.1 (no container), same layout and
@@ -296,7 +351,7 @@ init_settings(struct settings_ctx *settings, enum transcode_profile profile, str
 	// reference an input channel, so silence must be written as an explicit
 	// zero gain (FC=0*FL), not a bare constant (FC=0).
 	settings->upmix_filter = "pan=5.1|FL=1.0*FL|FR=1.0*FR|FC=0*FL|LFE=0.5*FL+0.5*FR|BL=0*FL|BR=0*FL";
-	settings->aac_coder = "fast";
+	settings->aac_coder = aac_coder_select();
 	break;
 
       // Raw AAC-LC frames at 48kHz stereo (no container) - the buffered
