@@ -62,6 +62,9 @@
 
 // Maximum number of pipes to watch for data
 #define PIPE_MAX_WATCH 4
+// How often to check that our watches are still attached to the fifo that the
+// path points at, and to retry watches that could not be attached
+#define PIPE_WATCH_HEALTH_INTERVAL 30
 // Max number of bytes to read from a pipe at a time
 #define PIPE_READ_MAX 65536
 // Max number of bytes to buffer from metadata pipes
@@ -92,6 +95,7 @@ struct pipe
   int id;               // The mfi id of the pipe
   int fd;               // File descriptor
   bool is_autostarted;  // We autostarted the pipe (and we will autostop)
+  bool watch_failed;    // Reattaching the watch failed, don't log repeat attempts
   char *path;           // Path
   enum pipetype type;   // PCM (audio) or metadata
   event_callback_fn cb; // Callback when there is data to read
@@ -147,6 +151,9 @@ static char *pipe_path;
 static int pipe_autostart;
 // The synthetic id used for the config-driven pipe (fixed)
 static int pipe_autostart_id;
+
+// Timer that keeps the watches in pipe_watch_list attached
+static struct event *pipe_watch_health_ev;
 
 // Global list of pipes we are watching (if watching/autostart is enabled)
 static struct pipe *pipe_watch_list;
@@ -206,7 +213,8 @@ pipe_open(const char *path, bool silent)
   fd = open(path, O_RDONLY | O_NONBLOCK);
   if (fd < 0)
     {
-      DPRINTF(E_LOG, L_PLAYER, "Could not open pipe for reading '%s': %s\n", path, strerror(errno));
+      if (!silent)
+	DPRINTF(E_LOG, L_PLAYER, "Could not open pipe for reading '%s': %s\n", path, strerror(errno));
       goto error;
     }
 
@@ -244,7 +252,7 @@ watch_add(struct pipe *pipe)
 {
   bool silent;
 
-  silent = (pipe->type == PIPE_METADATA);
+  silent = (pipe->type == PIPE_METADATA) || pipe->watch_failed;
   pipe->fd = pipe_open(pipe->path, silent);
   if (pipe->fd < 0)
     return -1;
@@ -284,6 +292,29 @@ watch_reset(struct pipe *pipe)
   watch_del(pipe);
 
   return watch_add(pipe);
+}
+
+// A watch stops working, without any error being reported, if the fifo it was
+// opened on is deleted and then recreated by someone else: our fd stays valid,
+// but it refers to the old, unlinked fifo, so data written to the new one never
+// wakes us. Comparing the fd to the path detects that, and also covers a watch
+// we never managed to attach because the fifo did not exist yet.
+static bool
+watch_is_stale(struct pipe *pipe)
+{
+  struct stat sb_path;
+  struct stat sb_fd;
+
+  if (pipe->fd < 0)
+    return true;
+
+  if (stat(pipe->path, &sb_path) < 0)
+    return true;
+
+  if (fstat(pipe->fd, &sb_fd) < 0)
+    return true;
+
+  return (sb_path.st_ino != sb_fd.st_ino) || (sb_path.st_dev != sb_fd.st_dev);
 }
 
 static void
@@ -771,6 +802,39 @@ pipe_watch_update(void *arg, int *retval)
   return COMMAND_END;
 }
 
+// Reattaches any watch that is not (or no longer) reading the fifo its path
+// points at, so that autostart keeps working across a fifo being recreated or
+// showing up later than we did
+static void
+pipe_watch_health_cb(evutil_socket_t fd, short event, void *arg)
+{
+  struct timeval tv = { PIPE_WATCH_HEALTH_INTERVAL, 0 };
+  struct pipe *pipe;
+  int ret;
+
+  for (pipe = pipe_watch_list; pipe; pipe = pipe->next)
+    {
+      // The pipe we autostarted is reset by pipe_watch_reset when playback stops
+      if (pipe->id == pipe_autostart_id)
+	continue;
+
+      if (!watch_is_stale(pipe))
+	continue;
+
+      ret = watch_reset(pipe);
+      if (ret < 0)
+	{
+	  pipe->watch_failed = true; // Silences repeat attempts until we succeed
+	  continue;
+	}
+
+      DPRINTF(E_LOG, L_PLAYER, "Pipe watch (re)attached: '%s'\n", pipe->path);
+      pipe->watch_failed = false;
+    }
+
+  evtimer_add(pipe_watch_health_ev, &tv);
+}
+
 static void *
 pipe_thread_run(void *arg)
 {
@@ -890,8 +954,12 @@ pipe_metadata_watch_add(void *arg)
 static void
 pipe_thread_start(void)
 {
+  struct timeval tv = { PIPE_WATCH_HEALTH_INTERVAL, 0 };
+
   CHECK_NULL(L_PLAYER, evbase_pipe = event_base_new());
   CHECK_NULL(L_PLAYER, cmdbase = commands_base_new(evbase_pipe, NULL));
+  CHECK_NULL(L_PLAYER, pipe_watch_health_ev = evtimer_new(evbase_pipe, pipe_watch_health_cb, NULL));
+  evtimer_add(pipe_watch_health_ev, &tv);
   CHECK_ERR(L_PLAYER, pthread_create(&tid_pipe, NULL, pipe_thread_run, NULL));
 }
 
@@ -909,6 +977,9 @@ pipe_thread_stop(void)
   ret = pthread_join(tid_pipe, NULL);
   if (ret != 0)
     DPRINTF(E_LOG, L_PLAYER, "Could not join pipe thread: %s\n", strerror(errno));
+
+  event_free(pipe_watch_health_ev);
+  pipe_watch_health_ev = NULL;
 
   event_base_free(evbase_pipe);
   tid_pipe = 0;
