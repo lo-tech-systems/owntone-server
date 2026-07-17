@@ -3450,12 +3450,59 @@ payload_make_record(struct evrtsp_request *req, struct airplay_session *session,
   return 0;
 }
 
+// Appends the receiver addresses of the OTHER members of this session's stereo
+// pair to the SETPEERS array. Each member of a pair must know about its
+// sibling so the two speakers form a PTP mesh and phase-lock to each other
+// rather than only to our clock, which keeps their stereo image aligned.
+// owntone drives a pair as one session per member (both live in
+// airplay_sessions at once); siblings are matched by shared normalized device
+// group id, which is equal for both members and NULL for ungrouped devices, so
+// the ATV and solo devices are unaffected. Returns the number appended.
+static int
+setpeers_add_group_members(plist_t array, struct airplay_session *session)
+{
+  struct output_device *device;
+  struct output_device *other;
+  struct airplay_session *s;
+  const char *group_id;
+  const char *other_group_id;
+  int count = 0;
+
+  device = outputs_device_get(session->device_id);
+  if (!device)
+    return 0;
+
+  group_id = outputs_device_group_id(device);
+  if (!group_id)
+    return 0; // Not part of a stereo pair
+
+  for (s = airplay_sessions; s; s = s->next)
+    {
+      if (s == session || !s->address)
+	continue;
+
+      other = outputs_device_get(s->device_id);
+      if (!other)
+	continue;
+
+      other_group_id = outputs_device_group_id(other);
+      if (!other_group_id || strcmp(other_group_id, group_id) != 0)
+	continue; // Different pair, or not grouped
+
+      plist_array_append_item(array, plist_new_string(s->address));
+      count++;
+    }
+
+  return count;
+}
+
 static int
 payload_make_setpeers(struct evrtsp_request *req, struct airplay_session *session, void *arg)
 {
   uint8_t *data;
   size_t len;
   int ret;
+  int peers;
 
   if (!session->master_session->use_ptp)
     return 1; // Skip to next request
@@ -3470,6 +3517,13 @@ payload_make_setpeers(struct evrtsp_request *req, struct airplay_session *sessio
     plist_array_append_item(root, plist_new_string(session->local_v4_address));
   if (session->local_v6_address)
     plist_array_append_item(root, plist_new_string(session->local_v6_address));
+
+  // On a stereo pair, also list the other member(s) so the two speakers form
+  // a PTP mesh and phase-align to each other, not only to us.
+  peers = setpeers_add_group_members(root, session);
+  if (peers > 0)
+    DPRINTF(E_INFO, L_AIRPLAY, "SETPEERS for '%s': added %d stereo-pair peer address(es) for cross-clock sync\n",
+            session->devname, peers);
 
   ret = wplist_to_bin(&data, &len, root);
   plist_free(root);
