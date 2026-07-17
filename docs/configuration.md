@@ -48,6 +48,21 @@ Make sure that this user has read access to your configuration of `directories` 
 
 Path to the directory or directories containing the media to index (your library).
 
+### general: buffered_audio_enabled
+
+Boolean, default `false`. Config-file setting only (no live-reload endpoint).
+
+When `true`, an AirPlay 2 output left on the `auto` mode preference prefers
+buffered AAC-LC playback (`airplay2_buffered`) over realtime on any device
+that has advertised the buffered capability, before falling back to realtime
+`airplay2` and then `raop`. When `false`, `auto` behaves as before (`airplay2`
+realtime, then `raop`).
+
+This setting only affects outputs left on `auto`. An output with an explicit
+`mode` selection (via the [output API](json-api.md#update-an-output)), such as
+`airplay2_buffered_24` or one of the surround modes, always uses that mode
+regardless of this setting.
+
 ## Other settings
 
 See the repository `owntone-settings.json` file for the current reference

@@ -124,8 +124,24 @@ curl -X PUT "http://localhost:3689/api/metadata" \
 | `offset_ms` | integer | Timing offset in milliseconds |
 | `format` | string | Active audio format |
 | `supported_formats` | array | Supported audio format strings |
-| `mode` | string | Active protocol mode preference: `"auto"`, `"raop"`, or `"airplay2"` |
-| `supported_modes` | array | Concrete protocol modes available for this output (subset of `["raop", "airplay2"]`); absent or empty means only one protocol is available |
+| `mode` | string | Active protocol mode preference. One of `"auto"`, `"raop"`, `"airplay2"`, `"airplay2_buffered"`, `"airplay2_buffered_24"`, `"airplay2_surround_stereo"`, or `"airplay2_surround_upmix"` |
+| `supported_modes` | array | Concrete protocol modes available for this output; a subset of `["raop", "airplay2", "airplay2_buffered", "airplay2_buffered_24", "airplay2_surround_stereo", "airplay2_surround_upmix"]`. Reflects capability learned from the device itself, so it can grow after the output is first discovered. Absent or empty means only one protocol is available |
+
+The AirPlay 2 modes beyond plain `"airplay2"` (realtime) select a buffered
+transport, where the receiver queues audio ahead of playout instead of
+receiving it as it plays:
+
+| Mode | Description |
+| ---- | ----------- |
+| `airplay2_buffered` | Buffered playback with 16-bit AAC-LC audio. Offered as a baseline for any AirPlay 2-capable output as soon as the output is discovered, since it is supported almost universally; the session falls back to realtime if the device turns out not to accept it |
+| `airplay2_buffered_24` | Buffered playback with 24-bit ALAC (lossless). Only listed once learned from the device; only worth selecting when the source is genuinely higher than 16-bit |
+| `airplay2_surround_stereo` | Buffered 5.1 output that maps a stereo source onto the front-left/front-right/LFE channels of a 5.1 stream, leaving the remaining channels silent. Only listed for a standalone Apple TV |
+| `airplay2_surround_upmix` | Buffered 5.1 output that decodes and upmixes a stereo source across all six channels. Only listed for a standalone Apple TV |
+
+`airplay2_surround_stereo` and `airplay2_surround_upmix` never appear in
+`supported_modes` for a HomePod, a HomePod stereo pair, or a HomePod group
+routed through an Apple TV — surround is offered only for a standalone Apple
+TV.
 
 ### List outputs
 
@@ -201,7 +217,7 @@ All fields are optional. Any combination may be supplied in one request.
 | `pin` | string | Submit a PIN for authorization |
 | `format` | string | Set the output audio format |
 | `offset_ms` | integer | Set timing offset in milliseconds |
-| `mode` | string | Set the protocol mode preference: `"auto"`, `"raop"`, or `"airplay2"` |
+| `mode` | string | Set the protocol mode preference: `"auto"`, `"raop"`, `"airplay2"`, `"airplay2_buffered"`, `"airplay2_buffered_24"`, `"airplay2_surround_stereo"`, or `"airplay2_surround_upmix"` |
 
 **Response**
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## Version 29.0-mini.7
+
+- new: AirPlay 2 buffered output — queued/anchored playback as an alternative
+  to realtime, in 16-bit AAC-LC (`airplay2_buffered`) or 24-bit lossless ALAC
+  (`airplay2_buffered_24`)
+- new: optional 5.1 surround output for a standalone Apple TV — stereo mapped
+  to front-left/front-right/LFE (`airplay2_surround_stereo`) or decode-upmixed
+  across all six channels (`airplay2_surround_upmix`)
+- new: `buffered_audio_enabled` setting to prefer buffered AAC over realtime
+  for outputs left on `auto`
+- improved: HomePod stereo-pair members clock-sync directly with each other
+  for a tighter stereo image
+
 ## Version 29.0 - 2025-09-12
 
 - fix: client name showing as blank when pairing with MacOS

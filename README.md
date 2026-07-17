@@ -15,6 +15,8 @@ speakers, and is controlled entirely via an HTTP JSON API.
 ** AirPlay 1 (RAOP) and AirPlay 2 compatible speakers
 ** HomePods, including stereo pairs
 ** Playback via Apple TV, either through HDMI or connected HomePods
+* AirPlay 2 buffered output (16-bit AAC-LC or 24-bit lossless ALAC), with
+  optional 5.1 surround for a standalone Apple TV
 * HTTP JSON API for all control and settings
 
 This build has no web UI, no library scanning, and no external service integrations.
