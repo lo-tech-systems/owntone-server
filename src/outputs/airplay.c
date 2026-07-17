@@ -424,6 +424,10 @@ struct airplay_session
   // start_failure() from discarding perfectly good pairing keys.
   bool protocol_error;
 
+  // Set once a response has been received over the encrypted control
+  // channel, meaning the pairing keys have been proven for this connection.
+  bool encrypted_ok;
+
   // Set for a capability probe (GET /info only, session torn down right
   // after). Distinguishes a probe from a real activation in the shared
   // /info handler, which must not run buffered admission/ams selection for
@@ -5100,6 +5104,10 @@ sequence_continue_cb(struct evrtsp_request *req, void *arg)
   if (!req)
     {
       DPRINTF(E_LOG, L_AIRPLAY, "No response to %s from '%s'\n", cur_request->name, session->devname);
+      // The keys have already worked on this connection, so this timeout
+      // cannot be an auth rejection - do not cost the user their pairing.
+      if (session->encrypted_ok)
+	session->protocol_error = true;
       goto error;
     }
 
@@ -5117,6 +5125,9 @@ sequence_continue_cb(struct evrtsp_request *req, void *arg)
   // We don't check that the reply CSeq matches the request CSeq, because some
   // targets like Reflector and AirFoil don't return the CSeq according to the
   // rtsp spec. And the CSeq is not really important anyway.
+
+  if (session->control_cipher_ctx)
+    session->encrypted_ok = true;
 
   if (cur_request->response_handler)
     {
