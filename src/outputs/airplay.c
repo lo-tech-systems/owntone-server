@@ -59,6 +59,7 @@
 #include "airplay_events.h"
 #include "airplay_buffered.h"
 #include "airplay_common.h"
+#include "airplay_encoder.h"
 #include "pair_ap/pair.h"
 
 /* List of TODO's for AirPlay 2
@@ -129,10 +130,6 @@
 // codec has to be stamped into it. owntone otherwise leaves the PTP session's
 // SSRC at 0, which receivers tolerate for AAC but not for ALAC.
 #define AIRPLAY_SSRC_ID_ALAC48K_24          0x15000000
-// Scratch buffer for one encoded buffered frame. A raw AAC-LC frame at 1024
-// samples is normally 1-2KB, but a near-incompressible ALAC24 frame can be
-// much larger; sized with headroom above the worst case for either profile.
-#define AIRPLAY_BUFFERED_FRAME_MAX           32768
 // Implied by the format ids (the buffered SETUP carries no explicit "sr");
 // this is the timescale of the buffered rtptime and the anchor's rtpTime.
 #define AIRPLAY_BUFFERED_SAMPLE_RATE         48000
@@ -311,9 +308,15 @@ struct airplay_master_session
   struct evbuffer *input_buffer;
   uint32_t input_buffer_samples;
 
-  // ALAC encoder and buffer for encoded data
+  // ALAC encoder and buffer for encoded data. Realtime ams only - a buffered
+  // ams leaves these NULL, encoding runs on its dedicated thread instead (see
+  // encoder below).
   struct encode_ctx *encode_ctx;
   struct evbuffer *encoded_buffer;
+
+  // Non-NULL iff buffered_kind != AIRPLAY_BUFFERED_KIND_NONE. Owns the encode
+  // context and PCM/frame queues for this ams; runs on its own thread.
+  struct airplay_encoder *encoder;
 
   struct rtp_session *rtp_session;
 
@@ -1286,6 +1289,9 @@ master_session_free(struct airplay_master_session *ams)
   if (!ams)
     return;
 
+  // Join the encoder thread before touching anything it might still be using.
+  airplay_encoder_stop(&ams->encoder);
+
   outputs_quality_unsubscribe(&ams->rtp_session->quality);
   rtp_session_free(ams->rtp_session);
 
@@ -1406,19 +1412,32 @@ master_session_make(struct media_quality *quality, bool use_ptp, enum airplay_bu
   if (alac24)
     ams->rtp_session->ssrc_id = AIRPLAY_SSRC_ID_ALAC48K_24;
 
-  encode_args.src_ctx = transcode_decode_setup_raw(alac24 ? XCODE_PCM32 : XCODE_PCM16, quality);
-  if (!encode_args.src_ctx)
+  if (buffered)
     {
-      DPRINTF(E_LOG, L_AIRPLAY, "Could not create decoding context\n");
-      goto error;
+      // The encode context and its PCM/frame queues live on the encoder's own
+      // thread from here on; the ams never touches them directly.
+      if (airplay_encoder_start(&ams->encoder, kind, quality) < 0)
+	{
+	  DPRINTF(E_LOG, L_AIRPLAY, "Will not be able to stream AirPlay 2, could not start buffered encoder (kind %d)\n", kind);
+	  goto error;
+	}
     }
-
-  ams->encode_ctx = transcode_encode_setup(encode_args);
-  transcode_decode_cleanup(&encode_args.src_ctx);
-  if (!ams->encode_ctx)
+  else
     {
-      DPRINTF(E_LOG, L_AIRPLAY, "Will not be able to stream AirPlay 2, ffmpeg has no %s encoder\n", !buffered ? "ALAC" : alac24 ? "ALAC 24-bit" : "AAC");
-      goto error;
+      encode_args.src_ctx = transcode_decode_setup_raw(alac24 ? XCODE_PCM32 : XCODE_PCM16, quality);
+      if (!encode_args.src_ctx)
+	{
+	  DPRINTF(E_LOG, L_AIRPLAY, "Could not create decoding context\n");
+	  goto error;
+	}
+
+      ams->encode_ctx = transcode_encode_setup(encode_args);
+      transcode_decode_cleanup(&encode_args.src_ctx);
+      if (!ams->encode_ctx)
+	{
+	  DPRINTF(E_LOG, L_AIRPLAY, "Will not be able to stream AirPlay 2, ffmpeg has no ALAC encoder\n");
+	  goto error;
+	}
     }
 
   buffer_duration_ms = outputs_buffer_duration_ms_get();
@@ -1442,9 +1461,12 @@ master_session_make(struct media_quality *quality, bool use_ptp, enum airplay_bu
   ams->buffered_marker_pending = true;
   ams->buffered_anchor_mapped = false;
 
-  CHECK_NULL(L_AIRPLAY, ams->rawbuf = malloc(ams->rawbuf_size));
-  CHECK_NULL(L_AIRPLAY, ams->input_buffer = evbuffer_new());
-  CHECK_NULL(L_AIRPLAY, ams->encoded_buffer = evbuffer_new());
+  if (!buffered)
+    {
+      CHECK_NULL(L_AIRPLAY, ams->rawbuf = malloc(ams->rawbuf_size));
+      CHECK_NULL(L_AIRPLAY, ams->input_buffer = evbuffer_new());
+      CHECK_NULL(L_AIRPLAY, ams->encoded_buffer = evbuffer_new());
+    }
 
   ams->next = airplay_master_sessions;
   airplay_master_sessions = ams;
@@ -2431,16 +2453,13 @@ packets_send(struct airplay_master_session *ams)
   return 0;
 }
 
-// Buffered AirPlay 2 (type 103) counterpart to packets_send(). alac_encode()
-// is profile-agnostic (it just drives transcode_frame_new/transcode_encode);
-// for a buffered ams, ams->encode_ctx was set up with the AAC-LC stereo or
-// ALAC 48k/24 profile in master_session_make(). There is no retransmit buffer
-// and no rtp_packet_next/RTP header for the buffered transport; framing uses
-// ams->buffered_seqnum/buffered_rtptime directly.
+// Buffered AirPlay 2 (type 103) counterpart to packets_send(). There is no
+// retransmit buffer and no rtp_packet_next/RTP header for the buffered
+// transport; framing uses ams->buffered_seqnum/buffered_rtptime directly.
 // Sends ONE encoded buffered frame (already extracted into buf) to every
 // ready session on the ams, advancing seqnum/rtptime by exactly one frame.
-// Split out of buffered_packets_send() because one alac_encode() call can
-// flush more than one encoded frame - see the loop there.
+// The caller splits a multi-frame encode result into individual calls, since
+// one encode pass can produce more than one frame.
 static int
 buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
 {
@@ -2530,53 +2549,6 @@ buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
   return 0;
 }
 
-static int
-buffered_packets_send(struct airplay_master_session *ams)
-{
-  uint8_t buf[AIRPLAY_BUFFERED_FRAME_MAX];
-  int pkt_len;
-  int len;
-  int ret;
-
-  len = alac_encode(ams->encoded_buffer, ams->encode_ctx, ams->rawbuf, ams->rawbuf_size, ams->samples_per_packet, &ams->quality);
-  if (len < 0)
-    return -1;
-
-  if (len == 0)
-    return 0; // Not enough input samples yet to complete an encoded frame
-
-  // One alac_encode() call can flush MORE than one encoded frame: the ALAC24
-  // profile's 352-sample output frames are shorter than the input pushed per
-  // call, so more than one can flush back to back. Each must go out as its
-  // own buffered frame with its own seqnum/rtptime - delivering two under one
-  // seqnum loses the second at the receiver. Split the blob on the encoder's
-  // per-packet sizes; the fallback of taking the remainder as one frame is
-  // exact for AAC, whose frames can never arrive more than one per call.
-  while (len > 0)
-    {
-      pkt_len = transcode_encode_packet_size_next(ams->encode_ctx);
-      if (pkt_len <= 0 || pkt_len > len)
-	pkt_len = len;
-
-      if ((size_t)pkt_len > sizeof(buf))
-	{
-	  DPRINTF(E_LOG, L_AIRPLAY, "Bug! Encoded buffered frame (%d bytes) exceeds temp buffer (%zu)\n", pkt_len, sizeof(buf));
-	  evbuffer_drain(ams->encoded_buffer, len);
-	  return -1;
-	}
-
-      evbuffer_remove(ams->encoded_buffer, buf, pkt_len);
-
-      ret = buffered_frame_send(ams, buf, pkt_len);
-      if (ret < 0)
-	return ret;
-
-      len -= pkt_len;
-    }
-
-  return 0;
-}
-
 // Overview of rtptimes as they should be when starting a stream, and assuming
 // the first rtptime (pos) is 88200:
 //   sync pkt:  cur_pos = 0, rtptime = 88200
@@ -2589,6 +2561,8 @@ buffered_packets_send(struct airplay_master_session *ams)
 static inline void
 timestamp_set(struct airplay_master_session *ams, struct timespec ts)
 {
+  uint32_t pending_samples;
+
   // The last write from the player had a timestamp which has been passed to
   // this function as ts. This is the player clock, which is more precise than
   // the actual clock because it gives us a calculated time reference, which is
@@ -2612,7 +2586,12 @@ timestamp_set(struct airplay_master_session *ams, struct timespec ts)
   //   - rtptime = X + received - ams->output_buffer_samples
   //   -> rtptime = X + (pos - X) + ams->input_buffer_samples - ams->out_buffer_samples
   //   -> rtptime = pos + ams->input_buffer_samples - ams->output_buffer_samples
-  ams->cur_stamp.pos = ams->rtp_session->pos + ams->input_buffer_samples - ams->output_buffer_samples;
+  //
+  // A buffered ams has no input_buffer (unsent PCM sits in the encoder's
+  // in-queue instead), so its pending count comes from there.
+  pending_samples = ams->encoder ? airplay_encoder_pending_samples(ams->encoder) : ams->input_buffer_samples;
+
+  ams->cur_stamp.pos = ams->rtp_session->pos + pending_samples - ams->output_buffer_samples;
 }
 
 static void
@@ -4309,6 +4288,10 @@ response_handler_flush_buffered(struct evrtsp_request *req, struct airplay_sessi
   // Playback resumes at a new wall time, so the old rtptime->networkTime
   // mapping no longer holds; the next anchor establishes a fresh one
   session->master_session->buffered_anchor_mapped = false;
+  // Queued-but-unsent frames would otherwise carry seqnums past flushUntilSeq,
+  // and the receiver keeps those instead of discarding them.
+  if (session->master_session && session->master_session->encoder)
+    airplay_encoder_flush(session->master_session->encoder);
   return AIRPLAY_SEQ_CONTINUE;
 }
 
@@ -5778,10 +5761,41 @@ airplay_write(struct output_buffer *obuf)
 {
   struct airplay_master_session *ams;
   struct airplay_session *session;
+  struct airplay_encoded_frame *frame, *next_frame;
   int i;
 
   for (ams = airplay_master_sessions; ams; ams = ams->next)
     {
+      // Buffered ams: deliver whatever the encoder thread has finished since
+      // the last tick before feeding it more PCM, so frames leave in the
+      // order they were encoded.
+      if (ams->encoder)
+	{
+	  frame = airplay_encoder_frames_get(ams->encoder);
+	  while (frame)
+	    {
+	      next_frame = frame->next;
+	      buffered_frame_send(ams, frame->data, frame->len);
+	      airplay_encoder_frame_free(frame);
+	      frame = next_frame;
+	    }
+
+	  if (airplay_encoder_failed(ams->encoder))
+	    {
+	      DPRINTF(E_LOG, L_AIRPLAY, "Buffered encoder (kind %d) failed, ending its sessions\n", ams->buffered_kind);
+
+	      for (session = airplay_sessions; session; session = session->next)
+		{
+		  if (session->master_session != ams)
+		    continue;
+		  if (session->state != AIRPLAY_STATE_CONNECTED && session->state != AIRPLAY_STATE_STREAMING)
+		    continue;
+
+		  deferred_session_failure(session);
+		}
+	    }
+	}
+
       for (i = 0; obuf->data[i].buffer; i++)
 	{
 	  if (!quality_is_equal(&obuf->data[i].quality, &ams->rtp_session->quality))
@@ -5797,6 +5811,14 @@ airplay_write(struct output_buffer *obuf)
 	  if (!ams->buffered)
 	    packets_sync_send(ams);
 
+	  if (ams->encoder)
+	    {
+	      // Copy - obuf is drained/reused by the player right after this
+	      // function returns.
+	      airplay_encoder_pcm_write(ams->encoder, obuf->data[i].buffer, obuf->data[i].bufsize, obuf->data[i].samples);
+	      continue;
+	    }
+
 	  // TODO avoid this copy
 	  evbuffer_add(ams->input_buffer, obuf->data[i].buffer, obuf->data[i].bufsize);
 	  ams->input_buffer_samples += obuf->data[i].samples;
@@ -5807,10 +5829,7 @@ airplay_write(struct output_buffer *obuf)
 	      evbuffer_remove(ams->input_buffer, ams->rawbuf, ams->rawbuf_size);
 	      ams->input_buffer_samples -= ams->samples_per_packet;
 
-	      if (ams->buffered)
-		buffered_packets_send(ams);
-	      else
-		packets_send(ams);
+	      packets_send(ams);
 	    }
 	}
     }
