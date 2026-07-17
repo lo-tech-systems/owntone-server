@@ -283,9 +283,11 @@ init_settings(struct settings_ctx *settings, enum transcode_profile profile, str
 	settings->channel_layout = AV_CH_LAYOUT_5POINT1_BACK;
 	settings->nb_channels = 6;
 #endif
-	// pan=5.1: static output-channel matrix, one term per input channel.
-	// FL=L, FR=R, FC=0, LFE=0.5*L+0.5*R, BL=0, BR=0.
-	settings->upmix_filter = "pan=5.1|FL=1.0*FL|FR=1.0*FR|FC=0|LFE=0.5*FL+0.5*FR|BL=0|BR=0";
+	// pan=5.1: static output-channel matrix. FL=L, FR=R, LFE=0.5*L+0.5*R,
+	// centre/rears silent. The pan parser requires every gain term to
+	// reference an input channel, so silence must be written as an explicit
+	// zero gain (FC=0*FL), not a bare constant (FC=0).
+	settings->upmix_filter = "pan=5.1|FL=1.0*FL|FR=1.0*FR|FC=0*FL|LFE=0.5*FL+0.5*FR|BL=0*FL|BR=0*FL";
 	break;
 
       // Raw AAC-LC frames at 48kHz stereo (no container) - the buffered
