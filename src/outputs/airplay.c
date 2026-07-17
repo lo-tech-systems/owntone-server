@@ -58,6 +58,7 @@
 
 #include "airplay_events.h"
 #include "airplay_buffered.h"
+#include "airplay_common.h"
 #include "pair_ap/pair.h"
 
 /* List of TODO's for AirPlay 2
@@ -262,20 +263,6 @@ enum airplay_status_flags
 };
 
 // Info about the device, which is not required by the player, only internally
-// Which buffered (type 103) encode profile a master session or a pending
-// session decision selects. NONE means the realtime ALAC transport, i.e. not
-// buffered at all.
-enum airplay_buffered_kind
-{
-  AIRPLAY_BUFFERED_KIND_NONE,
-  AIRPLAY_BUFFERED_KIND_AAC_STEREO,       // bufferStream format 23
-  AIRPLAY_BUFFERED_KIND_ALAC24,           // bufferStream format 21
-  // Both of the below stream bufferStream format 39 (AAC-LC 48kHz 5.1); they
-  // differ only in how the stereo source is placed into the six channels.
-  AIRPLAY_BUFFERED_KIND_SURROUND_STEREO,  // static FL/FR/LFE pan, silent C/rear
-  AIRPLAY_BUFFERED_KIND_SURROUND_UPMIX,   // decode-steered upmix to all 6 channels
-};
-
 // True when a device may be offered/accept a 5.1 surround output mode.
 // Surround is limited to a standalone Apple TV: not a member of a HomePod
 // stereo pair, and not the visible leader of a HomePod-behind-Apple-TV proxy
