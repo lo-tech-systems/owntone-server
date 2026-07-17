@@ -1,5 +1,16 @@
 # Changelog
 
+## Version 29.0-mini.8
+
+- improved: buffered AirPlay 2 encoding now runs on a dedicated thread per
+  active transform, so heavy encodes (notably 5.1 upmix) no longer disturb
+  playback timing or other outputs on multi-core boards
+- new: admission control that cleanly declines a buffered output
+  (HTTP 503 `encoder_capacity`) when encode capacity is exhausted, with a new
+  `buffered_encoder_budget` setting (`0` = auto, scored from the CPU)
+- fix: pairing keys no longer cleared by a transient timeout on an
+  established session
+
 ## Version 29.0-mini.7
 
 - new: AirPlay 2 buffered output — queued/anchored playback as an alternative
