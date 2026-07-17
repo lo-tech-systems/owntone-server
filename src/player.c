@@ -1612,7 +1612,9 @@ device_activate_cb(struct output_device *device, enum output_device_state status
 
       outputs_device_deselect(device);
 
-      if (retval != -2)
+      if (device->last_failure == OUTPUT_FAILURE_CAPACITY)
+	retval = -3;
+      else if (retval != -2)
 	retval = -1;
       goto out;
     }

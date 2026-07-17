@@ -65,6 +65,25 @@ This setting only affects outputs left on `auto`. An output with an explicit
 `airplay2_buffered_24` or one of the surround modes, always uses that mode
 regardless of this setting.
 
+### player: buffered_encoder_budget
+
+Integer, default `0`. Also settable at runtime via
+`PUT /api/settings/player/buffered_encoder_budget` (takes effect on the next
+output activation, no restart required). Range 0-64.
+
+Expert capacity-tuning knob for buffered AirPlay 2 outputs. Each active
+buffered output (AAC-LC, ALAC 48k/24, or one of the 5.1 surround modes) costs
+CPU on a dedicated encode thread; a new buffered output is refused rather than
+started if it would push total cost over budget, so that already-playing
+outputs are never starved.
+
+`0` (auto) scores the host's core count and clock speed at startup and
+derives a budget from that. Set a positive value to override the computed
+budget - useful if the auto-detected value is too conservative or too
+generous for your hardware, or to deliberately cap concurrent buffered
+outputs. A rejected activation returns HTTP 503 with
+`{"error": "encoder_capacity"}` (see [json-api.md](json-api.md)).
+
 ## Other settings
 
 See the repository `owntone-settings.json` file for the current reference

@@ -99,6 +99,14 @@ enum output_device_state
   OUTPUT_STATE_PASSWORD  = -2,
 };
 
+// Why the last activation failed; set by the backend before signalling
+// OUTPUT_STATE_FAILED, cleared on successful start.
+enum output_failure_reason
+{
+  OUTPUT_FAILURE_NONE     = 0,
+  OUTPUT_FAILURE_CAPACITY = 1,
+};
+
 /* Linked list of device info used by the player for each device
  */
 struct output_device
@@ -128,7 +136,10 @@ struct output_device
   // field must only be set in outputs.c (not in the backends/player).
   enum output_device_state state;
 
-  // Misc device flags 
+  // Reason for the last OUTPUT_STATE_FAILED, if any; NONE otherwise.
+  enum output_failure_reason last_failure;
+
+  // Misc device flags
   unsigned selected:1;
   unsigned advertised:1;
   unsigned has_password:1;

@@ -223,6 +223,14 @@ All fields are optional. Any combination may be supplied in one request.
 
 Returns HTTP `204 No Content` on success.
 
+Enabling (`"selected":true`) a buffered AirPlay 2 output (`airplay2_buffered`,
+`airplay2_buffered_24`, or one of the surround modes) can fail with HTTP `503
+Service Unavailable` and body `{"error": "encoder_capacity"}` if admitting it
+would exceed the buffered-encode capacity budget (see
+`buffered_encoder_budget` in [configuration.md](configuration.md)). Other
+outputs are unaffected; retry once capacity frees up (another buffered output
+stops).
+
 **Example**
 
 ```shell
@@ -387,6 +395,7 @@ There are no category-listing or option-listing endpoints in this build.
 | `/api/settings/player/start_buffer_ms` | integer | Start buffer in milliseconds, valid range `300` to `3500`, restart required |
 | `/api/settings/player/uncompressed_alac` | boolean | ALAC output preference, restart required |
 | `/api/settings/player/buffered_audio_enabled` | boolean | Prefer buffered AAC-LC over realtime for AirPlay 2 outputs left on `auto`; takes effect on the next output start |
+| `/api/settings/player/buffered_encoder_budget` | integer | Buffered-encode capacity budget override, valid range `0` to `64` (`0` = auto, CPU-based); takes effect on the next output activation |
 
 ### Get a setting
 

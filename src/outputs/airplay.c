@@ -31,6 +31,7 @@
 #include <fcntl.h>
 #include <time.h>
 #include <strings.h>
+#include <sys/utsname.h>
 
 #include <arpa/inet.h>
 #include <net/if.h>
@@ -153,6 +154,12 @@
 // its anchor exactly. Must comfortably exceed the anchor request/response
 // round trip; 48 frames is about 1s at 1024 spf / 48kHz.
 #define AIRPLAY_BUFFERED_JOIN_SLACK_FRAMES    48
+
+// Admission weights per buffered kind, in abstract cost units. The decode
+// upmix (6ch surround filter + 6ch AAC) dominates measured CPU on Cortex-A53;
+// the other kinds are a fraction of a core each.
+#define ENCODER_COST_SURROUND_UPMIX 6
+#define ENCODER_COST_DEFAULT        2   // AAC stereo, ALAC24, static pan
 
 #define AIRPLAY_MD_DELAY_STARTUP      15360
 #define AIRPLAY_MD_DELAY_SWITCH       (AIRPLAY_MD_DELAY_STARTUP * 2)
@@ -417,6 +424,12 @@ struct airplay_session
   // start_failure() from discarding perfectly good pairing keys.
   bool protocol_error;
 
+  // Set for a capability probe (GET /info only, session torn down right
+  // after). Distinguishes a probe from a real activation in the shared
+  // /info handler, which must not run buffered admission/ams selection for
+  // a session that is about to disappear anyway.
+  bool probing;
+
   char *realm;
   char *nonce;
   const char *password;
@@ -660,6 +673,17 @@ static struct timeval keep_alive_tv = { AIRPLAY_KEEP_ALIVE_INTERVAL, 0 };
 /* Sessions */
 static struct airplay_master_session *airplay_master_sessions;
 static struct airplay_session *airplay_sessions;
+
+// Encoder admission control (buffered ams only). in_use is charged/released
+// on the player thread only, one unit of work at a time, so no lock is
+// needed. budget is set once in airplay_init() from the CPU-capability
+// score, unless a positive buffered_encoder_budget config override applies.
+static int encoder_cost_in_use;
+static int encoder_cost_budget;
+// Set (and cleared) inside master_session_make() so the caller of a NULL
+// return can tell an admission rejection apart from any other setup failure,
+// without master_session_make needing a device pointer just for this.
+static bool encoder_budget_rejected;
 
 /* Our own device ID, name and user agent */
 static uint64_t airplay_device_id;
@@ -1289,6 +1313,15 @@ master_session_free(struct airplay_master_session *ams)
   if (!ams)
     return;
 
+  // Release the admission charge exactly once, here. master_session_make()
+  // only assigns buffered_kind on the success path (after the charge), so an
+  // ams freed on an error path was never charged and this is a no-op for it.
+  if (ams->buffered_kind != AIRPLAY_BUFFERED_KIND_NONE)
+    {
+      int cost = (ams->buffered_kind == AIRPLAY_BUFFERED_KIND_SURROUND_UPMIX) ? ENCODER_COST_SURROUND_UPMIX : ENCODER_COST_DEFAULT;
+      encoder_cost_in_use -= cost;
+    }
+
   // Join the encoder thread before touching anything it might still be using.
   airplay_encoder_stop(&ams->encoder);
 
@@ -1347,6 +1380,8 @@ master_session_make(struct media_quality *quality, bool use_ptp, enum airplay_bu
   struct transcode_encode_setup_args encode_args;
   uint64_t clock_id;
   int ret;
+  int cost;
+  int budget;
 
   // For the ALAC 48k/24 profile the session subscribes at 48k/32-bit/2ch
   // instead of the device default, so a >16-bit source reaches the encoder
@@ -1363,12 +1398,36 @@ master_session_make(struct media_quality *quality, bool use_ptp, enum airplay_bu
       quality = &alac24_quality;
     }
 
+  encoder_budget_rejected = false;
+
   // First check if we already have a suitable session
   for (ams = airplay_master_sessions; ams; ams = ams->next)
     {
       if (quality_is_equal(quality, &ams->rtp_session->quality) && use_ptp == ams->use_ptp
           && kind == ams->buffered_kind)
 	return ams;
+    }
+
+  // Admission control: reject before anything is allocated. Charge happens
+  // later, only on the success path (see ams->buffered_kind assignment
+  // below); release happens solely in master_session_free(). A positive
+  // buffered_encoder_budget config override replaces the computed budget for
+  // this check only - re-read every time so a runtime change takes effect on
+  // the next activation without a restart.
+  if (buffered)
+    {
+      cost = (kind == AIRPLAY_BUFFERED_KIND_SURROUND_UPMIX) ? ENCODER_COST_SURROUND_UPMIX : ENCODER_COST_DEFAULT;
+      budget = config_get_int("buffered_encoder_budget", 0);
+      if (budget <= 0)
+        budget = encoder_cost_budget;
+
+      if (encoder_cost_in_use + cost > budget)
+        {
+          DPRINTF(E_LOG, L_AIRPLAY, "Refusing new buffered output (kind %d, cost %d): encoder budget exhausted (%d/%d in use)\n",
+                  kind, cost, encoder_cost_in_use, budget);
+          encoder_budget_rejected = true;
+          return NULL;
+        }
     }
 
   // Each buffered kind uses its own fixed-format encode profile instead of
@@ -1455,6 +1514,11 @@ master_session_make(struct media_quality *quality, bool use_ptp, enum airplay_bu
 
   ams->buffered = buffered;
   ams->buffered_kind = kind;
+  if (buffered)
+    {
+      encoder_cost_in_use += cost;
+      DPRINTF(E_INFO, L_AIRPLAY, "Buffered encoder (kind %d, cost %d) admitted: %d/%d in use\n", kind, cost, encoder_cost_in_use, budget);
+    }
   ams->buffered_spf = alac24 ? AIRPLAY_BUFFERED_SPF_ALAC24 : AIRPLAY_BUFFERED_SPF;
   ams->buffered_seqnum = 0;
   ams->buffered_rtptime = 0;
@@ -1615,7 +1679,13 @@ session_success(struct airplay_session *session)
 static void
 session_connected(struct airplay_session *session)
 {
+  struct output_device *device;
+
   session->state = AIRPLAY_STATE_CONNECTED;
+
+  device = outputs_device_get(session->device_id);
+  if (device)
+    device->last_failure = OUTPUT_FAILURE_NONE;
 
   session_status(session);
 }
@@ -3868,6 +3938,7 @@ start_retry_timer_cb(int fd, short what, void *arg)
     }
 
   session->start_retries = ctx->attempt;
+  session->probing = (ctx->seq_type == AIRPLAY_SEQ_PROBE);
 
   DPRINTF(E_INFO, L_AIRPLAY, "Retrying %s for '%s' (attempt %d/%d)\n",
           (ctx->seq_type == AIRPLAY_SEQ_PROBE) ? "probe" : "start",
@@ -4548,7 +4619,11 @@ response_handler_info_generic(struct evrtsp_request *req, struct airplay_session
   // session outright (no silent downgrade mid negotiation). If the device
   // doesn't advertise it, we simply proceed with the realtime ALAC master
   // session created in session_make().
-  if (session->wants_buffered_kind != AIRPLAY_BUFFERED_KIND_NONE)
+  // A capability probe must never touch admission, encoders, or ams state:
+  // it funnels into this same handler but the session tears down right
+  // after, and running the swap here would spawn a throwaway encoder thread
+  // and could fail the probe merely because other outputs hold the budget.
+  if (!session->probing && session->wants_buffered_kind != AIRPLAY_BUFFERED_KIND_NONE)
     {
       if (session->device_supports_buffered)
 	{
@@ -4559,6 +4634,13 @@ response_handler_info_generic(struct evrtsp_request *req, struct airplay_session
 	  if (!new_ams)
 	    {
 	      DPRINTF(E_LOG, L_AIRPLAY, "Could not create buffered master session for '%s'\n", session->devname);
+
+	      // A budget rejection is distinguishable from any other setup
+	      // failure so it can surface as a capacity-specific API error;
+	      // either way this is a hard failure, not a soft retry candidate.
+	      if (encoder_budget_rejected)
+	        device->last_failure = OUTPUT_FAILURE_CAPACITY;
+	      session->state = AIRPLAY_STATE_FAILED;
 	      return AIRPLAY_SEQ_ABORT;
 	    }
 
@@ -5675,6 +5757,8 @@ airplay_device_probe(struct output_device *device, int callback_id)
   if (!session)
     return -1;
 
+  session->probing = true;
+
   sequence_start(AIRPLAY_SEQ_PROBE, session, NULL, "device_probe");
 
   return 1;
@@ -5863,6 +5947,92 @@ airplay_write(struct output_buffer *obuf)
     }
 }
 
+// Scores the host's encode capacity so the admission budget (ENCODER_COST_*)
+// scales with the board instead of assuming every core is equally fast. Core
+// count alone is wrong across the fleet: a clock-limited board with cores
+// offlined must not get the same budget as a stock one at full clock, and a
+// much faster board should be effectively uncapped.
+static int
+encoder_budget_compute(void)
+{
+  long online_cores;
+  long conf_cores;
+  double max_khz = 0.0;
+  double max_clock_ghz;
+  double points;
+  int arch_weight;
+  int cpu;
+  bool have_clock = false;
+  struct utsname uts;
+  int budget;
+  bool used_fallback = false;
+  char path[96];
+  FILE *fp;
+  long khz;
+
+  online_cores = sysconf(_SC_NPROCESSORS_ONLN);
+  if (online_cores < 1)
+    online_cores = 1;
+
+  conf_cores = sysconf(_SC_NPROCESSORS_CONF);
+  if (conf_cores < online_cores)
+    conf_cores = online_cores;
+
+  if (uname(&uts) != 0)
+    snprintf(uts.machine, sizeof(uts.machine), "unknown");
+
+  // Kernel arch, deliberately: a 32-bit userland on a 64-bit kernel still
+  // scores the silicon, not the ABI.
+  if (strncmp(uts.machine, "armv6", 5) == 0)
+    arch_weight = 1;
+  else if (strncmp(uts.machine, "armv7", 5) == 0)
+    arch_weight = 2;
+  else if (strcmp(uts.machine, "aarch64") == 0)
+    arch_weight = 4;
+  else
+    arch_weight = 4;
+
+  for (cpu = 0; cpu < conf_cores; cpu++)
+    {
+      snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", cpu);
+      fp = fopen(path, "r");
+      if (!fp)
+        continue; // offline or not present on this kernel
+
+      if (fscanf(fp, "%ld", &khz) == 1 && khz > max_khz)
+        {
+          have_clock = true;
+          max_khz = khz;
+        }
+      fclose(fp);
+    }
+
+  if (have_clock)
+    {
+      max_clock_ghz = max_khz / 1e6;
+      points = arch_weight * max_clock_ghz * online_cores;
+      budget = (int)lround(0.75 * points);
+      if (budget < 2)
+        budget = 2;
+      else if (budget > 64)
+        budget = 64;
+    }
+  else
+    {
+      // No boot-time clock limit readable (WSL/VMs/some x86): reserve one
+      // core for the player/RTSP thread and score the rest at the default cost.
+      used_fallback = true;
+      max_clock_ghz = 0.0;
+      points = 0.0;
+      budget = 4 * ((online_cores - 1 > 1) ? (online_cores - 1) : 1);
+    }
+
+  DPRINTF(E_INFO, L_AIRPLAY, "Encoder admission budget: machine '%s', %ld online cores, max clock %.2f GHz, points %.2f -> budget %d%s\n",
+          uts.machine, online_cores, max_clock_ghz, points, budget, used_fallback ? " (fallback)" : "");
+
+  return budget;
+}
+
 static int
 airplay_init(void)
 {
@@ -5872,6 +6042,8 @@ airplay_init(void)
   int control_port;
 
   airplay_device_id = libhash;
+
+  encoder_cost_budget = encoder_budget_compute();
 
   uuid_make(airplay_ptp_clock_uuid);
 

@@ -189,6 +189,7 @@ static const struct setting_entry settings_table[] = {
   { "player", "uncompressed_alac",           SETTING_TYPE_BOOL, "uncompressed_alac"           },
   { "player", "device_removal_grace_period", SETTING_TYPE_INT,  "device_removal_grace_period" },
   { "player", "buffered_audio_enabled",      SETTING_TYPE_BOOL, "buffered_audio_enabled"      },
+  { "player", "buffered_encoder_budget",     SETTING_TYPE_INT,  "buffered_encoder_budget"     },
 };
 
 static const struct setting_entry *
@@ -589,6 +590,11 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
     {
       selected = jparse_bool_from_obj(request, "selected");
       ret = selected ? player_speaker_enable(output_id) : player_speaker_disable(output_id);
+      if (ret == -3)
+	{
+	  jparse_free(request);
+	  return jsonapi_reply_error(hreq, HTTP_SERVUNAVAIL, "encoder_capacity");
+	}
       if (ret < 0)
 	goto error;
     }
