@@ -207,8 +207,8 @@ init_settings(struct settings_ctx *settings, enum transcode_profile profile, str
   // So unlike the other profiles, media_quality (which describes the
   // caller's *input*) must not override sample_rate/channels/bits_per_sample
   // below.
-  bool fixed_output = (profile == XCODE_AAC48K_51_DECODE || profile == XCODE_AAC48K_STEREO
-                       || profile == XCODE_ALAC48K_24_STEREO);
+  bool fixed_output = (profile == XCODE_AAC48K_51_DECODE || profile == XCODE_AAC48K_51_STEREO
+                       || profile == XCODE_AAC48K_STEREO || profile == XCODE_ALAC48K_24_STEREO);
 
   memset(settings, 0, sizeof(struct settings_ctx));
 
@@ -259,6 +259,33 @@ init_settings(struct settings_ctx *settings, enum transcode_profile profile, str
 	// a stereo source using frequency-domain steering, rather than a
 	// static pan matrix.
 	settings->upmix_filter = "surround=chl_in=stereo:chl_out=5.1:lfe=1:lfe_low=80:lfe_high=120";
+	break;
+
+      // Raw AAC-LC frames at 48kHz 5.1 (no container), same layout and
+      // bitrate as XCODE_AAC48K_51_DECODE, but with a static pan instead of
+      // a steered upmix: the stereo source is placed only in front left/
+      // right plus a derived LFE, and the centre/rear channels are left
+      // silent. Used when a receiver only accepts a 5.1 bufferStream format
+      // but the content itself is plain stereo, so there is nothing to
+      // usefully steer into the centre/rear channels.
+      case XCODE_AAC48K_51_STEREO:
+	settings->encode_audio = true;
+	settings->format = "data"; // Raw AAC frames from the encoder, no ADTS muxing
+	settings->audio_codec = AV_CODEC_ID_AAC;
+	settings->sample_format = AV_SAMPLE_FMT_FLTP;
+	settings->sample_rate = 48000;
+	settings->bit_rate = 448000;
+	// Must be the BACK variant ("5.1", not "5.1(side)"): see
+	// XCODE_AAC48K_51_DECODE above for why.
+#if USE_CH_LAYOUT
+	av_channel_layout_from_mask(&settings->channel_layout, AV_CH_LAYOUT_5POINT1_BACK);
+#else
+	settings->channel_layout = AV_CH_LAYOUT_5POINT1_BACK;
+	settings->nb_channels = 6;
+#endif
+	// pan=5.1: static output-channel matrix, one term per input channel.
+	// FL=L, FR=R, FC=0, LFE=0.5*L+0.5*R, BL=0, BR=0.
+	settings->upmix_filter = "pan=5.1|FL=1.0*FL|FR=1.0*FR|FC=0|LFE=0.5*FL+0.5*FR|BL=0|BR=0";
 	break;
 
       // Raw AAC-LC frames at 48kHz stereo (no container) - the buffered

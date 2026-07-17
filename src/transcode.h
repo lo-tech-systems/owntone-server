@@ -20,6 +20,13 @@ enum transcode_profile
   // container), using ffmpeg's "surround" filter (frequency-domain steering)
   // to derive the surround channels from a stereo source
   XCODE_AAC48K_51_DECODE,
+  // Transcodes the best audio stream to raw AAC-LC 48kHz 5.1 (no container),
+  // with a static pan matrix that places the stereo source in the front
+  // left/right and LFE only - centre and rear channels are silent. This is
+  // the "stereo, delivered as a 5.1 stream" payload for AirPlay 2 receivers
+  // that only accept a 5.1 bufferStream format but are being fed plain
+  // stereo content.
+  XCODE_AAC48K_51_STEREO,
   // Raw AAC-LC 48kHz stereo (no container) - the buffered AirPlay 2 stereo
   // payload for bufferStream format 23
   XCODE_AAC48K_STEREO,

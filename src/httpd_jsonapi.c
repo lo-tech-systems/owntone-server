@@ -462,8 +462,10 @@ speaker_to_json(struct player_speaker_info *spk)
   // even before the device's own /info response has confirmed it, since it
   // is a near-universal baseline; the session itself falls back to realtime
   // if the receiver turns out not to support it. airplay2_buffered_24 is only
-  // listed once actually learned/persisted. The surround modes are not
-  // reported yet.
+  // listed once actually learned/persisted. The two surround modes are listed
+  // only when learned AND the device is eligible for surround (a standalone
+  // Apple TV) - that eligibility is already applied to supported_modes, so the
+  // surround bits are simply absent for anything else.
   supported_modes = json_object_new_array();
   if (spk->supported_modes & OUTPUT_MODE_RAOP)
     json_object_array_add(supported_modes, json_object_new_string("raop"));
@@ -474,6 +476,10 @@ speaker_to_json(struct player_speaker_info *spk)
     }
   if (spk->supported_modes & OUTPUT_MODE_AIRPLAY2_BUFFERED_24)
     json_object_array_add(supported_modes, json_object_new_string("airplay2_buffered_24"));
+  if (spk->supported_modes & OUTPUT_MODE_AIRPLAY2_SURROUND_STEREO)
+    json_object_array_add(supported_modes, json_object_new_string("airplay2_surround_stereo"));
+  if (spk->supported_modes & OUTPUT_MODE_AIRPLAY2_SURROUND_UPMIX)
+    json_object_array_add(supported_modes, json_object_new_string("airplay2_surround_upmix"));
 
   snprintf(output_id, sizeof(output_id), "%" PRIu64, spk->id);
   json_object_object_add(output, "id", json_object_new_string(output_id));

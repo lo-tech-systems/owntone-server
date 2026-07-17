@@ -112,6 +112,10 @@
 // list encodes each format id as a bit position (format id N is bit N of the
 // mask), the same convention SETUP(stream)'s audioFormat field uses.
 #define AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO 21
+// AAC-LC 48kHz 5.1. Used for both surround buffered kinds (static pan and
+// decode upmix) - they share a format id because the receiver only cares
+// about the stream layout, not how the sender chose to fill the channels.
+#define AIRPLAY_FORMAT_ID_AAC_51            39
 #define AIRPLAY_BUFFERED_SPF                 1024
 // Samples per frame for the ALAC 48k/24 profile. ALAC decoders are
 // initialised from a magic cookie carrying frameLength=352 - the classic ALAC
@@ -258,6 +262,46 @@ enum airplay_status_flags
 };
 
 // Info about the device, which is not required by the player, only internally
+// Which buffered (type 103) encode profile a master session or a pending
+// session decision selects. NONE means the realtime ALAC transport, i.e. not
+// buffered at all.
+enum airplay_buffered_kind
+{
+  AIRPLAY_BUFFERED_KIND_NONE,
+  AIRPLAY_BUFFERED_KIND_AAC_STEREO,       // bufferStream format 23
+  AIRPLAY_BUFFERED_KIND_ALAC24,           // bufferStream format 21
+  // Both of the below stream bufferStream format 39 (AAC-LC 48kHz 5.1); they
+  // differ only in how the stereo source is placed into the six channels.
+  AIRPLAY_BUFFERED_KIND_SURROUND_STEREO,  // static FL/FR/LFE pan, silent C/rear
+  AIRPLAY_BUFFERED_KIND_SURROUND_UPMIX,   // decode-steered upmix to all 6 channels
+};
+
+// True when a device may be offered/accept a 5.1 surround output mode.
+// Surround is limited to a standalone Apple TV: not a member of a HomePod
+// stereo pair, and not the visible leader of a HomePod-behind-Apple-TV proxy
+// group (those groups play through their HomePod members, not the ATV
+// itself). Used both when selecting a session's buffered kind and when
+// reporting supported_modes to the API.
+static bool
+airplay_device_allows_surround(struct output_device *device);
+
+// bufferStream format id a given buffered kind streams. AIRPLAY_BUFFERED_KIND_NONE
+// has no meaningful format id (session isn't buffered); callers only use this
+// once wants_buffered_kind/buffered_mode has already excluded that case.
+static uint32_t
+buffered_format_id_for_kind(enum airplay_buffered_kind kind)
+{
+  switch (kind)
+    {
+      case AIRPLAY_BUFFERED_KIND_ALAC24:          return AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO;
+      case AIRPLAY_BUFFERED_KIND_SURROUND_STEREO:
+      case AIRPLAY_BUFFERED_KIND_SURROUND_UPMIX:  return AIRPLAY_FORMAT_ID_AAC_51;
+      case AIRPLAY_BUFFERED_KIND_AAC_STEREO:
+      case AIRPLAY_BUFFERED_KIND_NONE:
+      default:                                    return AIRPLAY_FORMAT_ID_AAC_STEREO;
+    }
+}
+
 struct airplay_extra
 {
   enum airplay_devtype devtype;
@@ -302,16 +346,15 @@ struct airplay_master_session
   uint32_t output_buffer_samples;
 
   // Buffered AirPlay 2 (type 103) transport. When buffered is set, encode_ctx
-  // above is an AAC-LC stereo or ALAC 48k/24 encoder (not realtime ALAC) and
+  // above is one of the buffered encode profiles (not realtime ALAC) and
   // packets are framed via buffered_seqnum/buffered_rtptime and handed to
   // airplay_buffered_write() instead of rtp_session/rtp_packet_next
   // (rtp_session is still created and used for input quality subscription and
-  // metadata rtptime calculations). buffered_alac24 selects the ALAC profile;
-  // otherwise the AAC-LC stereo profile is used.
+  // metadata rtptime calculations). buffered_kind selects which profile.
   bool buffered;
-  bool buffered_alac24;
+  enum airplay_buffered_kind buffered_kind;
   // Samples per buffered frame for this ams's encoder: AIRPLAY_BUFFERED_SPF
-  // for the AAC-LC profile, AIRPLAY_BUFFERED_SPF_ALAC24 for buffered_alac24.
+  // for every profile except ALAC24, which uses AIRPLAY_BUFFERED_SPF_ALAC24.
   // Set once in master_session_make() and used everywhere buffered_rtptime/
   // buffered_seqnum advance by one frame.
   uint32_t buffered_spf;
@@ -408,23 +451,20 @@ struct airplay_session
   unsigned short control_port;
   unsigned short events_port;
 
-  // Buffered AirPlay 2 (type 103) transport. wants_buffered_51/wants_buffered_alac24
-  // are the provisional decision, derived in session_make() from the device's
+  // Buffered AirPlay 2 (type 103) transport. wants_buffered_kind is the
+  // provisional decision, derived in session_make() from the device's
   // selected output mode (and the global buffered_audio_enabled switch under
-  // "auto"); device_supports_buffered_51 reflects the /info capability gate
+  // "auto", and the standalone-ATV gate for the two surround modes);
+  // device_supports_buffered reflects the /info capability gate
   // (response_handler_info_generic); buffered_mode is the final decision, also
   // made there, which is what everything downstream (SETUP payload, write
   // path, flush) acts on.
-  bool wants_buffered_51;
-  // Selects the ALAC 48k/24 profile (format 21) instead of AAC-LC stereo
-  // (format 23) when wants_buffered_51 is set. Kept as its own field only so
-  // master_session_make() can be told which profile to select.
-  bool wants_buffered_alac24;
-  // bufferStream format id this session will stream when buffered: either
-  // AIRPLAY_FORMAT_ID_AAC_STEREO or AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO,
-  // depending on wants_buffered_alac24.
+  enum airplay_buffered_kind wants_buffered_kind;
+  // bufferStream format id this session will stream when buffered: 23 (AAC-LC
+  // stereo), 21 (ALAC 48k/24 stereo) or 39 (5.1, either surround kind) -
+  // derived from wants_buffered_kind, see buffered_format_id_for_kind().
   uint32_t buffered_format_id;
-  bool device_supports_buffered_51;
+  bool device_supports_buffered;
   bool buffered_mode;
   // Set whenever a fresh SETRATEANCHORTIME is needed (buffered_mode just
   // decided, or after a FLUSHBUFFERED, which invalidates the receiver's
@@ -1303,11 +1343,13 @@ master_session_cleanup(struct airplay_master_session *ams)
 }
 
 static struct airplay_master_session *
-master_session_make(struct media_quality *quality, bool use_ptp, bool buffered, bool alac24)
+master_session_make(struct media_quality *quality, bool use_ptp, enum airplay_buffered_kind kind)
 {
   struct airplay_master_session *ams;
   struct media_quality alac24_quality;
   uint64_t buffer_duration_ms;
+  bool buffered = (kind != AIRPLAY_BUFFERED_KIND_NONE);
+  bool alac24 = (kind == AIRPLAY_BUFFERED_KIND_ALAC24);
   enum transcode_profile profile;
   struct transcode_encode_setup_args encode_args;
   uint64_t clock_id;
@@ -1332,17 +1374,25 @@ master_session_make(struct media_quality *quality, bool use_ptp, bool buffered, 
   for (ams = airplay_master_sessions; ams; ams = ams->next)
     {
       if (quality_is_equal(quality, &ams->rtp_session->quality) && use_ptp == ams->use_ptp
-          && buffered == ams->buffered && alac24 == ams->buffered_alac24)
+          && kind == ams->buffered_kind)
 	return ams;
     }
 
-  // The buffered transport uses an AAC-LC stereo or ALAC 48k/24 encode
-  // profile instead of realtime ALAC; everything else about master session
-  // creation (input quality subscribe, rawbuf sized for
-  // AIRPLAY_SAMPLES_PER_PACKET input samples, rtp_session) is unchanged - the
-  // rtp_session is kept for input quality subscription and metadata rtptime
-  // calculations, buffered packets don't use rtp_packet_next.
-  profile = !buffered ? XCODE_ALAC : alac24 ? XCODE_ALAC48K_24_STEREO : XCODE_AAC48K_STEREO;
+  // Each buffered kind uses its own fixed-format encode profile instead of
+  // realtime ALAC; everything else about master session creation (input
+  // quality subscribe, rawbuf sized for AIRPLAY_SAMPLES_PER_PACKET input
+  // samples, rtp_session) is unchanged - the rtp_session is kept for input
+  // quality subscription and metadata rtptime calculations, buffered packets
+  // don't use rtp_packet_next.
+  switch (kind)
+    {
+      case AIRPLAY_BUFFERED_KIND_ALAC24:           profile = XCODE_ALAC48K_24_STEREO; break;
+      case AIRPLAY_BUFFERED_KIND_SURROUND_STEREO:  profile = XCODE_AAC48K_51_STEREO;  break;
+      case AIRPLAY_BUFFERED_KIND_SURROUND_UPMIX:   profile = XCODE_AAC48K_51_DECODE;  break;
+      case AIRPLAY_BUFFERED_KIND_AAC_STEREO:       profile = XCODE_AAC48K_STEREO;     break;
+      case AIRPLAY_BUFFERED_KIND_NONE:
+      default:                                     profile = XCODE_ALAC;              break;
+    }
   encode_args = (struct transcode_encode_setup_args){ .profile = profile, .quality = quality };
 
   // Let's create a master session
@@ -1398,7 +1448,7 @@ master_session_make(struct media_quality *quality, bool use_ptp, bool buffered, 
   ams->output_buffer_samples = (buffer_duration_ms - AIRPLAY_AUDIO_LATENCY_MS) * quality->sample_rate / 1000;
 
   ams->buffered = buffered;
-  ams->buffered_alac24 = alac24;
+  ams->buffered_kind = kind;
   ams->buffered_spf = alac24 ? AIRPLAY_BUFFERED_SPF_ALAC24 : AIRPLAY_BUFFERED_SPF;
   ams->buffered_seqnum = 0;
   ams->buffered_rtptime = 0;
@@ -1835,30 +1885,37 @@ session_make(struct output_device *device, int callback_id)
   session->wanted_metadata = extra->wanted_metadata;
   session->supports_encryption = extra->supports_encryption;
 
-  // Buffered AirPlay 2 opt-in, derived from the device's selected output mode.
-  // wants_buffered_51 is the single flag response_handler_info_generic()
-  // checks to decide whether to attempt the buffered transport at all;
-  // wants_buffered_alac24 additionally selects the ALAC 48k/24 profile over
-  // AAC-LC stereo. Surround modes are not implemented yet, so they and a bare
-  // realtime selection all leave both flags false (realtime path).
+  // Buffered AirPlay 2 opt-in, derived from the device's selected output
+  // mode. wants_buffered_kind is what response_handler_info_generic() checks
+  // to decide whether to attempt the buffered transport at all, and which
+  // profile to request if so. A surround mode selected on a device that
+  // doesn't pass the standalone-ATV gate simply leaves the kind at NONE, i.e.
+  // falls through to the realtime path with no error.
   {
     enum output_mode mode = device->preferred_mode;
-    bool wants_aac = (mode == OUTPUT_MODE_AIRPLAY2_BUFFERED);
-    bool wants_alac24 = (mode == OUTPUT_MODE_AIRPLAY2_BUFFERED_24);
+    enum airplay_buffered_kind kind = AIRPLAY_BUFFERED_KIND_NONE;
+
+    if (mode == OUTPUT_MODE_AIRPLAY2_BUFFERED)
+      kind = AIRPLAY_BUFFERED_KIND_AAC_STEREO;
+    else if (mode == OUTPUT_MODE_AIRPLAY2_BUFFERED_24)
+      kind = AIRPLAY_BUFFERED_KIND_ALAC24;
+    else if (mode == OUTPUT_MODE_AIRPLAY2_SURROUND_STEREO && airplay_device_allows_surround(device))
+      kind = AIRPLAY_BUFFERED_KIND_SURROUND_STEREO;
+    else if (mode == OUTPUT_MODE_AIRPLAY2_SURROUND_UPMIX && airplay_device_allows_surround(device))
+      kind = AIRPLAY_BUFFERED_KIND_SURROUND_UPMIX;
 
     // Under "auto", the global buffered-audio switch opts every AirPlay 2
     // device with a learned AAC-buffered capability into the buffered
     // transport ahead of realtime; explicit selections are never influenced
-    // by the switch.
+    // by the switch. Surround is never selected implicitly under "auto".
     if (mode == OUTPUT_MODE_AUTO && config_get_bool("buffered_audio_enabled", false)
         && (device->supported_modes & OUTPUT_MODE_AIRPLAY2_BUFFERED))
-      wants_aac = true;
+      kind = AIRPLAY_BUFFERED_KIND_AAC_STEREO;
 
-    session->wants_buffered_51 = wants_aac || wants_alac24;
-    session->wants_buffered_alac24 = wants_alac24;
+    session->wants_buffered_kind = kind;
   }
   session->buffered_mode = false;
-  session->buffered_format_id = session->wants_buffered_alac24 ? AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO : AIRPLAY_FORMAT_ID_AAC_STEREO;
+  session->buffered_format_id = buffered_format_id_for_kind(session->wants_buffered_kind);
 
   session->next_seq = AIRPLAY_SEQ_CONTINUE;
   session->timing_svc = &airplay_timing_svc;
@@ -1875,7 +1932,7 @@ session_make(struct output_device *device, int callback_id)
   // Always starts out on the realtime ALAC master session; if the device is
   // configured for buffered mode and the device's /info response confirms
   // support, response_handler_info_generic() swaps this for a buffered one.
-  session->master_session = master_session_make(&device->quality, extra->use_ptp, false, false);
+  session->master_session = master_session_make(&device->quality, extra->use_ptp, AIRPLAY_BUFFERED_KIND_NONE);
   if (!session->master_session)
     {
       DPRINTF(E_LOG, L_AIRPLAY, "Could not attach a master session for device '%s'\n", device->name);
@@ -1885,7 +1942,7 @@ session_make(struct output_device *device, int callback_id)
   DPRINTF(E_DBG, L_AIRPLAY,
           "Stream mode for '%s': payload_type=%u (realtime), timing=%s, reason=%s\n",
           session->devname, AIRPLAY_RTP_PAYLOADTYPE, session->master_session->use_ptp ? "PTP" : "NTP",
-          session->wants_buffered_51 ? "buffered_configured_pending_capability_check" : "default_sender_path");
+          session->wants_buffered_kind != AIRPLAY_BUFFERED_KIND_NONE ? "buffered_configured_pending_capability_check" : "default_sender_path");
   DPRINTF(E_DBG, L_AIRPLAY, "Session group UUID for '%s': %s (source=generated)\n",
           session->devname, session->group_uuid);
 
@@ -4321,8 +4378,11 @@ response_handler_teardown_failure(struct evrtsp_request *req, struct airplay_ses
 // ways: supportedAudioFormatsExtended/bufferStream as an array of format ids,
 // or supportedFormats/bufferStream as an integer bitmask with the format ids
 // as bit positions (the same convention SETUP(stream)'s audioFormat field
-// uses, see AIRPLAY_BUFFERED_AUDIOFORMAT). Surround (format 39) is not parsed
-// yet; that support-detection lands with the surround output modes.
+// uses, see AIRPLAY_BUFFERED_AUDIOFORMAT). Format 39 (5.1) sets BOTH surround
+// bits: the wire capability only says the receiver accepts a 5.1 buffered
+// stream, not which of the two ways owntone might fill the channels, so both
+// modes are recorded as available and the standalone-ATV gate (applied at
+// selection/report time, not here) decides whether either is actually offered.
 static uint32_t
 buffered_modes_parse(plist_t response)
 {
@@ -4352,6 +4412,8 @@ buffered_modes_parse(plist_t response)
 		modes |= OUTPUT_MODE_AIRPLAY2_BUFFERED;
 	      else if (fmt == AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO)
 		modes |= OUTPUT_MODE_AIRPLAY2_BUFFERED_24;
+	      else if (fmt == AIRPLAY_FORMAT_ID_AAC_51)
+		modes |= OUTPUT_MODE_AIRPLAY2_SURROUND_STEREO | OUTPUT_MODE_AIRPLAY2_SURROUND_UPMIX;
 	    }
 	}
     }
@@ -4369,6 +4431,8 @@ buffered_modes_parse(plist_t response)
 	    modes |= OUTPUT_MODE_AIRPLAY2_BUFFERED;
 	  if (mask & AIRPLAY_BUFFERED_AUDIOFORMAT(AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO))
 	    modes |= OUTPUT_MODE_AIRPLAY2_BUFFERED_24;
+	  if (mask & AIRPLAY_BUFFERED_AUDIOFORMAT(AIRPLAY_FORMAT_ID_AAC_51))
+	    modes |= OUTPUT_MODE_AIRPLAY2_SURROUND_STEREO | OUTPUT_MODE_AIRPLAY2_SURROUND_UPMIX;
 	}
     }
 
@@ -4412,11 +4476,25 @@ response_handler_info_generic(struct evrtsp_request *req, struct airplay_session
   // decision and be cached/persisted on the device for the mode-selection API.
   {
     uint32_t advertised_buffered_modes = buffered_modes_parse(response);
+    uint32_t wanted_mode_bit;
 
-    session->device_supports_buffered_51 =
-      (session->buffered_format_id == AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO)
-        ? (advertised_buffered_modes & OUTPUT_MODE_AIRPLAY2_BUFFERED_24)
-        : (advertised_buffered_modes & OUTPUT_MODE_AIRPLAY2_BUFFERED);
+    // 5.1 surround output is offered only to a standalone Apple TV. Other
+    // AirPlay 2 receivers (e.g. HomePods) may advertise the 5.1 bufferStream
+    // format, but we do not present surround output for them, so strip the two
+    // surround bits here before the capability is cached and reported.
+    if (!airplay_device_allows_surround(device))
+      advertised_buffered_modes &= ~(OUTPUT_MODE_AIRPLAY2_SURROUND_STEREO | OUTPUT_MODE_AIRPLAY2_SURROUND_UPMIX);
+
+    switch (session->wants_buffered_kind)
+      {
+        case AIRPLAY_BUFFERED_KIND_ALAC24:          wanted_mode_bit = OUTPUT_MODE_AIRPLAY2_BUFFERED_24;     break;
+        case AIRPLAY_BUFFERED_KIND_SURROUND_STEREO: wanted_mode_bit = OUTPUT_MODE_AIRPLAY2_SURROUND_STEREO; break;
+        case AIRPLAY_BUFFERED_KIND_SURROUND_UPMIX:  wanted_mode_bit = OUTPUT_MODE_AIRPLAY2_SURROUND_UPMIX;  break;
+        case AIRPLAY_BUFFERED_KIND_AAC_STEREO:
+        case AIRPLAY_BUFFERED_KIND_NONE:
+        default:                                    wanted_mode_bit = OUTPUT_MODE_AIRPLAY2_BUFFERED;        break;
+      }
+    session->device_supports_buffered = (advertised_buffered_modes & wanted_mode_bit) != 0;
 
     if (advertised_buffered_modes != device->buffered_modes)
       {
@@ -4439,21 +4517,21 @@ response_handler_info_generic(struct evrtsp_request *req, struct airplay_session
     (bool)(session->statusflags & AIRPLAY_FLAG_PASSWORD_REQUIRED), (bool)(session->statusflags & AIRPLAY_FLAG_PIN_REQUIRED));
 
   // Buffered mode decision: only relevant if the device is configured for it
-  // (session->wants_buffered_51). If the device also advertises the
+  // (session->wants_buffered_kind != NONE). If the device also advertises the
   // capability (checked against whichever format id session->buffered_format_id
-  // resolved to, including ALAC 48k/24 - the capability check above is
-  // generic), swap in a buffered master session; a failure to do so aborts
-  // the session outright (no silent downgrade mid negotiation). If the device
+  // resolved to - the capability check above is generic across all buffered
+  // kinds), swap in a buffered master session; a failure to do so aborts the
+  // session outright (no silent downgrade mid negotiation). If the device
   // doesn't advertise it, we simply proceed with the realtime ALAC master
   // session created in session_make().
-  if (session->wants_buffered_51)
+  if (session->wants_buffered_kind != AIRPLAY_BUFFERED_KIND_NONE)
     {
-      if (session->device_supports_buffered_51)
+      if (session->device_supports_buffered)
 	{
 	  struct airplay_master_session *new_ams;
 	  struct airplay_master_session *old_ams;
 
-	  new_ams = master_session_make(&device->quality, session->master_session->use_ptp, true, session->wants_buffered_alac24);
+	  new_ams = master_session_make(&device->quality, session->master_session->use_ptp, session->wants_buffered_kind);
 	  if (!new_ams)
 	    {
 	      DPRINTF(E_LOG, L_AIRPLAY, "Could not create buffered master session for '%s'\n", session->devname);
@@ -4472,9 +4550,8 @@ response_handler_info_generic(struct evrtsp_request *req, struct airplay_session
 	  session->buffered_mode = true;
 	  session->anchor_pending = true;
 
-	  DPRINTF(E_INFO, L_AIRPLAY, "Device '%s' advertises buffered format id %u; streaming via buffered protocol (%s)\n",
-	          session->devname, session->buffered_format_id,
-	          session->buffered_format_id == AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO ? "ALAC24" : "AAC-LC stereo");
+	  DPRINTF(E_INFO, L_AIRPLAY, "Device '%s' advertises buffered format id %u; streaming via buffered protocol (kind=%d)\n",
+	          session->devname, session->buffered_format_id, session->wants_buffered_kind);
 	}
       else
 	{
@@ -5132,6 +5209,32 @@ static bool
 airplay_is_appletv_device(enum airplay_devtype devtype)
 {
   return (devtype == AIRPLAY_DEV_APPLETV || devtype == AIRPLAY_DEV_APPLETV4);
+}
+
+// See the forward declaration/comment near the top of this file for the
+// rationale: surround is only offered/accepted for a standalone Apple TV,
+// not a HomePod, not a stereo-pair member, and not the visible leader of a
+// HomePod-behind-Apple-TV proxy group.
+static bool
+airplay_device_allows_surround(struct output_device *device)
+{
+  struct airplay_extra *extra;
+
+  if (!device || !device->extra_device_info)
+    return false;
+
+  extra = device->extra_device_info;
+
+  if (!airplay_is_appletv_device(extra->devtype))
+    return false;
+
+  if (outputs_device_is_tv_proxy_group(device))
+    return false;
+
+  if (device->is_grouped)
+    return false;
+
+  return true;
 }
 
 static bool
