@@ -50,6 +50,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <pwd.h>
+#include <pthread.h>
 
 #include <json.h>
 
@@ -71,6 +72,14 @@ static json_object *root;
 static char        *config_path;
 static bool         restart_required_pending;
 static enum config_startup_actions config_startup_actions;
+
+// The settings store is read and written from several threads (the player
+// thread persists per-device state, worker threads service the JSON API), and
+// json-c object graphs are not safe for concurrent access. Every public
+// accessor takes this lock; *_unlocked helpers exist for internal reuse.
+// Strings returned by the getters are borrowed from the store, so callers
+// must copy them before the value can be replaced.
+static pthread_mutex_t config_lck = PTHREAD_MUTEX_INITIALIZER;
 
 
 /* ----------------------- Built-in default config ------------------------- */
@@ -154,8 +163,8 @@ config_is_api_settable(const char *key)
 
 /* ----------------------- Flat key accessors ------------------------------- */
 
-const char *
-config_get_str(const char *key, const char *fallback)
+static const char *
+get_str_unlocked(const char *key, const char *fallback)
 {
   json_object *val;
 
@@ -170,8 +179,19 @@ config_get_str(const char *key, const char *fallback)
   return json_object_get_string(val);
 }
 
-int
-config_get_int(const char *key, int fallback)
+const char *
+config_get_str(const char *key, const char *fallback)
+{
+  const char *ret;
+
+  pthread_mutex_lock(&config_lck);
+  ret = get_str_unlocked(key, fallback);
+  pthread_mutex_unlock(&config_lck);
+  return ret;
+}
+
+static int
+get_int_unlocked(const char *key, int fallback)
 {
   json_object *val;
 
@@ -184,8 +204,19 @@ config_get_int(const char *key, int fallback)
   return json_object_get_int(val);
 }
 
-bool
-config_get_bool(const char *key, bool fallback)
+int
+config_get_int(const char *key, int fallback)
+{
+  int ret;
+
+  pthread_mutex_lock(&config_lck);
+  ret = get_int_unlocked(key, fallback);
+  pthread_mutex_unlock(&config_lck);
+  return ret;
+}
+
+static bool
+get_bool_unlocked(const char *key, bool fallback)
 {
   json_object *val;
 
@@ -198,18 +229,28 @@ config_get_bool(const char *key, bool fallback)
   return (bool)json_object_get_boolean(val);
 }
 
+bool
+config_get_bool(const char *key, bool fallback)
+{
+  bool ret;
+
+  pthread_mutex_lock(&config_lck);
+  ret = get_bool_unlocked(key, fallback);
+  pthread_mutex_unlock(&config_lck);
+  return ret;
+}
+
 int
 config_get_strlist_count(const char *key)
 {
   json_object *arr;
+  int ret = 0;
 
-  if (!root)
-    return 0;
-  if (!json_object_object_get_ex(root, key, &arr))
-    return 0;
-  if (!json_object_is_type(arr, json_type_array))
-    return 0;
-  return (int)json_object_array_length(arr);
+  pthread_mutex_lock(&config_lck);
+  if (root && json_object_object_get_ex(root, key, &arr) && json_object_is_type(arr, json_type_array))
+    ret = (int)json_object_array_length(arr);
+  pthread_mutex_unlock(&config_lck);
+  return ret;
 }
 
 const char *
@@ -217,19 +258,18 @@ config_get_strlist_item(const char *key, int index)
 {
   json_object *arr;
   json_object *item;
+  const char *ret = NULL;
 
-  if (!root)
-    return NULL;
-  if (!json_object_object_get_ex(root, key, &arr))
-    return NULL;
-  if (!json_object_is_type(arr, json_type_array))
-    return NULL;
-  if (index < 0 || index >= (int)json_object_array_length(arr))
-    return NULL;
-  item = json_object_array_get_idx(arr, index);
-  if (!item || !json_object_is_type(item, json_type_string))
-    return NULL;
-  return json_object_get_string(item);
+  pthread_mutex_lock(&config_lck);
+  if (root && json_object_object_get_ex(root, key, &arr) && json_object_is_type(arr, json_type_array)
+      && index >= 0 && index < (int)json_object_array_length(arr))
+    {
+      item = json_object_array_get_idx(arr, index);
+      if (item && json_object_is_type(item, json_type_string))
+	ret = json_object_get_string(item);
+    }
+  pthread_mutex_unlock(&config_lck);
+  return ret;
 }
 
 
@@ -255,65 +295,63 @@ get_device_obj(const char *device)
 const char *
 config_get_device_str(const char *device, const char *key, const char *fallback)
 {
-  json_object *dev = get_device_obj(device);
+  json_object *dev;
   json_object *val;
+  const char *ret = fallback;
 
-  if (!dev)
-    return fallback;
-  if (!json_object_object_get_ex(dev, key, &val))
-    return fallback;
-  if (json_object_is_type(val, json_type_null))
-    return fallback;
-  if (!json_object_is_type(val, json_type_string))
-    return fallback;
-  return json_object_get_string(val);
+  pthread_mutex_lock(&config_lck);
+  dev = get_device_obj(device);
+  if (dev && json_object_object_get_ex(dev, key, &val)
+      && !json_object_is_type(val, json_type_null) && json_object_is_type(val, json_type_string))
+    ret = json_object_get_string(val);
+  pthread_mutex_unlock(&config_lck);
+  return ret;
 }
 
 int
 config_get_device_int(const char *device, const char *key, int fallback)
 {
-  json_object *dev = get_device_obj(device);
+  json_object *dev;
   json_object *val;
+  int ret = fallback;
 
-  if (!dev)
-    return fallback;
-  if (!json_object_object_get_ex(dev, key, &val))
-    return fallback;
-  if (!json_object_is_type(val, json_type_int))
-    return fallback;
-  return json_object_get_int(val);
+  pthread_mutex_lock(&config_lck);
+  dev = get_device_obj(device);
+  if (dev && json_object_object_get_ex(dev, key, &val) && json_object_is_type(val, json_type_int))
+    ret = json_object_get_int(val);
+  pthread_mutex_unlock(&config_lck);
+  return ret;
 }
 
 bool
 config_get_device_bool(const char *device, const char *key, bool fallback)
 {
-  json_object *dev = get_device_obj(device);
+  json_object *dev;
   json_object *val;
+  bool ret = fallback;
 
-  if (!dev)
-    return fallback;
-  if (!json_object_object_get_ex(dev, key, &val))
-    return fallback;
-  if (!json_object_is_type(val, json_type_boolean))
-    return fallback;
-  return (bool)json_object_get_boolean(val);
+  pthread_mutex_lock(&config_lck);
+  dev = get_device_obj(device);
+  if (dev && json_object_object_get_ex(dev, key, &val) && json_object_is_type(val, json_type_boolean))
+    ret = (bool)json_object_get_boolean(val);
+  pthread_mutex_unlock(&config_lck);
+  return ret;
 }
 
 int
 config_get_device_reconnect(const char *device)
 {
-  json_object *dev = get_device_obj(device);
+  json_object *dev;
   json_object *val;
+  int ret = -1;
 
-  if (!dev)
-    return -1;
-  if (!json_object_object_get_ex(dev, "reconnect", &val))
-    return -1;
-  if (json_object_is_type(val, json_type_null))
-    return -1;
-  if (!json_object_is_type(val, json_type_boolean))
-    return -1;
-  return json_object_get_boolean(val) ? 1 : 0;
+  pthread_mutex_lock(&config_lck);
+  dev = get_device_obj(device);
+  if (dev && json_object_object_get_ex(dev, "reconnect", &val)
+      && !json_object_is_type(val, json_type_null) && json_object_is_type(val, json_type_boolean))
+    ret = json_object_get_boolean(val) ? 1 : 0;
+  pthread_mutex_unlock(&config_lck);
+  return ret;
 }
 
 static int config_write(void); /* forward declaration */
@@ -484,20 +522,20 @@ config_startup_actions_get(void)
   return config_startup_actions;
 }
 
-int
-config_set_device_str(const char *device, const char *key, const char *value)
+static json_object *
+set_device_obj_prepare(const char *device)
 {
   json_object *devices;
   json_object *dev;
 
-  if (!root || !device || !key)
-    return -1;
+  if (!root || !device)
+    return NULL;
 
   if (!json_object_object_get_ex(root, "airplay_devices", &devices))
     {
       devices = json_object_new_object();
       if (!devices)
-        return -1;
+        return NULL;
       json_object_object_add(root, "airplay_devices", devices);
     }
 
@@ -505,43 +543,53 @@ config_set_device_str(const char *device, const char *key, const char *value)
     {
       dev = json_object_new_object();
       if (!dev)
-        return -1;
+        return NULL;
       json_object_object_add(devices, device, dev);
     }
 
-  json_object_object_add(dev, key, value ? json_object_new_string(value) : NULL);
+  return dev;
+}
 
-  return config_write();
+int
+config_set_device_str(const char *device, const char *key, const char *value)
+{
+  json_object *dev;
+  int ret = -1;
+
+  if (!key)
+    return -1;
+
+  pthread_mutex_lock(&config_lck);
+  dev = set_device_obj_prepare(device);
+  if (dev)
+    {
+      json_object_object_add(dev, key, value ? json_object_new_string(value) : NULL);
+      ret = config_write();
+    }
+  pthread_mutex_unlock(&config_lck);
+
+  return ret;
 }
 
 int
 config_set_device_int(const char *device, const char *key, int value)
 {
-  json_object *devices;
   json_object *dev;
+  int ret = -1;
 
-  if (!root || !device || !key)
+  if (!key)
     return -1;
 
-  if (!json_object_object_get_ex(root, "airplay_devices", &devices))
+  pthread_mutex_lock(&config_lck);
+  dev = set_device_obj_prepare(device);
+  if (dev)
     {
-      devices = json_object_new_object();
-      if (!devices)
-        return -1;
-      json_object_object_add(root, "airplay_devices", devices);
+      json_object_object_add(dev, key, json_object_new_int(value));
+      ret = config_write();
     }
+  pthread_mutex_unlock(&config_lck);
 
-  if (!json_object_object_get_ex(devices, device, &dev))
-    {
-      dev = json_object_new_object();
-      if (!dev)
-        return -1;
-      json_object_object_add(devices, device, dev);
-    }
-
-  json_object_object_add(dev, key, json_object_new_int(value));
-
-  return config_write();
+  return ret;
 }
 
 
@@ -636,7 +684,8 @@ config_set_str(const char *key, const char *value)
   if (!config_is_api_settable(key))
     return -1;
 
-  current = config_get_str(key, NULL);
+  pthread_mutex_lock(&config_lck);
+  current = get_str_unlocked(key, NULL);
   changed = ((current == NULL && value != NULL)
           || (current != NULL && value == NULL)
           || (current && value && strcmp(current, value) != 0));
@@ -645,6 +694,7 @@ config_set_str(const char *key, const char *value)
   ret = config_write();
   if (ret == 0 && changed && config_key_requires_restart(key))
     restart_required_pending = true;
+  pthread_mutex_unlock(&config_lck);
 
   return ret;
 }
@@ -667,11 +717,13 @@ config_set_int(const char *key, int value)
   if (strcmp(key, "buffered_encoder_budget") == 0 && (value < 0 || value > 64))
     return -1;
 
-  current = config_get_int(key, INT_MIN);
+  pthread_mutex_lock(&config_lck);
+  current = get_int_unlocked(key, INT_MIN);
   json_object_object_add(root, key, json_object_new_int(value));
   ret = config_write();
   if (ret == 0 && current != value && config_key_requires_restart(key))
     restart_required_pending = true;
+  pthread_mutex_unlock(&config_lck);
 
   return ret;
 }
@@ -685,11 +737,13 @@ config_set_bool(const char *key, bool value)
   if (!config_is_api_settable(key))
     return -1;
 
-  current = config_get_bool(key, !value);
+  pthread_mutex_lock(&config_lck);
+  current = get_bool_unlocked(key, !value);
   json_object_object_add(root, key, json_object_new_boolean(value));
   ret = config_write();
   if (ret == 0 && current != value && config_key_requires_restart(key))
     restart_required_pending = true;
+  pthread_mutex_unlock(&config_lck);
 
   return ret;
 }
@@ -697,7 +751,12 @@ config_set_bool(const char *key, bool value)
 bool
 config_restart_required_get(void)
 {
-  return restart_required_pending;
+  bool ret;
+
+  pthread_mutex_lock(&config_lck);
+  ret = restart_required_pending;
+  pthread_mutex_unlock(&config_lck);
+  return ret;
 }
 
 
@@ -735,8 +794,9 @@ config_load(const char *path)
     strncpy(hostname, "localhost", sizeof(hostname) - 1);
   libhash = murmur_hash64(hostname, strlen(hostname), 0);
 
-  // Resolve the uid to run as
-  uid = config_get_str("uid", "owntone");
+  // Resolve the uid to run as. config_load() runs before any other thread
+  // exists, so the unlocked getter is fine here.
+  uid = get_str_unlocked("uid", "owntone");
   pw = getpwnam(uid);
   if (!pw)
     {
@@ -774,15 +834,18 @@ config_reload(void)
       return -1;
     }
 
+  pthread_mutex_lock(&config_lck);
   if (root)
     json_object_put(root);
   root = new_root;
+  pthread_mutex_unlock(&config_lck);
   return 0;
 }
 
 void
 config_unload(void)
 {
+  pthread_mutex_lock(&config_lck);
   if (root)
     {
       json_object_put(root);
@@ -792,4 +855,5 @@ config_unload(void)
   config_path = NULL;
   restart_required_pending = false;
   config_startup_actions = CONFIG_STARTUP_UNCHANGED;
+  pthread_mutex_unlock(&config_lck);
 }
