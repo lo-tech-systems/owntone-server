@@ -53,6 +53,9 @@ int
 logger_severity(void);
 
 void
+logger_severity_set(int severity);
+
+void
 logger_domains(void);
 
 void

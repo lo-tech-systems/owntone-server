@@ -316,6 +316,11 @@ jsonapi_reply_settings_option_put(struct httpd_request *hreq)
   if (strcmp(entry->config_key, "device_removal_grace_period") == 0)
     player_set_device_removal_grace_secs(intval);
 
+  // The logger threshold is read once at startup, so a persisted change must
+  // also be applied to the running logger to take effect without a restart.
+  if (strcmp(entry->config_key, "loglevel") == 0)
+    logger_severity_set(intval);
+
   restart_required = config_restart_required_get();
 
   CHECK_NULL(L_WEB, jreply = json_object_new_object());

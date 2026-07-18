@@ -424,6 +424,17 @@ logger_severity(void)
   return threshold;
 }
 
+void
+logger_severity_set(int severity)
+{
+  if (severity < E_FATAL || severity > E_SPAM)
+    return;
+
+  LOGGER_CHECK_ERR(pthread_mutex_lock(&logger_lck));
+  threshold = severity;
+  LOGGER_CHECK_ERR(pthread_mutex_unlock(&logger_lck));
+}
+
 /* The functions below are used at init time with a single thread running */
 void
 logger_domains(void)
