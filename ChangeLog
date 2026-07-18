@@ -24,6 +24,14 @@
 - improved: HomePod stereo-pair members clock-sync directly with each other
   for a tighter stereo image
 
+## Version 29.0-mini.3
+
+- new: added support for stereo playback to HomePods
+
+## Version 29.0-mini.1
+
+- new: initial release of paired-back OwnTone for autostream
+
 ## Version 29.0 - 2025-09-12
 
 - fix: client name showing as blank when pairing with MacOS
