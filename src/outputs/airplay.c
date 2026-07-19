@@ -3578,8 +3578,10 @@ payload_make_setpeers(struct evrtsp_request *req, struct airplay_session *sessio
 
   root = plist_new_array();
 
-  // SETPEERS lists our own addresses, so the receiver can pick a PTP path
-  // back to us; it does not include the receiver's own address.
+  // The PTP timing-peer list: the receiver's own address first, then ours.
+  // Some receivers appear to need their own address in
+  // this list to fully join the timing group and render, so include it.
+  plist_array_append_item(root, plist_new_string(session->address));
   if (session->local_v4_address)
     plist_array_append_item(root, plist_new_string(session->local_v4_address));
   if (session->local_v6_address)
