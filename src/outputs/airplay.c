@@ -1536,8 +1536,22 @@ master_session_make(struct media_quality *quality, bool use_ptp, enum airplay_bu
     }
   ams->buffered_spf = alac24 ? AIRPLAY_BUFFERED_SPF_ALAC24 : AIRPLAY_BUFFERED_SPF;
   ams->buffered_sample_rate = (kind == AIRPLAY_BUFFERED_KIND_AAC44_STEREO) ? 44100 : AIRPLAY_BUFFERED_SAMPLE_RATE;
-  ams->buffered_seqnum = 0;
-  ams->buffered_rtptime = 0;
+  // The buffered stream begins at a randomized RTP timestamp
+  // and sequence number rather than zero (RFC 3550), so the encrypted stream
+  // does not start from a predictable point. The sequence number is carried in
+  // 23 bits on the wire (see the & 0x7fffff mask at its use sites).
+  if (buffered)
+    {
+      uint32_t rnd_seqnum;
+      gcry_randomize(&ams->buffered_rtptime, sizeof(ams->buffered_rtptime), GCRY_STRONG_RANDOM);
+      gcry_randomize(&rnd_seqnum, sizeof(rnd_seqnum), GCRY_STRONG_RANDOM);
+      ams->buffered_seqnum = rnd_seqnum & 0x7fffff;
+    }
+  else
+    {
+      ams->buffered_seqnum = 0;
+      ams->buffered_rtptime = 0;
+    }
   ams->buffered_marker_pending = true;
   ams->buffered_anchor_mapped = false;
 
