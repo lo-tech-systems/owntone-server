@@ -270,7 +270,7 @@ init_settings(struct settings_ctx *settings, enum transcode_profile profile, str
   // caller's *input*) must not override sample_rate/channels/bits_per_sample
   // below.
   bool fixed_output = (profile == XCODE_AAC48K_51_DECODE || profile == XCODE_AAC48K_51_STEREO
-                       || profile == XCODE_AAC48K_STEREO || profile == XCODE_ALAC48K_24_STEREO);
+                       || profile == XCODE_AAC48K_STEREO || profile == XCODE_AAC44K_STEREO || profile == XCODE_ALAC48K_24_STEREO);
 
   memset(settings, 0, sizeof(struct settings_ctx));
 
@@ -362,6 +362,24 @@ init_settings(struct settings_ctx *settings, enum transcode_profile profile, str
 	settings->audio_codec = AV_CODEC_ID_AAC;
 	settings->sample_format = AV_SAMPLE_FMT_FLTP;
 	settings->sample_rate = 48000;
+	settings->bit_rate = 256000;
+#if USE_CH_LAYOUT
+	av_channel_layout_from_mask(&settings->channel_layout, AV_CH_LAYOUT_STEREO);
+#else
+	settings->channel_layout = AV_CH_LAYOUT_STEREO;
+	settings->nb_channels = 2;
+#endif
+	break;
+
+      // Raw AAC-LC frames at 44.1kHz stereo (no container) - the buffered
+      // AirPlay 2 payload for bufferStream format 22 (no resample: pipe
+      // input is already 44.1kHz).
+      case XCODE_AAC44K_STEREO:
+	settings->encode_audio = true;
+	settings->format = "data";
+	settings->audio_codec = AV_CODEC_ID_AAC;
+	settings->sample_format = AV_SAMPLE_FMT_FLTP;
+	settings->sample_rate = 44100;
 	settings->bit_rate = 256000;
 #if USE_CH_LAYOUT
 	av_channel_layout_from_mask(&settings->channel_layout, AV_CH_LAYOUT_STEREO);

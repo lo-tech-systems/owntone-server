@@ -8,6 +8,7 @@ enum airplay_buffered_kind
 {
   AIRPLAY_BUFFERED_KIND_NONE,
   AIRPLAY_BUFFERED_KIND_AAC_STEREO,       // bufferStream format 23
+  AIRPLAY_BUFFERED_KIND_AAC44_STEREO,     // bufferStream format 22 (AAC-LC 44.1kHz)
   AIRPLAY_BUFFERED_KIND_ALAC24,           // bufferStream format 21
   // Both of the below stream bufferStream format 39 (AAC-LC 48kHz 5.1); they
   // differ only in how the stereo source is placed into the six channels.

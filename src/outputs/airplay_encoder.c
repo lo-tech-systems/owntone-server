@@ -312,6 +312,7 @@ airplay_encoder_start(struct airplay_encoder **enc_p, enum airplay_buffered_kind
       case AIRPLAY_BUFFERED_KIND_SURROUND_STEREO: profile = XCODE_AAC48K_51_STEREO;  break;
       case AIRPLAY_BUFFERED_KIND_SURROUND_UPMIX:  profile = XCODE_AAC48K_51_DECODE;  break;
       case AIRPLAY_BUFFERED_KIND_AAC_STEREO:      profile = XCODE_AAC48K_STEREO;     break;
+      case AIRPLAY_BUFFERED_KIND_AAC44_STEREO:    profile = XCODE_AAC44K_STEREO;     break;
       case AIRPLAY_BUFFERED_KIND_NONE:
       default:                                    profile = XCODE_ALAC;             break;
     }

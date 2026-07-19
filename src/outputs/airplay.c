@@ -111,6 +111,10 @@
 // universal baseline every AirPlay 2 receiver is expected to accept over the
 // buffered transport.
 #define AIRPLAY_FORMAT_ID_AAC_STEREO        23
+// AAC-LC 44.1kHz stereo. A lower-priority alternative to format 23, used
+// only when a receiver advertises it (and not 23); needs no resample since
+// the pipe input is already 44.1kHz.
+#define AIRPLAY_FORMAT_ID_AAC44K_STEREO     22
 // ALAC 48kHz/24-bit stereo, for lossless sources. The bufferStream capability
 // list encodes each format id as a bit position (format id N is bit N of the
 // mask), the same convention SETUP(stream)'s audioFormat field uses.
@@ -287,6 +291,7 @@ buffered_format_id_for_kind(enum airplay_buffered_kind kind)
       case AIRPLAY_BUFFERED_KIND_ALAC24:          return AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO;
       case AIRPLAY_BUFFERED_KIND_SURROUND_STEREO:
       case AIRPLAY_BUFFERED_KIND_SURROUND_UPMIX:  return AIRPLAY_FORMAT_ID_AAC_51;
+      case AIRPLAY_BUFFERED_KIND_AAC44_STEREO:    return AIRPLAY_FORMAT_ID_AAC44K_STEREO;
       case AIRPLAY_BUFFERED_KIND_AAC_STEREO:
       case AIRPLAY_BUFFERED_KIND_NONE:
       default:                                    return AIRPLAY_FORMAT_ID_AAC_STEREO;
@@ -358,6 +363,9 @@ struct airplay_master_session
   // Set once in master_session_make() and used everywhere buffered_rtptime/
   // buffered_seqnum advance by one frame.
   uint32_t buffered_spf;
+  // rtptime/anchor timescale, matches the format's sample rate (44100 for
+  // format 22, else AIRPLAY_BUFFERED_SAMPLE_RATE)
+  uint32_t buffered_sample_rate;
   uint32_t buffered_seqnum;
   uint32_t buffered_rtptime;
   bool buffered_marker_pending;
@@ -1527,6 +1535,7 @@ master_session_make(struct media_quality *quality, bool use_ptp, enum airplay_bu
       DPRINTF(E_INFO, L_AIRPLAY, "Buffered encoder (kind %d, cost %d) admitted: %d/%d in use\n", kind, cost, encoder_cost_in_use, budget);
     }
   ams->buffered_spf = alac24 ? AIRPLAY_BUFFERED_SPF_ALAC24 : AIRPLAY_BUFFERED_SPF;
+  ams->buffered_sample_rate = (kind == AIRPLAY_BUFFERED_KIND_AAC44_STEREO) ? 44100 : AIRPLAY_BUFFERED_SAMPLE_RATE;
   ams->buffered_seqnum = 0;
   ams->buffered_rtptime = 0;
   ams->buffered_marker_pending = true;
@@ -3129,13 +3138,14 @@ payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *ses
       anchor_rtptime = ams->buffered_rtptime + AIRPLAY_BUFFERED_JOIN_SLACK_FRAMES * ams->buffered_spf;
 
       // Extend the stored mapping to the anchor frame: rtptime advances at
-      // AIRPLAY_BUFFERED_SAMPLE_RATE per networkTime second (rate=1).
-      // 384307168202282 is floor(2^64 / 48000), i.e. frac units per sample;
-      // detect carry into secs via unsigned overflow.
+      // ams->buffered_sample_rate per networkTime second (rate=1).
+      // UINT64_MAX / rate is floor(2^64 / rate), i.e. frac units per sample
+      // (note UINT64_MAX/48000 == 384307168202282, preserving the existing
+      // 48kHz behaviour); detect carry into secs via unsigned overflow.
       delta = anchor_rtptime - ams->buffered_anchor_map_rtptime;
-      secs = ams->buffered_anchor_map_secs + delta / AIRPLAY_BUFFERED_SAMPLE_RATE;
+      secs = ams->buffered_anchor_map_secs + delta / ams->buffered_sample_rate;
       frac_before = ams->buffered_anchor_map_frac;
-      frac = frac_before + (uint64_t)(delta % AIRPLAY_BUFFERED_SAMPLE_RATE) * (uint64_t)384307168202282ULL;
+      frac = frac_before + (uint64_t)(delta % ams->buffered_sample_rate) * (UINT64_MAX / ams->buffered_sample_rate);
       if (frac < frac_before)
 	secs++;
     }
@@ -4486,11 +4496,14 @@ response_handler_teardown_failure(struct evrtsp_request *req, struct airplay_ses
 // modes are recorded as available and the standalone-ATV gate (applied at
 // selection/report time, not here) decides whether either is actually offered.
 static uint32_t
-buffered_modes_parse(plist_t response)
+buffered_modes_parse(plist_t response, bool *has_aac48, bool *has_aac44)
 {
   uint32_t modes = 0;
   plist_t item;
   plist_t buffer_stream;
+
+  *has_aac48 = false;
+  *has_aac44 = false;
 
   item = plist_dict_get_item(response, "supportedAudioFormatsExtended");
   if (item)
@@ -4511,7 +4524,15 @@ buffered_modes_parse(plist_t response)
 
 	      plist_get_uint_val(elm, &fmt);
 	      if (fmt == AIRPLAY_FORMAT_ID_AAC_STEREO)
-		modes |= OUTPUT_MODE_AIRPLAY2_BUFFERED;
+		{
+		  modes |= OUTPUT_MODE_AIRPLAY2_BUFFERED;
+		  *has_aac48 = true;
+		}
+	      else if (fmt == AIRPLAY_FORMAT_ID_AAC44K_STEREO)
+		{
+		  modes |= OUTPUT_MODE_AIRPLAY2_BUFFERED;
+		  *has_aac44 = true;
+		}
 	      else if (fmt == AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO)
 		modes |= OUTPUT_MODE_AIRPLAY2_BUFFERED_24;
 	      else if (fmt == AIRPLAY_FORMAT_ID_AAC_51)
@@ -4530,7 +4551,15 @@ buffered_modes_parse(plist_t response)
 
 	  plist_get_uint_val(buffer_stream, &mask);
 	  if (mask & AIRPLAY_BUFFERED_AUDIOFORMAT(AIRPLAY_FORMAT_ID_AAC_STEREO))
-	    modes |= OUTPUT_MODE_AIRPLAY2_BUFFERED;
+	    {
+	      modes |= OUTPUT_MODE_AIRPLAY2_BUFFERED;
+	      *has_aac48 = true;
+	    }
+	  if (mask & AIRPLAY_BUFFERED_AUDIOFORMAT(AIRPLAY_FORMAT_ID_AAC44K_STEREO))
+	    {
+	      modes |= OUTPUT_MODE_AIRPLAY2_BUFFERED;
+	      *has_aac44 = true;
+	    }
 	  if (mask & AIRPLAY_BUFFERED_AUDIOFORMAT(AIRPLAY_FORMAT_ID_ALAC48K_24_STEREO))
 	    modes |= OUTPUT_MODE_AIRPLAY2_BUFFERED_24;
 	  if (mask & AIRPLAY_BUFFERED_AUDIOFORMAT(AIRPLAY_FORMAT_ID_AAC_51))
@@ -4577,7 +4606,8 @@ response_handler_info_generic(struct evrtsp_request *req, struct airplay_session
   // session happens to want), so the result can both drive this session's
   // decision and be cached/persisted on the device for the mode-selection API.
   {
-    uint32_t advertised_buffered_modes = buffered_modes_parse(response);
+    bool has_aac48 = false, has_aac44 = false;
+    uint32_t advertised_buffered_modes = buffered_modes_parse(response, &has_aac48, &has_aac44);
     uint32_t wanted_mode_bit;
 
     // 5.1 surround output is offered only to a standalone Apple TV. Other
@@ -4597,6 +4627,19 @@ response_handler_info_generic(struct evrtsp_request *req, struct airplay_session
         default:                                    wanted_mode_bit = OUTPUT_MODE_AIRPLAY2_BUFFERED;        break;
       }
     session->device_supports_buffered = (advertised_buffered_modes & wanted_mode_bit) != 0;
+
+    // For the plain AAC stereo path a receiver may advertise the 48kHz format
+    // (23), the 44.1kHz format (22), or both. Prefer 23; fall back to the
+    // 44.1kHz format only when the receiver offers 22 but not 23. A receiver
+    // that lists neither leaves device_supports_buffered false above and stays
+    // on realtime.
+    if (session->wants_buffered_kind == AIRPLAY_BUFFERED_KIND_AAC_STEREO
+        && session->device_supports_buffered && has_aac44 && !has_aac48)
+      {
+        session->wants_buffered_kind = AIRPLAY_BUFFERED_KIND_AAC44_STEREO;
+        session->buffered_format_id = buffered_format_id_for_kind(session->wants_buffered_kind);
+        DPRINTF(E_INFO, L_AIRPLAY, "Device '%s' advertises 44.1kHz AAC (format 22) but not 48kHz (23); using format 22\n", session->devname);
+      }
 
     if (advertised_buffered_modes != device->buffered_modes)
       {
