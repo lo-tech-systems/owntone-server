@@ -1226,6 +1226,50 @@ play(struct input_source *source)
 
   input_write(source->evbuf, &source->quality, flags);
 
+  // Periodic (30 s) pipe-input feed-rate diagnostics for the cumulative-dropout
+  // hunt: the rate owntone pulls from the monitor's FIFO should track the
+  // monitor's nominal output rate. A sustained shortfall here means the source
+  // is starving playback (drift/underrun); a match rules the input side out.
+  {
+    static uint64_t       pipe_stats_bytes = 0;
+    static struct timespec pipe_stats_last = { 0, 0 };
+    struct timespec now_ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &now_ts);
+    if (pipe_stats_last.tv_sec == 0 && pipe_stats_last.tv_nsec == 0)
+      pipe_stats_last = now_ts;
+    pipe_stats_bytes += (ret > 0) ? (uint64_t)ret : 0;
+
+    double dt = (now_ts.tv_sec - pipe_stats_last.tv_sec)
+                + (now_ts.tv_nsec - pipe_stats_last.tv_nsec) / 1000000000.0;
+
+    if (dt >= 30.0)
+      {
+        double bytes_per_s  = pipe_stats_bytes / dt;
+        int    bpf          = 2 * (pipe_bits_per_sample / 8); // stereo
+        double frames_per_s = (bpf > 0) ? bytes_per_s / bpf : 0.0;
+        double dev          = frames_per_s - (double)pipe_sample_rate;
+
+        if (dev < 0.0)
+          dev = -dev;
+
+        // The pipe feed should track the source's nominal rate. A short source
+        // silence is still fed at nominal, so it does NOT trip this; a >0.5%
+        // shortfall over 30 s means the source stopped feeding (e.g. the monitor
+        // gated a long silence) and playback is starving - escalate to WARN.
+        // The routine line stays at DEBUG.
+        if (dev > 0.005 * (double)pipe_sample_rate)
+          DPRINTF(E_WARN, L_PLAYER, "[stats] pipe input '%s': %.1f frames/s off nominal %d over %.0fs  <-- SOURCE FEED STARVING\n",
+                  source->path, frames_per_s, pipe_sample_rate, dt);
+        else
+          DPRINTF(E_DBG, L_PLAYER, "[stats] pipe input '%s': %.0f bytes/s = %.1f frames/s (nominal %d) over %.0fs\n",
+                  source->path, bytes_per_s, frames_per_s, pipe_sample_rate, dt);
+
+        pipe_stats_bytes = 0;
+        pipe_stats_last  = now_ts;
+      }
+  }
+
   return 0;
 }
 
