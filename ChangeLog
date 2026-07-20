@@ -1,5 +1,22 @@
 # Changelog
 
+## Version 1.0.0
+
+First independently versioned release. Renames the project to owntone-mini and
+resets versioning from the 29.0-mini.x series. Changes since 29.0-mini.8:
+
+- new: 44.1kHz AAC-LC buffered output (bufferStream format 22)
+- improved: buffered stream starts from a randomized RTP timestamp and sequence
+  number
+- improved: SETPEERS peer list includes the receiver's own address, and
+  libairptp advertises a strong PTP grandmaster for prompt receiver lock
+- improved: AirPlay 2 protocol selection and session termination refined
+- improved: 5.1 AAC encoding selects a CPU-class-appropriate quantization path;
+  fixed the 5.1 static pan filter syntax
+- fix: pipe autostart watch stays attached to its FIFO
+- fix: settings store access serialized across threads; loglevel changes now
+  apply to the running logger
+
 ## Version 29.0-mini.8
 
 - improved: buffered AirPlay 2 encoding now runs on a dedicated thread per
