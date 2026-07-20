@@ -1706,6 +1706,21 @@ session_success(struct airplay_session *session)
   session_cleanup(session);
 }
 
+// Local teardown for a normal stop. An AirPlay 2 session (buffered or realtime)
+// is ended by closing the connection rather than issuing an RTSP TEARDOWN (the
+// RAOP/AirPlay 1 mechanism), so we report stopped and drop the session - which
+// closes the RTSP connection - rather than running AIRPLAY_SEQ_STOP. Deferred to
+// avoid re-entrancy from device_stop, mirroring deferred_session_failure().
+static void
+deferred_session_stop_cb(int fd, short what, void *arg)
+{
+  struct airplay_session *session = arg;
+
+  DPRINTF(E_DBG, L_AIRPLAY, "Closing session (deferred stop, no TEARDOWN) on device '%s'\n", session->devname);
+  session->state = AIRPLAY_STATE_STOPPED;
+  session_success(session);
+}
+
 static void
 session_connected(struct airplay_session *session)
 {
@@ -2013,10 +2028,15 @@ session_make(struct output_device *device, int callback_id)
     else if (mode == OUTPUT_MODE_AIRPLAY2_SURROUND_UPMIX && airplay_device_allows_surround(device))
       kind = AIRPLAY_BUFFERED_KIND_SURROUND_UPMIX;
 
-    // Under "auto", the global buffered-audio switch opts every AirPlay 2
-    // device with a learned AAC-buffered capability into the buffered
-    // transport ahead of realtime; explicit selections are never influenced
-    // by the switch. Surround is never selected implicitly under "auto".
+    // Under "auto", the global buffered-audio switch opts an AirPlay 2 device
+    // into the buffered transport only once it has advertised an actual AAC
+    // bufferStream format (learned via GET /info, reflected in supported_modes).
+    // A device that only sets the SupportsBufferedAudio flag (mDNS bit 40) but
+    // lists no concrete format is NOT driven over buffered - the RAOP/AirPlay 1
+    // path is used instead (see effective_type_resolve), since such a device may
+    // not play a buffered stream reliably. Explicit selections are never
+    // influenced by the switch; surround is never selected implicitly under
+    // "auto".
     if (mode == OUTPUT_MODE_AUTO && config_get_bool("buffered_audio_enabled", false)
         && (device->supported_modes & OUTPUT_MODE_AIRPLAY2_BUFFERED))
       kind = AIRPLAY_BUFFERED_KIND_AAC_STEREO;
@@ -4648,7 +4668,8 @@ response_handler_info_generic(struct evrtsp_request *req, struct airplay_session
     // (23), the 44.1kHz format (22), or both. Prefer 23; fall back to the
     // 44.1kHz format only when the receiver offers 22 but not 23. A receiver
     // that lists neither leaves device_supports_buffered false above and stays
-    // on realtime.
+    // on realtime (and under "auto" such a device is routed to AirPlay 1 before
+    // it ever reaches this backend - see effective_type_resolve).
     if (session->wants_buffered_kind == AIRPLAY_BUFFERED_KIND_AAC_STEREO
         && session->device_supports_buffered && has_aac44 && !has_aac48)
       {
@@ -5855,10 +5876,15 @@ static int
 airplay_device_stop(struct output_device *device, int callback_id)
 {
   struct airplay_session *session = device->session;
+  struct timeval tv;
 
   session->callback_id = callback_id;
 
-  sequence_start(AIRPLAY_SEQ_STOP, session, NULL, "device_stop");
+  // End an AirPlay 2 session by closing the connection rather than sending an
+  // RTSP TEARDOWN (SEQ_STOP). RAOP/AirPlay 1 teardown lives in its own backend
+  // and is unaffected. Deferred to avoid re-entrancy.
+  evutil_timerclear(&tv);
+  event_base_once(evbase_player, -1, EV_TIMEOUT, deferred_session_stop_cb, session, &tv);
 
   return 1;
 }
