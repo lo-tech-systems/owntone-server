@@ -22,12 +22,7 @@ dist_man_MANS = owntone.8
 nobase_dist_doc_DATA = \
 	UPGRADING \
 	README.md \
-	docs/index.md \
-	docs/getting-started.md \
-	docs/installation.md \
 	docs/configuration.md \
-	docs/building.md \
-	docs/development.md \
 	docs/changelog.md \
 	docs/control-clients/cli-api.md \
 	docs/audio-outputs/airplay.md \
