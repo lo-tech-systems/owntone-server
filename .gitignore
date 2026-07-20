@@ -41,8 +41,6 @@ owntone@.service
 /.project
 /.autotools
 
-# ignore MkDocs generated documentation
-/site/
 /test/
 /docs/working/
 

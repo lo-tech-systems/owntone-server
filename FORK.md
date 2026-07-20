@@ -66,34 +66,26 @@ sqlext/sqlext.c / sqlext/Makefile.am
 |------|---------|
 | `src/queue.c` / `src/queue.h` | In-memory single-item queue (replaces SQLite-backed `db_queue_*`) |
 | `src/owntone_config.c` / `src/owntone_config.h` | JSON config reader (replaces libconfuse `conffile.c`) |
+| `src/outputs/airplay_buffered.c` / `.h` | AirPlay 2 buffered-audio (stream type 103) transport and ChaCha20-Poly1305 framing |
+| `src/outputs/airplay_encoder.c` / `.h` | Threaded per-transform audio encoder feeding the buffered transport |
+| `src/outputs/airplay_common.h` | Shared definitions for the buffered/encoder units |
 
 ### Modified files (summary)
 
 | File | Change |
 |------|--------|
 | `src/player.c` / `src/player.h` | Removed seek, shuffle, repeat, multi-queue, verification kickoff |
-| `src/transcode.c` / `src/transcode.h` | Reduced to encode-only path (PCM → ALAC/PCM16); removed file decode, seeking, metadata extraction |
+| `src/transcode.c` / `src/transcode.h` | Reduced to encode-only path (PCM → ALAC/PCM16); removed file decode, seeking, metadata extraction. Extended with AirPlay 2 encode profiles (48 kHz AAC stereo, AAC 5.1, 24-bit ALAC), ffmpeg surround-upmix filters, and CPU-class AAC coder selection |
 | `src/outputs.c` | Removed XCODE_PCM24/32/UNKNOWN dead references |
 | `src/misc.c` / `src/misc.h` | Removed: `unicode_fixup_string`, `two_str_hash`, `keyval_sort`, `linear_regression`, `m_readfile`, `atrim`; removed libunistring includes |
 | `src/listener.h` | Reduced to 3 event types: PLAYER, VOLUME, SPEAKER |
 | `src/logger.c` / `src/logger.h` | Removed unused log domains; removed `logger_alsa` |
 | `src/outputs/raop.c` | Fixed `raop_metadata_prepare` to build DMAP text buffer and load file artwork |
-| `src/outputs/airplay.c` | Fixed `airplay_metadata_prepare` to build DMAP text buffer and load file artwork |
+| `src/outputs/airplay.c` | Substantially extended: AirPlay 2 buffered-audio output (RTP type 0x67 / stream type 103) with ChaCha20-Poly1305 framing; PTP-timed playback to HomePod stereo pairs (SETPEERS peer setup, timing-anchor handling); stream-type and audio-format selection/capability negotiation; 5.1 surround to a standalone Apple TV; connection retry/backoff; plus the `airplay_metadata_prepare` DMAP/artwork fix |
+| `src/libairptp/` / `src/ptpd.*` | Inherited from OwnTone and tuned: PTP grandmaster/announce settings for prompt receiver lock (not owntone-mini-authored) |
 | `src/httpd_jsonapi.c` | Added `PUT /api/metadata` endpoint |
 | `configure.ac` | Removed: LIBCURL, LIBXML2, INOTIFY, libunistring, AM_ICONV, sqlext |
 | `Makefile.am` | Removed `sqlext` from SUBDIRS |
-
----
-
-## What was NOT changed
-
-The AirPlay protocol implementation files are inherited verbatim from OwnTone:
-
-* `src/outputs/raop.c` — AirPlay 1 (RAOP) — **only metadata_prepare was modified**
-* `src/outputs/airplay.c` — AirPlay 2 — **only metadata_prepare was modified**
-
-All protocol-level decisions in these files belong to the OwnTone project. Any questions about
-the AirPlay implementation should be directed there.
 
 ---
 

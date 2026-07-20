@@ -1,6 +1,7 @@
 /*
  * In-memory queue implementation for the pipe-only OwnTone build.
  *
+ * Copyright (C) 2026 James Pearce
  * Copyright (C) 2025 OwnTone-Minimal contributors
  *
  * This program is free software; you can redistribute it and/or modify

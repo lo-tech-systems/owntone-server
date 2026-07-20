@@ -40,7 +40,7 @@ RUN apt-get -y update \
         libwebsockets-dev \
         libxml2-dev \
         zlib1g-dev \
-        # Build tools for mmkdocs (OwnTone documentation)
+        # Python package manager (used by pipx dev-container tooling)
         python3-pip \
         # Additional runtime dependencies for dev container
         avahi-daemon \

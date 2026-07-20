@@ -1,9 +1,5 @@
 #!/bin/sh
 
-# Install mkdocs with mkdocs-material theme
-pipx install --include-deps mkdocs-material
-pipx inject mkdocs-material mkdocs-minify-plugin
-
 # Starfish (https://starship.rs/) - shell prompt
 if [ "$ENABLE_STARSHIP" = "1" ]
 then
