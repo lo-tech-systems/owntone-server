@@ -1,6 +1,6 @@
 {
   "uid": "owntone",
-  "server_name": "OwnTone-Minimal",
+  "server_name": "owntone-mini",
   "user_agent": "owntone/0.0.0",
   "loglevel": 3,
   "logfile": "/var/log/owntone.log",

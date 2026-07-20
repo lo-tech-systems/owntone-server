@@ -1,13 +1,13 @@
-# Fork Relationship: OwnTone-Minimal vs OwnTone
+# Fork Relationship: owntone-mini vs OwnTone
 
-OwnTone-Minimal is a fork of [OwnTone](https://github.com/owntone/owntone-server).
+owntone-mini is a fork of [OwnTone](https://github.com/owntone/owntone-server).
 This file documents what was removed, what was changed, and the rationale.
 
 ---
 
 ## Scope
 
-OwnTone-Minimal has a single purpose: stream audio from a named pipe (FIFO) to one or more
+owntone-mini has a single purpose: stream audio from a named pipe (FIFO) to one or more
 AirPlay 1 and/or AirPlay 2 speakers, controlled by an HTTP JSON API.
 
 Everything outside that scope has been removed.
@@ -94,4 +94,4 @@ sqlext/sqlext.c / sqlext/Makefile.am
 https://github.com/owntone/owntone-server
 
 OwnTone is licensed under the GNU General Public License v2.0.
-OwnTone-Minimal inherits the same licence.
+owntone-mini inherits the same licence.

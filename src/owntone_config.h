@@ -29,7 +29,7 @@
 # define PACKAGE_NAME "owntone-mini"
 #endif
 #ifndef PACKAGE_VERSION
-# define PACKAGE_VERSION "29.0-mini.7"
+# define PACKAGE_VERSION "1.0.0"
 #endif
 #ifndef VERSION
 # define VERSION PACKAGE_VERSION
