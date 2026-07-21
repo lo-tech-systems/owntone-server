@@ -61,6 +61,7 @@
 #include "airplay_buffered.h"
 #include "airplay_common.h"
 #include "airplay_encoder.h"
+#include "airplay_crypto.h"
 #include "pair_ap/pair.h"
 
 /* List of TODO's for AirPlay 2
@@ -856,54 +857,6 @@ device_id_find_byname(uint64_t *id, const char *name)
 }
 
 
-/* ------------------------------- Crypto ----------------------------------- */
-
-static void
-chacha_close(gcry_cipher_hd_t hd)
-{
-  if (!hd)
-    return;
-
-  gcry_cipher_close(hd);
-}
-
-static gcry_cipher_hd_t
-chacha_open(const uint8_t *key, size_t key_len)
-{
-  gcry_cipher_hd_t hd;
-
-  if (gcry_cipher_open(&hd, GCRY_CIPHER_CHACHA20, GCRY_CIPHER_MODE_POLY1305, 0) != GPG_ERR_NO_ERROR)
-    goto error;
-
-  if (gcry_cipher_setkey(hd, key, key_len) != GPG_ERR_NO_ERROR)
-    goto error;
-
-  return hd;
-
- error:
-  chacha_close(hd);
-  return NULL;
-}
-
-static int
-chacha_encrypt(uint8_t *cipher, uint8_t *plain, size_t plain_len, const void *ad, size_t ad_len, uint8_t *tag, size_t tag_len, uint8_t *nonce, size_t nonce_len, gcry_cipher_hd_t hd)
-{
-  if (gcry_cipher_setiv(hd, nonce, nonce_len) != GPG_ERR_NO_ERROR)
-    return -1;
-
-  if (gcry_cipher_authenticate(hd, ad, ad_len) != GPG_ERR_NO_ERROR)
-    return -1;
-
-  if (gcry_cipher_encrypt(hd, cipher, plain_len, plain, plain_len) != GPG_ERR_NO_ERROR)
-    return -1;
-
-  if (gcry_cipher_gettag(hd, tag, tag_len) != GPG_ERR_NO_ERROR)
-    return -1;
-
-  return 0;
-}
-
-
 /* --------------------- Helpers for sending RTSP requests ------------------ */
 
 static int
@@ -1601,7 +1554,7 @@ session_free(struct airplay_session *session)
   if (session->ptpd_slave_id > 0)
     ptpd_slave_remove(session->ptpd_slave_id);
 
-  chacha_close(session->packet_cipher_hd);
+  airplay_crypto_close(session->packet_cipher_hd);
 
   pair_setup_free(session->pair_setup_ctx);
   pair_verify_free(session->pair_verify_ctx);
@@ -1850,7 +1803,7 @@ session_cipher_setup(struct airplay_session *session, const uint8_t *key, size_t
       goto error;
     }
 
-  packet_cipher_hd = chacha_open(session->shared_secret, AIRPLAY_AUDIO_KEY_LEN);
+  packet_cipher_hd = airplay_crypto_open(session->shared_secret, AIRPLAY_AUDIO_KEY_LEN);
   if (!packet_cipher_hd)
     {
       DPRINTF(E_LOG, L_AIRPLAY, "Could not create packet ciphering handle\n");
@@ -1869,7 +1822,7 @@ session_cipher_setup(struct airplay_session *session, const uint8_t *key, size_t
 
  error:
   pair_cipher_free(control_cipher_ctx);
-  chacha_close(packet_cipher_hd);
+  airplay_crypto_close(packet_cipher_hd);
   return -1;
 }
 
@@ -2392,7 +2345,7 @@ packet_encrypt(uint8_t **out, size_t *out_len, struct rtp_packet *pkt, struct ai
   write_ptr = *out + pkt->header_len;
 
   // Timestamp and SSRC are used as AAD = pkt->header + 4, len 8
-  ret = chacha_encrypt(write_ptr, pkt->payload, pkt->payload_len, pkt->header + 4, 8, authtag, sizeof(authtag), nonce, sizeof(nonce), session->packet_cipher_hd);
+  ret = airplay_crypto_encrypt(write_ptr, pkt->payload, pkt->payload_len, pkt->header + 4, 8, authtag, sizeof(authtag), nonce, sizeof(nonce), session->packet_cipher_hd);
   if (ret < 0)
     {
       free(*out);

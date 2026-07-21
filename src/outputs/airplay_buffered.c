@@ -35,6 +35,7 @@
 #include <gcrypt.h>
 
 #include "airplay_buffered.h"
+#include "airplay_crypto.h"
 #include "misc.h"
 #include "logger.h"
 
@@ -71,59 +72,6 @@ struct airplay_buffered_stream
 
   bool failed;
 };
-
-
-/* ------------------------------- Crypto ------------------------------- */
-
-// Mirrors chacha_close()/chacha_open()/chacha_encrypt() in airplay.c, which
-// encrypt the realtime ALAC RTP payloads with the same cipher/mode. Kept as
-// a private copy here since this module has no session/RTP knowledge and
-// the airplay.c helpers are static.
-
-static void
-chacha_close(gcry_cipher_hd_t hd)
-{
-  if (!hd)
-    return;
-
-  gcry_cipher_close(hd);
-}
-
-static gcry_cipher_hd_t
-chacha_open(const uint8_t *key, size_t key_len)
-{
-  gcry_cipher_hd_t hd;
-
-  if (gcry_cipher_open(&hd, GCRY_CIPHER_CHACHA20, GCRY_CIPHER_MODE_POLY1305, 0) != GPG_ERR_NO_ERROR)
-    goto error;
-
-  if (gcry_cipher_setkey(hd, key, key_len) != GPG_ERR_NO_ERROR)
-    goto error;
-
-  return hd;
-
- error:
-  chacha_close(hd);
-  return NULL;
-}
-
-static int
-chacha_encrypt(uint8_t *cipher, uint8_t *plain, size_t plain_len, const void *ad, size_t ad_len, uint8_t *tag, size_t tag_len, uint8_t *nonce, size_t nonce_len, gcry_cipher_hd_t hd)
-{
-  if (gcry_cipher_setiv(hd, nonce, nonce_len) != GPG_ERR_NO_ERROR)
-    return -1;
-
-  if (gcry_cipher_authenticate(hd, ad, ad_len) != GPG_ERR_NO_ERROR)
-    return -1;
-
-  if (gcry_cipher_encrypt(hd, cipher, plain_len, plain, plain_len) != GPG_ERR_NO_ERROR)
-    return -1;
-
-  if (gcry_cipher_gettag(hd, tag, tag_len) != GPG_ERR_NO_ERROR)
-    return -1;
-
-  return 0;
-}
 
 
 /* --------------------------- Framing/queueing -------------------------- */
@@ -177,7 +125,7 @@ frame_encrypt_and_queue(struct airplay_buffered_stream *bs, const uint8_t *frame
     return -1;
 
   // AAD = rtptime + format selector, i.e. header bytes 4-11
-  ret = chacha_encrypt(cipher, (uint8_t *)frame, len, header + 4, 8, tag, sizeof(tag), nonce, sizeof(nonce), bs->cipher_hd);
+  ret = airplay_crypto_encrypt(cipher, (uint8_t *)frame, len, header + 4, 8, tag, sizeof(tag), nonce, sizeof(nonce), bs->cipher_hd);
   if (ret < 0)
     {
       DPRINTF(E_LOG, L_AIRPLAY, "Could not encrypt AirPlay buffered audio frame\n");
@@ -311,7 +259,7 @@ airplay_buffered_start(struct airplay_buffered_stream **bs, struct event_base *e
   stream->fd = fd;
   stream->format_id = format_id;
 
-  stream->cipher_hd = chacha_open(shk, AIRPLAY_BUFFERED_KEY_LEN);
+  stream->cipher_hd = airplay_crypto_open(shk, AIRPLAY_BUFFERED_KEY_LEN);
   if (!stream->cipher_hd)
     {
       DPRINTF(E_LOG, L_AIRPLAY, "Could not set up AirPlay buffered audio cipher\n");
@@ -350,7 +298,7 @@ airplay_buffered_start(struct airplay_buffered_stream **bs, struct event_base *e
     event_free(stream->writeev);
   if (stream->outbuf)
     evbuffer_free(stream->outbuf);
-  chacha_close(stream->cipher_hd);
+  airplay_crypto_close(stream->cipher_hd);
   free(stream);
   close(fd);
 
@@ -402,7 +350,7 @@ airplay_buffered_stop(struct airplay_buffered_stream *bs)
   if (bs->outbuf)
     evbuffer_free(bs->outbuf);
 
-  chacha_close(bs->cipher_hd);
+  airplay_crypto_close(bs->cipher_hd);
 
   if (bs->fd >= 0)
     close(bs->fd);

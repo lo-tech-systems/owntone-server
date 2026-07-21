@@ -57,6 +57,7 @@ owntone_SOURCES = main.c \
 	outputs/airplay_events.c outputs/airplay_events.h \
 	outputs/airplay_buffered.c outputs/airplay_buffered.h \
 	outputs/airplay_encoder.c outputs/airplay_encoder.h \
+	outputs/airplay_crypto.c outputs/airplay_crypto.h \
 	outputs/airplay_common.h \
 	evrtsp/rtsp.c evrtsp/evrtsp.h evrtsp/rtsp-internal.h evrtsp/log.h \
 	evthr.c evthr.h \
