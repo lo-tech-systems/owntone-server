@@ -446,6 +446,13 @@ struct airplay_session
   // a session that is about to disappear anyway.
   bool probing;
 
+  // Set for a background (auto-triggered) capability probe. Such a probe only
+  // reads the format list and must not drive any pairing/auth handshake or set
+  // auth state on the device - otherwise merely discovering a device that wants
+  // pairing (e.g. an Apple TV) would prompt for a PIN or flag it as needing
+  // authentication. A user-initiated probe leaves this false and pairs as normal.
+  bool passive_probe;
+
   char *realm;
   char *nonce;
   const char *password;
@@ -715,6 +722,8 @@ static int
 airplay_device_start(struct output_device *device, int callback_id);
 static int
 airplay_device_probe(struct output_device *device, int callback_id);
+static int
+airplay_device_capability_probe(struct output_device *device);
 static void
 sequence_start(enum airplay_seq_type seq_type, struct airplay_session *session, void *arg, const char *log_caller);
 static void
@@ -4703,6 +4712,14 @@ response_handler_info_generic(struct evrtsp_request *req, struct airplay_session
 	}
     }
 
+  // A background capability probe only came to read the format list, which is
+  // already parsed above. It must not drive any pairing/auth handshake or set
+  // auth state on the device, so stop cleanly here whatever the pairing flags
+  // say - otherwise merely discovering a device that wants pairing would prompt
+  // for a PIN or leave it flagged as needing authentication.
+  if (session->passive_probe)
+    return AIRPLAY_SEQ_CONTINUE;
+
   // Identify next sequence based on response
   if (session->statusflags & AIRPLAY_FLAG_ONE_TIME_PAIRING_REQUIRED)
     {
@@ -4760,6 +4777,10 @@ response_handler_info_probe(struct evrtsp_request *req, struct airplay_session *
   seq_type = response_handler_info_generic(req, session);
   if (seq_type == AIRPLAY_SEQ_PAIR_TRANSIENT || seq_type == AIRPLAY_SEQ_PAIR_VERIFY)
     seq_type = AIRPLAY_SEQ_CONTINUE; // When probing we don't proceed to PAIR_TRANSIENT/VERIFY
+
+  // A background/passive capability probe never reaches any pairing sequence:
+  // response_handler_info_generic() returns early for it (see passive_probe),
+  // so no PIN prompt and no auth state are ever set on the device.
 
   return seq_type;
 }
@@ -5606,8 +5627,7 @@ airplay_buffered_capability_probe_maybe(uint64_t device_id)
   // always correct for AirPlay, whereas the canonical device may currently hold
   // the classic-protocol transport fields. The candidate shares the canonical's
   // id, so the /info handler attributes the learned formats to the canonical.
-  // No status callback is wanted, hence -1.
-  airplay_device_probe(device->candidate_airplay2, -1);
+  airplay_device_capability_probe(device->candidate_airplay2);
 }
 
 static void
@@ -5864,6 +5884,28 @@ airplay_device_probe(struct output_device *device, int callback_id)
   session->probing = true;
 
   sequence_start(AIRPLAY_SEQ_PROBE, session, NULL, "device_probe");
+
+  return 1;
+}
+
+// Background capability probe: reads the buffered format list and nothing more.
+// Unlike airplay_device_probe(), it never drives pairing/auth (see the
+// passive_probe short-circuit in response_handler_info_generic), so discovering
+// a device that wants pairing cannot prompt for a PIN or flag it as needing
+// authentication. No status callback (-1).
+static int
+airplay_device_capability_probe(struct output_device *device)
+{
+  struct airplay_session *session;
+
+  session = session_make(device, -1);
+  if (!session)
+    return -1;
+
+  session->probing = true;
+  session->passive_probe = true;
+
+  sequence_start(AIRPLAY_SEQ_PROBE, session, NULL, "capability_probe");
 
   return 1;
 }
