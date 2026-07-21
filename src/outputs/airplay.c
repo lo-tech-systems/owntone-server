@@ -4094,7 +4094,9 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
   uint64_t uintval;
   int ret;
 
-  DPRINTF(E_INFO, L_AIRPLAY, "Setting up AirPlay session %u to %s\n", session->session_id, session->address);
+  DPRINTF(E_INFO, L_AIRPLAY, "Setting up AirPlay session %u to %s [transport: AirPlay 2, intended: %s]\n",
+          session->session_id, session->address,
+          session->wants_buffered_kind != AIRPLAY_BUFFERED_KIND_NONE ? "buffered" : "realtime");
 
   ret = wplist_from_evbuf(&response, req->input_buffer);
   if (ret < 0)
