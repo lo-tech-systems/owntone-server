@@ -28,8 +28,7 @@ nobase_dist_doc_DATA = \
 	docs/audio-outputs/airplay.md \
 	docs/audio-outputs/chromecast.md \
 	docs/artwork.md \
-	docs/json-api.md \
-	scripts/pairinghelper.sh
+	docs/json-api.md
 
 EXTRA_DIST = \
 	$(CONF_FILE) \
