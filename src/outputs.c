@@ -525,12 +525,18 @@ outputs_device_group_id(struct output_device *device)
 uint32_t
 outputs_device_supported_modes(struct output_device *device)
 {
-  // Grouped stereo outputs are intentionally exposed as AirPlay 2-only, even
-  // though the underlying HomePods may still advertise RAOP candidates.
-  if (outputs_device_is_stereo_leader(device))
-    return OUTPUT_MODE_AIRPLAY2;
+  if (!device)
+    return 0;
 
-  return device ? device->supported_modes : 0;
+  // A stereo pair is driven as AirPlay 2 only (the group-cohesion rule in
+  // effective_type_resolve, plus the explicit classic-protocol rejection in
+  // mode_set), so don't offer the classic protocol as a selectable mode for it.
+  // Its AirPlay 2 buffered and surround modes must stay selectable, though, so
+  // only mask the classic bit - not the whole mode set as before.
+  if (outputs_device_is_stereo_leader(device))
+    return device->supported_modes & ~OUTPUT_MODE_RAOP;
+
+  return device->supported_modes;
 }
 
 bool
