@@ -650,7 +650,7 @@ effective_type_resolve(struct output_device *device)
   // is absent (an AirPlay-2-only receiver).
   if (device->preferred_mode == OUTPUT_MODE_AUTO)
     {
-      if (ap2 && config_get_bool("buffered_audio_enabled", false)
+      if (ap2 && config_get_bool("buffered_audio_enabled", true)
           && (device->buffered_modes & OUTPUT_MODE_AIRPLAY2_BUFFERED))
         return OUTPUT_TYPE_AIRPLAY;
       if (raop)

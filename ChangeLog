@@ -5,6 +5,10 @@
 First independently versioned release. Renames the project to owntone-mini and
 resets versioning from the 29.0-mini.x series. Changes since 29.0-mini.8:
 
+- changed: `buffered_audio_enabled` now defaults to `true`, so outputs left on
+  `auto` prefer buffered AAC-LC without manual configuration (still gated per
+  device on an advertised buffered format; an explicit `false` in the settings
+  file is respected)
 - new: 44.1kHz AAC-LC buffered output (bufferStream format 22)
 - improved: buffered stream starts from a randomized RTP timestamp and sequence
   number

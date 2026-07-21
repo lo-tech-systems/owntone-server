@@ -116,7 +116,7 @@ config_defaults_build(void)
   json_object_object_add(defaults, "ipv6", json_object_new_boolean(true));
   json_object_object_add(defaults, "start_buffer_ms", json_object_new_int(2250));
   json_object_object_add(defaults, "uncompressed_alac", json_object_new_boolean(false));
-  json_object_object_add(defaults, "buffered_audio_enabled", json_object_new_boolean(false));
+  json_object_object_add(defaults, "buffered_audio_enabled", json_object_new_boolean(true));
   json_object_object_add(defaults, "buffered_encoder_budget", json_object_new_int(0));
   json_object_object_add(defaults, "device_removal_grace_period", json_object_new_int(180));
   json_object_object_add(defaults, "airplay_timing_port", json_object_new_int(0));

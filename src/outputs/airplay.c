@@ -2037,7 +2037,7 @@ session_make(struct output_device *device, int callback_id)
     // not play a buffered stream reliably. Explicit selections are never
     // influenced by the switch; surround is never selected implicitly under
     // "auto".
-    if (mode == OUTPUT_MODE_AUTO && config_get_bool("buffered_audio_enabled", false)
+    if (mode == OUTPUT_MODE_AUTO && config_get_bool("buffered_audio_enabled", true)
         && (device->supported_modes & OUTPUT_MODE_AIRPLAY2_BUFFERED))
       kind = AIRPLAY_BUFFERED_KIND_AAC_STEREO;
 

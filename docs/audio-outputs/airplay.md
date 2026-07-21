@@ -21,8 +21,8 @@ AirPlay 2 outputs support an alternative to the default realtime stream: a
 buffered transport where the receiver holds a queue of audio ahead of
 playout instead of receiving it exactly as it plays. This is selected per
 output via the `mode` field of the [output API](../json-api.md#update-an-output),
-or offered automatically under `auto` when `buffered_audio_enabled` is turned
-on in the [configuration](../configuration.md#general-buffered_audio_enabled).
+or offered automatically under `auto` while `buffered_audio_enabled` is on
+(the default) in the [configuration](../configuration.md#general-buffered_audio_enabled).
 
 Four buffered modes are available:
 

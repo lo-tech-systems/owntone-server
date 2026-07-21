@@ -50,15 +50,23 @@ Path to the directory or directories containing the media to index (your library
 
 ### general: buffered_audio_enabled
 
-Boolean, default `false`. Also settable at runtime via
+Boolean, default `true`. Also settable at runtime via
 `PUT /api/settings/player/buffered_audio_enabled` (takes effect on the next
 output start, no restart required).
 
 When `true`, an AirPlay 2 output left on the `auto` mode preference prefers
-buffered AAC-LC playback (`airplay2_buffered`) over realtime on any device
-that has advertised the buffered capability, before falling back to realtime
-`airplay2` and then `raop`. When `false`, `auto` behaves as before (`airplay2`
-realtime, then `raop`).
+buffered AAC-LC playback (`airplay2_buffered`) over realtime, but only on a
+device that has advertised an actual AAC bufferStream format (learned from
+GET /info) - not merely the mDNS "SupportsBufferedAudio" flag. A device that
+has not advertised a concrete buffered format falls to `raop` (AirPlay 1), and
+realtime `airplay2` is used only as a last resort for an AirPlay-2-only
+receiver. When `false`, `auto` never uses buffered (`raop`, then realtime
+`airplay2`).
+
+The default is `true` so that outputs left on `auto` benefit from buffered
+timing without manual configuration. Because the buffered path is still gated
+per device on an advertised format, enabling it globally does not force
+buffered onto a receiver that cannot play it.
 
 This setting only affects outputs left on `auto`. An output with an explicit
 `mode` selection (via the [output API](json-api.md#update-an-output)), such as
