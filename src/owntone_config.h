@@ -58,6 +58,7 @@ enum config_startup_actions
     CONFIG_STARTUP_UNCHANGED = 0,
     CONFIG_STARTUP_BOOTSTRAPPED = (1 << 0),
     CONFIG_STARTUP_ACCESS_SELF_HEAL = (1 << 1),
+    CONFIG_STARTUP_KEYS_HEALED = (1 << 2),
   };
 
 // Ensure the settings file exists. If it is missing with ENOENT, create it

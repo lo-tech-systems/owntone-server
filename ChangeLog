@@ -9,6 +9,10 @@ resets versioning from the 29.0-mini.x series. Changes since 29.0-mini.8:
   `auto` prefer buffered AAC-LC without manual configuration (still gated per
   device on an advertised buffered format; an explicit `false` in the settings
   file is respected)
+- improved: the settings file self-heals missing keys at startup, writing
+  their built-in defaults once so upgrades from an older version pick up newly
+  added settings and the file stays a consistent source of truth (existing
+  values are never changed)
 - new: 44.1kHz AAC-LC buffered output (bufferStream format 22)
 - improved: buffered stream starts from a randomized RTP timestamp and sequence
   number

@@ -763,6 +763,57 @@ config_restart_required_get(void)
 
 /* ----------------------- Load / unload ------------------------------------ */
 
+/*
+ * Fill in any settings keys absent from the loaded file with their built-in
+ * defaults, then persist the result. This migrates a settings file written by
+ * an older version forward as new keys are introduced, so every reader
+ * (playback, JSON API) sees one consistent source of truth in the file instead
+ * of relying on per-call fallbacks. Existing values are never changed - only
+ * missing top-level keys are added; nested objects such as airplay_devices are
+ * added whole when absent but not merged into. Runs once at startup, before any
+ * other thread exists (so the unlocked accessors are safe), and writes the file
+ * only when a key was actually added.
+ */
+static int
+config_heal_defaults(void)
+{
+  json_object *defaults;
+  json_object *existing;
+  int added = 0;
+
+  if (!root)
+    return -1;
+
+  defaults = config_defaults_build();
+  if (!defaults)
+    {
+      DPRINTF(E_LOG, L_CONF, "Could not build defaults for settings self-heal\n");
+      return -1;
+    }
+
+  json_object_object_foreach(defaults, key, val)
+    {
+      if (json_object_object_get_ex(root, key, &existing))
+        continue;
+
+      // json_object_get() takes an extra ref so the value outlives the
+      // defaults tree freed below; root then owns it.
+      json_object_object_add(root, key, json_object_get(val));
+      added++;
+      DPRINTF(E_INFO, L_CONF, "Settings self-heal: added missing key '%s'\n", key);
+    }
+
+  json_object_put(defaults);
+
+  if (added == 0)
+    return 0;
+
+  config_startup_actions |= CONFIG_STARTUP_KEYS_HEALED;
+  DPRINTF(E_WARN, L_CONF, "Settings file was missing %d key(s); writing defaults to '%s'\n", added, config_path);
+
+  return config_write();
+}
+
 int
 config_load(const char *path)
 {
@@ -811,6 +862,11 @@ config_load(const char *path)
 
   runas_uid = pw->pw_uid;
   runas_gid = pw->pw_gid;
+
+  // Migrate a file from an older version forward by writing any missing keys.
+  // The write happens as root here; config_ensure_access() (called next from
+  // main) restores the intended owner and mode on the rewritten file.
+  config_heal_defaults();
 
   return 0;
 }
