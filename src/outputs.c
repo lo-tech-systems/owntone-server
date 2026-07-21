@@ -625,8 +625,17 @@ effective_type_resolve(struct output_device *device)
   struct output_device *ap2  = (device->candidate_airplay2 && !device->candidate_airplay2->removal_candidate)
                                ? device->candidate_airplay2 : NULL;
 
-  if (outputs_device_is_stereo_leader(device) && ap2)
-    return OUTPUT_TYPE_AIRPLAY;
+  // Keep every member of an AirPlay 2 group - the visible leader and the other
+  // speaker(s) - on the AirPlay 2 backend when it offers one. Members resolve
+  // independently otherwise, and a member that also advertises the classic
+  // protocol can land on a different transport than the rest of the group,
+  // which seems to hurt group sync (the classic path has no AirPlay 2 group
+  // timing). This is a group-cohesion rule, independent of buffered learning.
+  {
+    struct output_device *group_meta = group_meta_device(device);
+    if (group_meta && group_meta->is_grouped && ap2)
+      return OUTPUT_TYPE_AIRPLAY;
+  }
 
   // A removal candidate is a presumed-transient dropout (grace period): if the
   // slot for the canonical's currently active type is mid-grace, stick with

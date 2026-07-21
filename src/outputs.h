@@ -197,6 +197,13 @@ struct output_device
   // exchange so a receiver that stops advertising a format loses the bit.
   uint32_t buffered_modes;
 
+  // Set once we have run (or scheduled) a proactive buffered-capability probe
+  // for this device in this run, so repeated mDNS re-advertisements don't keep
+  // firing probes - especially for a device that advertises the capability bit
+  // but turns out to list no usable buffered format. In-memory only; a restart
+  // re-probes once, which also refreshes anything that changed.
+  bool buffered_probe_attempted;
+
   // For user config of speaker start
   int offset_ms;
 

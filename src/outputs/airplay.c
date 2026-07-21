@@ -5611,6 +5611,52 @@ airplay_stereo_metadata_log(struct output_device *device, struct airplay_extra *
   * Libratone Loop
      ["srcvers=190.9" "seed=99" "model=LibratoneLoop1" "flags=0x4" "features=0x444C0A00" "deviceid=XX:XX:XX:XX:XX:XX"]
  */
+// Proactively learn a device's concrete buffered formats. Many AirPlay 2
+// speakers also advertise the classic protocol, so under "auto" they resolve to
+// that path and are never asked for their buffered formats - which keeps them
+// off buffered indefinitely. When a device's mDNS advertisement claims buffered
+// support, run a one-off GET /info against its AirPlay 2 candidate (independent
+// of whichever transport it currently resolves to) so the learned formats can
+// promote it to buffered on the next start. The mDNS claim only triggers the
+// probe; the decision still rests on the concrete formats the probe returns, so
+// a device that lists none simply stays where it was.
+static void
+airplay_buffered_capability_probe_maybe(uint64_t device_id)
+{
+  struct output_device *device;
+  struct airplay_session *s;
+
+  device = outputs_device_get(device_id);
+  if (!device || !device->candidate_airplay2)
+    return;
+
+  // Already learned - nothing to gain from probing again.
+  if (outputs_device_buffered_capable(device))
+    return;
+
+  // One attempt per device per run: keeps repeated mDNS re-advertisements from
+  // re-firing, including for a device that claims the capability but lists no
+  // usable format (which would otherwise never satisfy the check above).
+  if (device->buffered_probe_attempted)
+    return;
+
+  // Don't race an existing session or an in-flight probe for this device.
+  for (s = airplay_sessions; s; s = s->next)
+    if (s->device_id == device_id)
+      return;
+
+  device->buffered_probe_attempted = true;
+
+  DPRINTF(E_INFO, L_AIRPLAY, "Probing '%s' for buffered-audio capability (advertised via mDNS)\n", device->name);
+
+  // Probe the AirPlay 2 candidate directly: its address and extra info are
+  // always correct for AirPlay, whereas the canonical device may currently hold
+  // the classic-protocol transport fields. The candidate shares the canonical's
+  // id, so the /info handler attributes the learned formats to the canonical.
+  // No status callback is wanted, hence -1.
+  airplay_device_probe(device->candidate_airplay2, -1);
+}
+
 static void
 airplay_device_cb(const char *name, const char *type, const char *domain, const char *hostname, int family, const char *address, int port, struct keyval *txt)
 {
@@ -5624,6 +5670,7 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
   const char *password = NULL;
   const char *features;
   uint64_t id;
+  bool advertises_buffered = false;
   int ret;
 
   if (port > 0)
@@ -5752,6 +5799,14 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
   if (keyval_get(&features_kv, "SupportsPTP") && !(devcfg && cfg_getbool(devcfg, "ptp_disable")) && !airplay_ptp_is_disabled)
     extra->use_ptp = 1;
 
+  // Whether the device claims buffered-audio support in its mDNS advertisement.
+  // This claim is not trusted for the routing decision (some receivers set it
+  // without reliably playing buffered) - it only decides whether it is worth
+  // proactively probing GET /info to learn the concrete formats, which is what
+  // the decision actually uses.
+  if (keyval_get(&features_kv, "SupportsBufferedAudio"))
+    advertises_buffered = true;
+
   // Currently always true since no SupportsCoreUtilsPairingAndEncryption means we fall back to RAOP
   extra->supports_encryption = 1;
 
@@ -5827,6 +5882,11 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
   ret = player_device_add(device);
   if (ret < 0)
     goto free_device;
+
+  // `device` is now owned by the output layer and may have been freed/merged;
+  // use the stable id from here on.
+  if (advertises_buffered)
+    airplay_buffered_capability_probe_maybe(id);
 
   return;
 
