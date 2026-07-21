@@ -38,6 +38,7 @@
 #include "worker.h"
 #include "outputs.h"
 #include "owntone_config.h"
+#include "db.h"
 
 extern struct output_definition output_raop;
 extern struct output_definition output_airplay;
@@ -532,6 +533,15 @@ outputs_device_supported_modes(struct output_device *device)
   return device ? device->supported_modes : 0;
 }
 
+bool
+outputs_device_buffered_capable(struct output_device *device)
+{
+  // The buffered AAC bit only ever lands in buffered_modes (learned from the
+  // device's own GET /info), so check it directly - not supported_modes, which
+  // merely folds buffered_modes in and could be masked elsewhere.
+  return device && (device->buffered_modes & OUTPUT_MODE_AIRPLAY2_BUFFERED);
+}
+
 enum output_mode
 outputs_device_display_mode(struct output_device *device)
 {
@@ -651,7 +661,7 @@ effective_type_resolve(struct output_device *device)
   if (device->preferred_mode == OUTPUT_MODE_AUTO)
     {
       if (ap2 && config_get_bool("buffered_audio_enabled", true)
-          && (device->buffered_modes & OUTPUT_MODE_AIRPLAY2_BUFFERED))
+          && outputs_device_buffered_capable(device))
         return OUTPUT_TYPE_AIRPLAY;
       if (raop)
         return OUTPUT_TYPE_RAOP;
@@ -1909,8 +1919,17 @@ outputs_device_buffered_modes_set(struct output_device *device, uint32_t buffere
   if (!device)
     return;
 
+  // No-op when nothing changed, so repeated /info exchanges (and the proactive
+  // capability probe) don't rewrite the settings file for no reason.
+  if (device->buffered_modes == buffered_modes)
+    return;
+
   device->buffered_modes = buffered_modes;
   supported_modes_recompute(device);
+
+  // Persist here so every caller - not just the one that remembered to - keeps
+  // the learned capability across a restart.
+  db_speaker_save(device);
 }
 
 int

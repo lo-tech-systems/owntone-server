@@ -2038,7 +2038,7 @@ session_make(struct output_device *device, int callback_id)
     // influenced by the switch; surround is never selected implicitly under
     // "auto".
     if (mode == OUTPUT_MODE_AUTO && config_get_bool("buffered_audio_enabled", true)
-        && (device->supported_modes & OUTPUT_MODE_AIRPLAY2_BUFFERED))
+        && outputs_device_buffered_capable(device))
       kind = AIRPLAY_BUFFERED_KIND_AAC_STEREO;
 
     session->wants_buffered_kind = kind;
@@ -4678,11 +4678,8 @@ response_handler_info_generic(struct evrtsp_request *req, struct airplay_session
         DPRINTF(E_INFO, L_AIRPLAY, "Device '%s' advertises 44.1kHz AAC (format 22) but not 48kHz (23); using format 22\n", session->devname);
       }
 
-    if (advertised_buffered_modes != device->buffered_modes)
-      {
-        outputs_device_buffered_modes_set(device, advertised_buffered_modes);
-        db_speaker_save(device);
-      }
+    // The setter no-ops and skips persistence when unchanged, so no guard here.
+    outputs_device_buffered_modes_set(device, advertised_buffered_modes);
   }
 
   // The full /info plist is the only place a receiver declares its audio

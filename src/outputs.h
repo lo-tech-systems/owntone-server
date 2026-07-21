@@ -478,6 +478,12 @@ outputs_device_group_id(struct output_device *device);
 uint32_t
 outputs_device_supported_modes(struct output_device *device);
 
+// Single source of truth for "this device can do buffered AAC". Both the
+// transport ladder and the AirPlay backend consult this rather than poking at
+// buffered_modes / supported_modes directly, so the two decisions cannot drift.
+bool
+outputs_device_buffered_capable(struct output_device *device);
+
 enum output_mode
 outputs_device_display_mode(struct output_device *device);
 
