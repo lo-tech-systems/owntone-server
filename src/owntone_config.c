@@ -109,7 +109,7 @@ config_defaults_build(void)
   json_object_object_add(defaults, "user_agent", json_object_new_string(PACKAGE_NAME "/" PACKAGE_VERSION));
   json_object_object_add(defaults, "loglevel", json_object_new_int(3));
   json_object_object_add(defaults, "logfile", json_object_new_string("/var/log/owntone.log"));
-  json_object_object_add(defaults, "pipe_path", json_object_new_string("/tmp/owntone.fifo"));
+  json_object_object_add(defaults, "pipe_path", json_object_new_string("/run/autostream-pipes/autostream.fifo"));
   json_object_object_add(defaults, "pipe_autostart", json_object_new_boolean(true));
   json_object_object_add(defaults, "pipe_sample_rate", json_object_new_int(44100));
   json_object_object_add(defaults, "pipe_bits_per_sample", json_object_new_int(16));
