@@ -42,6 +42,7 @@
 #include <inttypes.h>
 #include <fcntl.h>
 #include <string.h>
+#include <ctype.h>
 #include <errno.h>
 #include <limits.h>
 #include <pthread.h>
@@ -560,10 +561,131 @@ log_incoming(int severity, const char *msg, uint32_t type, uint32_t code, int da
   DPRINTF(severity, L_PLAYER, "%s (type=%s, code=%s, len=%d)\n", msg, typestr, codestr, data_len);
 }
 
+// Trims leading/trailing whitespace from a NUL-terminated string, shifting
+// the remaining content down to the start of the buffer (rather than just
+// advancing the returned pointer past leading whitespace) so that the
+// original allocation base stays valid to free(). Mirrors the effect of the
+// trim() helper that used to live in the now-removed misc_xml.c, but must
+// preserve the malloc base since xml_tag_dup()'s caller frees what this
+// returns.
+static char *
+xml_trim(char *str)
+{
+  char *start;
+  size_t len;
+
+  if (!str)
+    return NULL;
+
+  start = str;
+  while (isspace((unsigned char)*start))
+    start++;
+
+  len = strlen(start);
+  while (len > 0 && isspace((unsigned char)start[len - 1]))
+    len--;
+
+  if (start != str)
+    memmove(str, start, len);
+  str[len] = '\0';
+
+  return str;
+}
+
+// Hand-rolled substitute for the libxml2-based xml_get_val() that used to
+// extract "item/<tag>" values here (removed by 71272642 along with
+// misc_xml.c). Finds the first <tag ...>...</tag> in "item" (tolerating
+// attributes on the opening tag, e.g. <data encoding="base64">) and returns a
+// newly allocated, trimmed, NUL-terminated copy of its content, or NULL if
+// the tag is not present. Caller must free() the result.
+static char *
+xml_tag_dup(const char *item, const char *tag)
+{
+  char open_tag[32];
+  char close_tag[32];
+  const char *start;
+  const char *val;
+  const char *end;
+  size_t len;
+  char *result;
+
+  snprintf(open_tag, sizeof(open_tag), "<%s", tag);
+  snprintf(close_tag, sizeof(close_tag), "</%s>", tag);
+
+  start = strstr(item, open_tag);
+  if (!start)
+    return NULL;
+
+  val = strchr(start, '>');
+  if (!val)
+    return NULL;
+  val++;
+
+  end = strstr(val, close_tag);
+  if (!end)
+    return NULL;
+
+  len = end - val;
+  result = malloc(len + 1);
+  if (!result)
+    return NULL;
+
+  memcpy(result, val, len);
+  result[len] = '\0';
+
+  return xml_trim(result);
+}
+
+/* Example of pipe metadata item (Shairport-sync format):
+
+<item><type>73736e63</type><code>6d647374</code><length>9</length>
+<data encoding="base64">
+NDE5OTg3OTU0</data></item>
+
+The <length> field is informational only and is not consulted below; <data>
+is optional (e.g. for "pend"/progress-only items) and, when present, is
+base64-decoded with the existing b64_decode() helper (src/misc.c), same as
+before the libxml2 removal.
+*/
 static int
 parse_item_xml(uint32_t *type, uint32_t *code, uint8_t **data, int *data_len, const char *item)
 {
-  return -1; // XML metadata parsing removed (misc_xml removed)
+  char *s;
+
+  *type = 0;
+  if ((s = xml_tag_dup(item, "type")))
+    {
+      sscanf(s, "%8x", type);
+      free(s);
+    }
+
+  *code = 0;
+  if ((s = xml_tag_dup(item, "code")))
+    {
+      sscanf(s, "%8x", code);
+      free(s);
+    }
+
+  if (*type == 0 || *code == 0)
+    {
+      DPRINTF(E_DBG, L_PLAYER, "No type (%" PRIu32 ") or code (%" PRIu32 ") in pipe metadata item, skipping: %s\n", *type, *code, item);
+      return -1;
+    }
+
+  *data = NULL;
+  *data_len = 0;
+  if ((s = xml_tag_dup(item, "data")))
+    {
+      *data = b64_decode(data_len, s);
+      free(s);
+      if (*data == NULL)
+	{
+	  DPRINTF(E_DBG, L_PLAYER, "Base64 decode of pipe metadata payload failed, skipping item: %s\n", item);
+	  return -1;
+	}
+    }
+
+  return 0;
 }
 
 static int
@@ -580,7 +702,13 @@ parse_item(enum pipe_metadata_msg *out_msg, struct pipe_metadata_prepared *prepa
 
   ret = parse_item_xml(&type, &code, &data, &data_len, item);
   if (ret < 0)
-    return -1;
+    {
+      // Malformed item (e.g. truncated read, unexpected format): skip it and
+      // keep the metadata pipe open, don't tear down the watch over one bad
+      // item.
+      *out_msg = 0;
+      return 0;
+    }
 
   dstptr = NULL;
   message = PIPE_METADATA_MSG_METADATA;
@@ -659,8 +787,10 @@ extract_item(struct evbuffer *evbuf)
 
 // Parses the xml content of the evbuf into a parsed struct. The first arg is
 // a bitmask describing all the item types that were found, e.g.
-// PIPE_METADATA_MSG_VOLUME | PIPE_METADATA_MSG_METADATA. Returns -1 if the
-// evbuf could not be parsed.
+// PIPE_METADATA_MSG_VOLUME | PIPE_METADATA_MSG_METADATA. A malformed item is
+// skipped (logged once by parse_item()/parse_item_xml()) rather than
+// aborting the parse, so one bad item on the pipe never stops later items in
+// the same buffer, or later reads, from being processed.
 static int
 pipe_metadata_parse(enum pipe_metadata_msg *out_msg, struct pipe_metadata_prepared *prepared, struct evbuffer *evbuf)
 {
@@ -674,7 +804,13 @@ pipe_metadata_parse(enum pipe_metadata_msg *out_msg, struct pipe_metadata_prepar
       ret = parse_item(&message, prepared, item);
       free(item);
       if (ret < 0)
-	return -1;
+	{
+	  // Defensive: parse_item() currently always returns 0, skipping bad
+	  // items internally. If that ever changes, don't let one bad item
+	  // in the buffer block the rest of the batch.
+	  DPRINTF(E_DBG, L_PLAYER, "Skipping unparseable item on metadata pipe\n");
+	  continue;
+	}
 
       *out_msg |= message;
     }
@@ -904,9 +1040,11 @@ pipe_metadata_read_cb(evutil_socket_t fd, short event, void *arg)
   pthread_mutex_unlock(&pipe_metadata.prepared.lock);
   if (ret < 0)
     {
-      DPRINTF(E_LOG, L_PLAYER, "Error parsing incoming data on metadata pipe '%s', will stop reading\n", pipe_metadata.pipe->path);
-      pipe_metadata_watch_del(NULL);
-      return;
+      // pipe_metadata_parse() skips malformed items internally and should
+      // never actually return an error, but if it ever does, don't tear
+      // down the watch over it - just drop this batch and keep reading.
+      DPRINTF(E_WARN, L_PLAYER, "Error parsing incoming data on metadata pipe '%s', dropping batch\n", pipe_metadata.pipe->path);
+      goto readd;
     }
 
   if (message & (PIPE_METADATA_MSG_METADATA | PIPE_METADATA_MSG_PROGRESS | PIPE_METADATA_MSG_PICTURE))
