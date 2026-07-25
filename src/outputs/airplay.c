@@ -1721,10 +1721,20 @@ session_pair_success(struct airplay_session *session)
   session_success(session);
 }
 
+// Defense-in-depth: this function formats device->name and the chosen device
+// address (device->v4_address or device->v6_address) into several DPRINTFs
+// and passes the address to evrtsp_connection_new(). Those fields are only
+// safe to touch on the player thread, and this function must only be reached
+// from there (see airplay_buffered_capability_probe_deferred_cb()). Snapshot
+// name/address once, up front, and use the copies throughout: this insulates
+// the function against any future caller that breaks the threading contract,
+// and keeps the in-place '%<intf>' splitting for IPv6 scope ids from
+// mutating device->v6_address itself.
 static int
 session_connection_setup(struct airplay_session *session, struct output_device *device, int family)
 {
-  char *address;
+  char *name = NULL;
+  char *address = NULL;
   char *intf;
   unsigned short port;
   int ret;
@@ -1737,9 +1747,9 @@ session_connection_setup(struct airplay_session *session, struct output_device *
 	if (!device->v4_address)
 	  return -1;
 
-	address = device->v4_address;
+	name = safe_strdup(device->name);
+	address = strdup(device->v4_address);
 	port = device->v4_port;
-
 
 	ret = inet_pton(AF_INET, address, &session->naddr.sin.sin_addr);
 	break;
@@ -1748,7 +1758,8 @@ session_connection_setup(struct airplay_session *session, struct output_device *
 	if (!device->v6_address || device->v6_disabled)
 	  return -1;
 
-	address = device->v6_address;
+	name = safe_strdup(device->name);
+	address = strdup(device->v6_address);
 	port = device->v6_port;
 
 	intf = strchr(address, '%');
@@ -1781,20 +1792,25 @@ session_connection_setup(struct airplay_session *session, struct output_device *
 
   if (ret <= 0)
     {
-      DPRINTF(E_LOG, L_AIRPLAY, "Device '%s' has invalid address (%s) for %s\n", device->name, address, (family == AF_INET) ? "ipv4" : "ipv6");
+      DPRINTF(E_LOG, L_AIRPLAY, "Device '%s' has invalid address (%s) for %s\n", name, address, (family == AF_INET) ? "ipv4" : "ipv6");
+      free(name);
+      free(address);
       return -1;
     }
 
   session->ctrl = evrtsp_connection_new(address, port);
   if (!session->ctrl)
     {
-      DPRINTF(E_LOG, L_AIRPLAY, "Could not create control connection to '%s' (%s)\n", device->name, address);
+      DPRINTF(E_LOG, L_AIRPLAY, "Could not create control connection to '%s' (%s)\n", name, address);
+      free(name);
+      free(address);
       return -1;
     }
 
   evrtsp_connection_set_base(session->ctrl, evbase_player);
 
-  session->address = strdup(address);
+  free(name);
+  session->address = address; // Ownership transferred - already a private copy
   session->family = family;
 
   return 0;
@@ -5651,6 +5667,32 @@ airplay_buffered_capability_probe_maybe(uint64_t device_id)
   airplay_device_capability_probe(device->candidate_airplay2);
 }
 
+// airplay_buffered_capability_probe_maybe() (and everything it calls -
+// outputs_device_get(), session_make(), session_connection_setup(), ...) is
+// Thread: player code: it walks and dereferences the live output_device list
+// (name/v4_address/v6_address, candidate_airplay2, ...) with no locking of
+// its own, relying on the player thread being the only thread that ever
+// touches those fields. Its trigger, however, is a device's mDNS
+// advertisement, detected in airplay_device_cb() below on Thread: main
+// (mdns), where the player thread may concurrently free and replace the same
+// device's strings (candidate_store()/effective_candidate_apply()). The probe
+// must therefore never run on the mdns thread: route it through
+// evbase_player, like deferred_session_stop_cb() above, carrying only the
+// stable device id and looking the device up fresh on the player thread.
+struct airplay_buffered_probe_ctx
+{
+  uint64_t device_id;
+};
+
+static void
+airplay_buffered_capability_probe_deferred_cb(int fd, short what, void *arg)
+{
+  struct airplay_buffered_probe_ctx *ctx = arg;
+
+  airplay_buffered_capability_probe_maybe(ctx->device_id);
+  free(ctx);
+}
+
 static void
 airplay_device_cb(const char *name, const char *type, const char *domain, const char *hostname, int family, const char *address, int port, struct keyval *txt)
 {
@@ -5879,8 +5921,21 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
 
   // `device` is now owned by the output layer and may have been freed/merged;
   // use the stable id from here on.
+  //
+  // The probe itself must run on the player thread (see the comment on
+  // airplay_buffered_capability_probe_deferred_cb() above) - defer it via
+  // evbase_player rather than calling it directly from this mdns callback.
   if (advertises_buffered)
-    airplay_buffered_capability_probe_maybe(id);
+    {
+      struct airplay_buffered_probe_ctx *ctx;
+      struct timeval tv;
+
+      CHECK_NULL(L_AIRPLAY, ctx = malloc(sizeof(struct airplay_buffered_probe_ctx)));
+      ctx->device_id = id;
+
+      evutil_timerclear(&tv);
+      event_base_once(evbase_player, -1, EV_TIMEOUT, airplay_buffered_capability_probe_deferred_cb, ctx, &tv);
+    }
 
   return;
 
