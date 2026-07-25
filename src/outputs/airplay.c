@@ -3466,13 +3466,21 @@ payload_make_setup_stream(struct evrtsp_request *req, struct airplay_session *se
     }
   else
     {
+      // latencyMin/latencyMax are expressed in samples at the session's own
+      // sample rate (250ms/2000ms respectively), not a fixed 44.1k constant -
+      // at the realtime default of 44100 these come out to the traditional
+      // 11025/88200; a session subscribed at 48000 gets 12000/96000.
+      uint32_t sample_rate = session->master_session->quality.sample_rate;
+      uint32_t latency_min = 250 * sample_rate / 1000;
+      uint32_t latency_max = 2000 * sample_rate / 1000;
+
       wplist_dict_add_uint(stream, "audioFormat", 262144); // 0x40000 ALAC/44100/16/2
       wplist_dict_add_string(stream, "audioMode", "default");
       wplist_dict_add_uint(stream, "controlPort", session->control_svc->port);
       wplist_dict_add_uint(stream, "ct", 2); // Compression type, 1 LPCM, 2 ALAC, 4 AAC-LC, 8 AAC-ELD
       wplist_dict_add_bool(stream, "isMedia", true); // ?
-      wplist_dict_add_uint(stream, "latencyMax", 88200); // TODO how do these latencys work?
-      wplist_dict_add_uint(stream, "latencyMin", 11025); // AIRPLAY_AUDIO_LATENCY_MS in samples, see comment in rtp_sync_packet_next()
+      wplist_dict_add_uint(stream, "latencyMax", latency_max); // TODO how do these latencys work?
+      wplist_dict_add_uint(stream, "latencyMin", latency_min); // AIRPLAY_AUDIO_LATENCY_MS in samples, see comment in rtp_sync_packet_next()
       wplist_dict_add_data(stream, "shk", session->shared_secret, AIRPLAY_AUDIO_KEY_LEN);
       wplist_dict_add_uint(stream, "spf", AIRPLAY_SAMPLES_PER_PACKET); // frames per packet
       wplist_dict_add_uint(stream, "sr", AIRPLAY_QUALITY_SAMPLE_RATE_DEFAULT); // sample rate
@@ -3482,7 +3490,7 @@ payload_make_setup_stream(struct evrtsp_request *req, struct airplay_session *se
 
       DPRINTF(E_DBG, L_AIRPLAY,
               "SETUP(stream) payload for '%s': audioFormat=%u, controlPort=%u, latencyMin=%u, latencyMax=%u, spf=%u, sr=%u, type=%u (realtime), supportsDynamicStreamID=%u, streamConnectionID=%u\n",
-              session->devname, 262144U, session->control_svc->port, 11025U, 88200U,
+              session->devname, 262144U, session->control_svc->port, latency_min, latency_max,
               AIRPLAY_SAMPLES_PER_PACKET, AIRPLAY_QUALITY_SAMPLE_RATE_DEFAULT,
               AIRPLAY_RTP_PAYLOADTYPE, 0U, session->session_id);
     }

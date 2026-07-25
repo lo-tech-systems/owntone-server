@@ -256,12 +256,13 @@ rtp_sync_is_time(struct rtp_session *session)
 //   |                                                               |
 //   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 static void
-sync_packet_ptp_make(uint8_t *data, struct rtcp_timestamp cur_stamp, uint32_t pos, uint8_t type, uint64_t ptp_clock_id)
+sync_packet_ptp_make(uint8_t *data, struct rtcp_timestamp cur_stamp, uint32_t pos, uint8_t type, uint64_t ptp_clock_id, uint32_t sample_rate)
 {
   uint32_t cur_pos;
   uint64_t cur_ns;
   uint32_t rtptime;
   uint64_t clock_id;
+  uint32_t latency_samples;
 
   data[0] = type; // 0x90 with stream start marker (M=1)
   data[1] = 0xd7; // PT 215 Time announce
@@ -282,8 +283,10 @@ sync_packet_ptp_make(uint8_t *data, struct rtcp_timestamp cur_stamp, uint32_t po
   // device should start playing. Why Apple has 77175 isn't completely clear to
   // me, but seems to be related to AIRPLAY_AUDIO_LATENCY_MS. Note that the
   // rtptime sent here will not be the rtptime of the first packet (contrary to
-  // the ntp sync, see below).
-  rtptime = htobe32(pos - 11025);
+  // the ntp sync, see below). The latency is 250 ms, expressed here in the
+  // session's sample rate (11025 samples at the traditional 44.1 kHz).
+  latency_samples = 250 * sample_rate / 1000;
+  rtptime = htobe32(pos - latency_samples);
   memcpy(data + 16, &rtptime, 4);
 
   clock_id = htobe64(ptp_clock_id);
@@ -357,7 +360,7 @@ rtp_sync_packet_next(struct rtp_session *session, struct rtcp_timestamp cur_stam
     }
 
   if (session->ptp_clock_id)
-    sync_packet_ptp_make(pkt->data, cur_stamp, session->pos, type, session->ptp_clock_id);
+    sync_packet_ptp_make(pkt->data, cur_stamp, session->pos, type, session->ptp_clock_id, session->quality.sample_rate);
   else
     sync_packet_ntp_make(pkt->data, cur_stamp, session->pos, type);
 
