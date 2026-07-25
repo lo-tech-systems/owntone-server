@@ -111,6 +111,11 @@ config_defaults_build(void)
   json_object_object_add(defaults, "logfile", json_object_new_string("/var/log/owntone.log"));
   json_object_object_add(defaults, "pipe_path", json_object_new_string("/run/autostream-pipes/autostream.fifo"));
   json_object_object_add(defaults, "pipe_autostart", json_object_new_boolean(true));
+  // Install default remains 44.1k/16-bit; the pipe format is API-settable
+  // (see api_settable_keys[] below) and restart-coupled (see
+  // config_key_requires_restart()) rather than reconciled at install time -
+  // any move to a different default is a runtime/reconcile decision, not a
+  // change to these built-in defaults.
   json_object_object_add(defaults, "pipe_sample_rate", json_object_new_int(44100));
   json_object_object_add(defaults, "pipe_bits_per_sample", json_object_new_int(16));
   json_object_object_add(defaults, "ipv6", json_object_new_boolean(true));
@@ -140,6 +145,8 @@ static const char *api_settable_keys[] = {
   "device_removal_grace_period",
   "buffered_audio_enabled",
   "buffered_encoder_budget",
+  "pipe_sample_rate",
+  "pipe_bits_per_sample",
   NULL
 };
 
@@ -148,7 +155,9 @@ config_key_requires_restart(const char *key)
 {
   return (strcmp(key, "ipv6") == 0
        || strcmp(key, "start_buffer_ms") == 0
-       || strcmp(key, "uncompressed_alac") == 0);
+       || strcmp(key, "uncompressed_alac") == 0
+       || strcmp(key, "pipe_sample_rate") == 0
+       || strcmp(key, "pipe_bits_per_sample") == 0);
 }
 
 bool
@@ -716,6 +725,16 @@ config_set_int(const char *key, int value)
     return -1;
 
   if (strcmp(key, "buffered_encoder_budget") == 0 && (value < 0 || value > 64))
+    return -1;
+
+  // Mirrors the accepted sets pipe.c enforces at init (pipe.c ~1467/1474);
+  // rejecting bad values here stops the API from persisting a config that
+  // would make pipe_setup() DPRINTF(E_FATAL) and abort startup.
+  if (strcmp(key, "pipe_sample_rate") == 0
+      && value != 44100 && value != 48000 && value != 88200 && value != 96000)
+    return -1;
+
+  if (strcmp(key, "pipe_bits_per_sample") == 0 && value != 16 && value != 32)
     return -1;
 
   pthread_mutex_lock(&config_lck);

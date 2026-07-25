@@ -190,6 +190,8 @@ static const struct setting_entry settings_table[] = {
   { "player", "device_removal_grace_period", SETTING_TYPE_INT,  "device_removal_grace_period" },
   { "player", "buffered_audio_enabled",      SETTING_TYPE_BOOL, "buffered_audio_enabled"      },
   { "player", "buffered_encoder_budget",     SETTING_TYPE_INT,  "buffered_encoder_budget"     },
+  { "player", "pipe_sample_rate",            SETTING_TYPE_INT,  "pipe_sample_rate"            },
+  { "player", "pipe_bits_per_sample",        SETTING_TYPE_INT,  "pipe_bits_per_sample"        },
 };
 
 static const struct setting_entry *
