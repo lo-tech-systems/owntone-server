@@ -129,6 +129,17 @@ struct output_group
   uint64_t *member_ids;
   size_t members_count;
   bool leader_known;
+
+  // Last state logged by output_group_refresh(), so unchanged Avahi TTL
+  // refreshes don't re-log identical state on every recompute pass.
+  size_t last_logged_members_count;
+  uint64_t last_logged_leader_id;
+  bool last_logged_state_valid;
+  bool last_logged_no_leader;
+  bool last_logged_incomplete;
+  bool last_logged_multi_leader;
+  int last_logged_leaders;
+
   struct output_group *next;
 };
 
@@ -450,19 +461,71 @@ output_group_refresh(void)
             leaders++;
         }
 
+      // "multiple leader candidates" stays at WARN, but only re-logged
+      // when the condition newly appears or the leader count changes.
       if (leaders > 1)
-        DPRINTF(E_WARN, L_PLAYER, "AirPlay stereo group gid=%s has multiple leader candidates (%d)\n",
-                group->id, leaders);
-      else if (!group->leader_known)
-        DPRINTF(E_WARN, L_PLAYER, "AirPlay stereo group gid=%s has no leader candidate\n", group->id);
+        {
+          if (!group->last_logged_multi_leader || group->last_logged_leaders != leaders)
+            DPRINTF(E_WARN, L_PLAYER, "AirPlay stereo group gid=%s has multiple leader candidates (%d)\n",
+                    group->id, leaders);
+          group->last_logged_multi_leader = true;
+          group->last_logged_leaders = leaders;
+        }
+      else
+        {
+          group->last_logged_multi_leader = false;
+          group->last_logged_leaders = 0;
+        }
 
+      // "no leader candidate" only logs on the transition into the
+      // state; clearing it logs a single E_INFO instead of re-warning.
+      if (leaders <= 1 && !group->leader_known)
+        {
+          if (!group->last_logged_no_leader)
+            DPRINTF(E_WARN, L_PLAYER, "AirPlay stereo group gid=%s has no leader candidate\n", group->id);
+          group->last_logged_no_leader = true;
+        }
+      else
+        {
+          if (group->last_logged_no_leader)
+            DPRINTF(E_INFO, L_PLAYER, "AirPlay stereo group gid=%s leader elected\n", group->id);
+          group->last_logged_no_leader = false;
+        }
+
+      // "incomplete" only logs on the transition into the state.
       if (group->members_count < 2)
-        DPRINTF(E_WARN, L_PLAYER, "AirPlay stereo group gid=%s is incomplete: %zu member(s) currently present\n",
-                group->id, group->members_count);
+        {
+          if (!group->last_logged_incomplete)
+            DPRINTF(E_WARN, L_PLAYER, "AirPlay stereo group gid=%s is incomplete: %zu member(s) currently present\n",
+                    group->id, group->members_count);
+          group->last_logged_incomplete = true;
+        }
+      else
+        {
+          if (group->last_logged_incomplete)
+            DPRINTF(E_INFO, L_PLAYER, "AirPlay stereo group gid=%s now complete: %zu member(s)\n",
+                    group->id, group->members_count);
+          group->last_logged_incomplete = false;
+        }
 
       log_name = group->name ? group->name : "(unknown)";
-      DPRINTF(E_INFO, L_PLAYER, "AirPlay stereo group state updated: gid=%s, name='%s', members=%zu, leader_id=%" PRIu64 "\n",
+
+      // Only log the state summary on genuine change of members/leader;
+      // the recompute itself still runs every pass, at E_DBG.
+      DPRINTF(E_DBG, L_PLAYER, "AirPlay stereo group state recomputed: gid=%s, name='%s', members=%zu, leader_id=%" PRIu64 "\n",
               group->id, log_name, group->members_count, group->leader_known ? group->leader_id : 0);
+
+      if (!group->last_logged_state_valid
+          || group->last_logged_members_count != group->members_count
+          || group->last_logged_leader_id != (group->leader_known ? group->leader_id : 0))
+        {
+          DPRINTF(E_INFO, L_PLAYER, "AirPlay stereo group state updated: gid=%s, name='%s', members=%zu, leader_id=%" PRIu64 "\n",
+                  group->id, log_name, group->members_count, group->leader_known ? group->leader_id : 0);
+
+          group->last_logged_members_count = group->members_count;
+          group->last_logged_leader_id = group->leader_known ? group->leader_id : 0;
+          group->last_logged_state_valid = true;
+        }
     }
 }
 

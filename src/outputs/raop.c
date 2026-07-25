@@ -363,6 +363,30 @@ static struct raop_session *raop_sessions;
 /* Don't encode ALAC with ffmpeg */
 static bool raop_uncompressed_alac;
 
+// Tracks the last-logged address/port/capability signature per RAOP
+// device id, so a re-resolve of an already-known device (e.g. an Avahi TTL
+// refresh) does not re-log "Adding AirPlay device" at E_INFO on every mDNS
+// callback pass. Runs on the mDNS/main thread only (single-threaded
+// callback), so the static cache needs no locking.
+#define RAOP_SEEN_DEVICES_MAX 32
+
+struct raop_seen_device
+{
+  uint64_t id;
+  int family;
+  char *address;
+  int port;
+  uint8_t has_password;
+  uint8_t requires_auth;
+  uint8_t encrypt;
+  uint8_t supports_auth_setup;
+  int wanted_metadata;
+  int devtype;
+  bool valid;
+};
+
+static struct raop_seen_device raop_seen_devices[RAOP_SEEN_DEVICES_MAX];
+
 // Forwards
 static int
 raop_device_start(struct output_device *rd, int callback_id);
@@ -4384,6 +4408,101 @@ raop_device_authorize(struct output_device *device, const char *pin, int callbac
      802.11n Gen 2 model (firmware 7.6.4): "am=Airport4,107", "et=0,1"
      802.11n Gen 3 model (firmware 7.6.4): "am=Airport10,115", "et=0,4"
  */
+// Returns true if this is a genuinely new device, or its address/port/
+// capability signature changed since we last logged it; updates the cache
+// as a side effect (so a subsequent unchanged re-resolve returns false). If
+// the fixed cache is full of distinct device ids, slot 0 is overwritten;
+// the worst case is one extra E_INFO log for the bumped-out device next
+// time it resolves, not a correctness issue.
+static bool
+raop_seen_device_changed(uint64_t id, int family, const char *address, int port, const struct output_device *rd, const struct raop_extra *re)
+{
+  struct raop_seen_device *slot;
+  int i;
+
+  // Keyed by (id, family): a dual-stack device resolves on both AF_INET and
+  // AF_INET6 with different addresses, so a shared slot would see-saw
+  // between the two and defeat the dedup.
+  slot = NULL;
+  for (i = 0; i < RAOP_SEEN_DEVICES_MAX; i++)
+    {
+      if (raop_seen_devices[i].valid && raop_seen_devices[i].id == id && raop_seen_devices[i].family == family)
+	{
+	  slot = &raop_seen_devices[i];
+	  break;
+	}
+    }
+
+  if (!slot)
+    {
+      for (i = 0; i < RAOP_SEEN_DEVICES_MAX; i++)
+	{
+	  if (!raop_seen_devices[i].valid)
+	    {
+	      slot = &raop_seen_devices[i];
+	      break;
+	    }
+	}
+    }
+
+  if (!slot)
+    slot = &raop_seen_devices[0];
+
+  if (slot->valid && slot->id == id && slot->family == family
+      && slot->address && strcmp(slot->address, address) == 0
+      && slot->port == port
+      && slot->has_password == rd->has_password
+      && slot->requires_auth == rd->requires_auth
+      && slot->encrypt == re->encrypt
+      && slot->supports_auth_setup == re->supports_auth_setup
+      && slot->wanted_metadata == re->wanted_metadata
+      && slot->devtype == re->devtype)
+    {
+      return false;
+    }
+
+  free(slot->address);
+  slot->id = id;
+  slot->family = family;
+  slot->address = strdup(address);
+  slot->port = port;
+  slot->has_password = rd->has_password;
+  slot->requires_auth = rd->requires_auth;
+  slot->encrypt = re->encrypt;
+  slot->supports_auth_setup = re->supports_auth_setup;
+  slot->wanted_metadata = re->wanted_metadata;
+  slot->devtype = re->devtype;
+  slot->valid = true;
+  if (!slot->address)
+    {
+      // OOM: drop the slot rather than keep a half-valid entry; the only
+      // cost is an extra E_INFO next resolve.
+      slot->valid = false;
+    }
+
+  return true;
+}
+
+// Invalidates the (id, family) cache slot when the device says goodbye,
+// so a later reappearance with unchanged details is still logged at E_INFO
+// as a genuine re-add rather than being demoted as an unchanged re-resolve.
+static void
+raop_seen_device_forget(uint64_t id, int family)
+{
+  int i;
+
+  for (i = 0; i < RAOP_SEEN_DEVICES_MAX; i++)
+    {
+      if (raop_seen_devices[i].valid && raop_seen_devices[i].id == id && raop_seen_devices[i].family == family)
+	{
+	  free(raop_seen_devices[i].address);
+	  raop_seen_devices[i].address = NULL;
+	  raop_seen_devices[i].valid = false;
+	  return;
+	}
+    }
+}
+
 static void
 raop_device_cb(const char *name, const char *type, const char *domain, const char *hostname, int family, const char *address, int port, struct keyval *txt)
 {
@@ -4399,6 +4518,7 @@ raop_device_cb(const char *name, const char *type, const char *domain, const cha
   char *ptr;
   uint64_t id;
   uint64_t sf;
+  bool device_changed;
   int ret;
 
   ret = safe_hextou64(name, &id);
@@ -4463,6 +4583,8 @@ raop_device_cb(const char *name, const char *type, const char *domain, const cha
   if (port < 0)
     {
       // Device stopped advertising
+      raop_seen_device_forget(id, family);
+
       switch (family)
 	{
 	  case AF_INET:
@@ -4642,19 +4764,24 @@ raop_device_cb(const char *name, const char *type, const char *domain, const cha
       free(s);
     }
 
+  // Demote to E_DBG when this is an unchanged re-resolve of an
+  // already-known device (e.g. an Avahi TTL refresh), keep E_INFO for a
+  // genuine add or an address/port/capability change.
+  device_changed = raop_seen_device_changed(id, family, address, port, rd, re);
+
   switch (family)
     {
       case AF_INET:
 	rd->v4_address = strdup(address);
 	rd->v4_port = port;
-	DPRINTF(E_INFO, L_RAOP, "Adding AirPlay device '%s': password: %u, verification: %u, encrypt: %u, authsetup: %u, metadata: %u, type %s, address %s:%d\n", 
+	DPRINTF(device_changed ? E_INFO : E_DBG, L_RAOP, "Adding AirPlay device '%s': password: %u, verification: %u, encrypt: %u, authsetup: %u, metadata: %u, type %s, address %s:%d\n",
 	  device_name, rd->has_password, rd->requires_auth, re->encrypt, re->supports_auth_setup, re->wanted_metadata, raop_devtype[re->devtype], address, port);
 	break;
 
       case AF_INET6:
 	rd->v6_address = strdup(address);
 	rd->v6_port = port;
-	DPRINTF(E_INFO, L_RAOP, "Adding AirPlay device '%s': password: %u, verification: %u, encrypt: %u, authsetup: %u, metadata: %u, type %s, address [%s]:%d\n", 
+	DPRINTF(device_changed ? E_INFO : E_DBG, L_RAOP, "Adding AirPlay device '%s': password: %u, verification: %u, encrypt: %u, authsetup: %u, metadata: %u, type %s, address [%s]:%d\n",
 	  device_name, rd->has_password, rd->requires_auth, re->encrypt, re->supports_auth_setup, re->wanted_metadata, raop_devtype[re->devtype], address, port);
 	break;
 

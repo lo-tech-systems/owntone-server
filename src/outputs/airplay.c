@@ -718,6 +718,25 @@ static const char *airplay_user_agent;
 static char airplay_ptp_clock_uuid[37];
 static bool airplay_ptp_is_disabled;
 
+// Tracks the last-logged address/port/features per AirPlay device id, so
+// a re-resolve of an already-known device (e.g. an Avahi TTL refresh) does
+// not re-log "Adding AirPlay device" at E_INFO on every mDNS callback pass.
+// Runs on the mDNS/main thread only (single-threaded callback), so the
+// static cache needs no locking.
+#define AIRPLAY_SEEN_DEVICES_MAX 32
+
+struct airplay_seen_device
+{
+  uint64_t id;
+  int family;
+  char *address;
+  int port;
+  char *features;
+  bool valid;
+};
+
+static struct airplay_seen_device airplay_seen_devices[AIRPLAY_SEEN_DEVICES_MAX];
+
 // Forwards
 static int
 airplay_device_start(struct output_device *device, int callback_id);
@@ -5580,11 +5599,14 @@ airplay_stereo_metadata_log(struct output_device *device, struct airplay_extra *
       return;
     }
 
-  DPRINTF(E_INFO, L_AIRPLAY, "AirPlay stereo group detected for device '%s': group id=%s, raw gid=%s, group name='%s'\n",
+  // Demoted to E_DBG - duplicates the log-on-change summary emitted by
+  // output_group_refresh() (outputs.c) at E_INFO, so this would otherwise
+  // re-log identical state on every mDNS callback pass.
+  DPRINTF(E_DBG, L_AIRPLAY, "AirPlay stereo group detected for device '%s': group id=%s, raw gid=%s, group name='%s'\n",
           device->name, group_id, gid, gpn);
 
   if (device->is_group_leader)
-    DPRINTF(E_INFO, L_AIRPLAY, "AirPlay stereo leader detected: device '%s', group id=%s, raw gid=%s, group name='%s'\n",
+    DPRINTF(E_DBG, L_AIRPLAY, "AirPlay stereo leader detected: device '%s', group id=%s, raw gid=%s, group name='%s'\n",
             device->name, group_id, gid, gpn);
   else
     DPRINTF(E_DBG, L_AIRPLAY, "AirPlay device '%s': classified as stereo member, leader=0\n", device->name);
@@ -5693,6 +5715,98 @@ airplay_buffered_capability_probe_deferred_cb(int fd, short what, void *arg)
   free(ctx);
 }
 
+// Returns true if this is a genuinely new device, or its address/port/
+// features changed since we last logged it; updates the cache as a side
+// effect (so a subsequent unchanged re-resolve returns false). If the fixed
+// cache is full of distinct device ids, slot 0 is overwritten; the worst
+// case is one extra E_INFO log for the bumped-out device next time it
+// resolves, not a correctness issue.
+static bool
+airplay_seen_device_changed(uint64_t id, int family, const char *address, int port, const char *features)
+{
+  struct airplay_seen_device *slot;
+  int i;
+
+  // Keyed by (id, family): a dual-stack device resolves on both AF_INET and
+  // AF_INET6 with different addresses, so a shared slot would see-saw
+  // between the two and defeat the dedup.
+  slot = NULL;
+  for (i = 0; i < AIRPLAY_SEEN_DEVICES_MAX; i++)
+    {
+      if (airplay_seen_devices[i].valid && airplay_seen_devices[i].id == id && airplay_seen_devices[i].family == family)
+	{
+	  slot = &airplay_seen_devices[i];
+	  break;
+	}
+    }
+
+  if (!slot)
+    {
+      for (i = 0; i < AIRPLAY_SEEN_DEVICES_MAX; i++)
+	{
+	  if (!airplay_seen_devices[i].valid)
+	    {
+	      slot = &airplay_seen_devices[i];
+	      break;
+	    }
+	}
+    }
+
+  if (!slot)
+    slot = &airplay_seen_devices[0];
+
+  if (slot->valid && slot->id == id && slot->family == family
+      && slot->address && strcmp(slot->address, address) == 0
+      && slot->port == port
+      && slot->features && strcmp(slot->features, features) == 0)
+    {
+      return false;
+    }
+
+  free(slot->address);
+  free(slot->features);
+  slot->id = id;
+  slot->family = family;
+  slot->address = strdup(address);
+  slot->port = port;
+  slot->features = strdup(features);
+  slot->valid = true;
+  if (!slot->address || !slot->features)
+    {
+      // OOM: drop the slot rather than keep a half-valid entry; the only
+      // cost is an extra E_INFO next resolve.
+      free(slot->address);
+      free(slot->features);
+      slot->address = NULL;
+      slot->features = NULL;
+      slot->valid = false;
+    }
+
+  return true;
+}
+
+// Invalidates the (id, family) cache slot when the device says goodbye,
+// so a later reappearance with unchanged details is still logged at E_INFO
+// as a genuine re-add rather than being demoted as an unchanged re-resolve.
+static void
+airplay_seen_device_forget(uint64_t id, int family)
+{
+  int i;
+
+  for (i = 0; i < AIRPLAY_SEEN_DEVICES_MAX; i++)
+    {
+      if (airplay_seen_devices[i].valid && airplay_seen_devices[i].id == id && airplay_seen_devices[i].family == family)
+	{
+	  free(airplay_seen_devices[i].address);
+	  free(airplay_seen_devices[i].features);
+	  airplay_seen_devices[i].address = NULL;
+	  airplay_seen_devices[i].features = NULL;
+	  airplay_seen_devices[i].valid = false;
+	  return;
+	}
+    }
+}
+
 static void
 airplay_device_cb(const char *name, const char *type, const char *domain, const char *hostname, int family, const char *address, int port, struct keyval *txt)
 {
@@ -5707,6 +5821,7 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
   const char *features;
   uint64_t id;
   bool advertises_buffered = false;
+  bool device_changed;
   int ret;
 
   if (port > 0)
@@ -5730,7 +5845,10 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
       ret = device_id_find_byname(&id, name);
       if (ret < 0)
 	{
-	  DPRINTF(E_WARN, L_AIRPLAY, "Could not remove, AirPlay device '%s' not in our list\n", name);
+	  // Benign churn - a goodbye for a device we never added (or
+	  // already removed); demoted from E_WARN since it's a routine
+	  // no-op, not an error.
+	  DPRINTF(E_DBG, L_AIRPLAY, "Could not remove, AirPlay device '%s' not in our list\n", name);
 	  return;
 	}
     }
@@ -5783,6 +5901,8 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
   if (port < 0)
     {
       // Device stopped advertising
+      airplay_seen_device_forget(id, family);
+
       switch (family)
 	{
 	  case AF_INET:
@@ -5894,19 +6014,24 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
   else
     device->resurrect = (extra->devtype == AIRPLAY_DEV_APPLETV4) || (extra->devtype == AIRPLAY_DEV_HOMEPOD);
 
+  // Demote to E_DBG when this is an unchanged re-resolve of an
+  // already-known device (e.g. an Avahi TTL refresh), keep E_INFO for a
+  // genuine add or an address/port/features change.
+  device_changed = airplay_seen_device_changed(id, family, address, port, features);
+
   switch (family)
     {
       case AF_INET:
 	device->v4_address = strdup(address);
 	device->v4_port = port;
-	DPRINTF(E_INFO, L_AIRPLAY, "Adding AirPlay device '%s': features %s, type %s, address %s:%d\n", 
+	DPRINTF(device_changed ? E_INFO : E_DBG, L_AIRPLAY, "Adding AirPlay device '%s': features %s, type %s, address %s:%d\n",
 	  name, features, airplay_devtype[extra->devtype], address, port);
 	break;
 
       case AF_INET6:
 	device->v6_address = strdup(address);
 	device->v6_port = port;
-	DPRINTF(E_INFO, L_AIRPLAY, "Adding AirPlay device '%s': features %s, type %s, address [%s]:%d\n", 
+	DPRINTF(device_changed ? E_INFO : E_DBG, L_AIRPLAY, "Adding AirPlay device '%s': features %s, type %s, address [%s]:%d\n",
 	  name, features, airplay_devtype[extra->devtype], address, port);
 	break;
 

@@ -31,6 +31,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stdatomic.h>
+#include <time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -73,6 +74,27 @@ static AvahiIfIndex mdns_interface = AVAHI_IF_UNSPEC;
 static struct event *mdns_rescan_ev;
 static int mdns_rescan_pipe[2] = { -1, -1 };
 static atomic_bool mdns_rescan_pending = ATOMIC_VAR_INIT(false);
+
+// Rate-limits the "Avahi Resolver failure ... Timeout" WARN. The
+// resolver is intentionally kept alive after a failure (so we get notified
+// if the device reappears), which means a departed device re-fires this
+// indefinitely. Bounded per-callsite cache keyed by service name+type,
+// slot 0 overwritten on overflow; allows one E_WARN per key per
+// RESOLVER_TIMEOUT_WARN_INTERVAL seconds, suppressed occurrences log at
+// E_DBG instead. Runs on the Avahi/libevent thread only, so no locking is
+// needed.
+#define RESOLVER_TIMEOUT_CACHE_MAX 16
+#define RESOLVER_TIMEOUT_WARN_INTERVAL 600 // 10 minutes
+
+struct resolver_timeout_entry
+{
+  char *name;
+  char *type;
+  time_t last_logged;
+  bool valid;
+};
+
+static struct resolver_timeout_entry resolver_timeout_cache[RESOLVER_TIMEOUT_CACHE_MAX];
 
 
 struct AvahiWatch
@@ -909,6 +931,75 @@ browse_record_callback(AvahiRecordBrowser *b, AvahiIfIndex intf, AvahiProtocol p
   avahi_record_browser_free(b);
 }
 
+// Returns true if a "Resolver failure ... Timeout" WARN for this
+// name+type should be logged now (and updates the cache accordingly), false
+// if one was already logged within the last RESOLVER_TIMEOUT_WARN_INTERVAL
+// seconds and this occurrence should be suppressed (logged at E_DBG by the
+// caller instead). If the fixed cache is full of distinct name+type keys,
+// slot 0 is overwritten; the worst case is one extra WARN for the
+// bumped-out key, not a correctness issue.
+static bool
+resolver_timeout_warn_allowed(const char *name, const char *type)
+{
+  struct resolver_timeout_entry *slot;
+  time_t now;
+  int i;
+
+  now = time(NULL);
+
+  slot = NULL;
+  for (i = 0; i < RESOLVER_TIMEOUT_CACHE_MAX; i++)
+    {
+      if (resolver_timeout_cache[i].valid
+	  && strcmp(resolver_timeout_cache[i].name, name) == 0
+	  && strcmp(resolver_timeout_cache[i].type, type) == 0)
+	{
+	  slot = &resolver_timeout_cache[i];
+	  break;
+	}
+    }
+
+  if (slot)
+    {
+      if ((now - slot->last_logged) < RESOLVER_TIMEOUT_WARN_INTERVAL)
+	return false;
+
+      slot->last_logged = now;
+      return true;
+    }
+
+  for (i = 0; i < RESOLVER_TIMEOUT_CACHE_MAX; i++)
+    {
+      if (!resolver_timeout_cache[i].valid)
+	{
+	  slot = &resolver_timeout_cache[i];
+	  break;
+	}
+    }
+
+  if (!slot)
+    slot = &resolver_timeout_cache[0];
+
+  free(slot->name);
+  free(slot->type);
+  slot->name = strdup(name);
+  slot->type = strdup(type);
+  slot->last_logged = now;
+  slot->valid = true;
+  if (!slot->name || !slot->type)
+    {
+      // OOM: drop the slot rather than keep a half-valid entry; the only
+      // cost is an extra WARN next occurrence.
+      free(slot->name);
+      free(slot->type);
+      slot->name = NULL;
+      slot->type = NULL;
+      slot->valid = false;
+    }
+
+  return true;
+}
+
 // Note on protocols in the below, ref issue #1599:
 // The callback proto is the proto corresponding to the network interface where
 // the announcement was received, not the proto corresponding the address at
@@ -936,7 +1027,17 @@ browse_resolve_callback(AvahiServiceResolver *r, AvahiIfIndex intf, AvahiProtoco
   if (event != AVAHI_RESOLVER_FOUND)
     {
       if (event == AVAHI_RESOLVER_FAILURE)
-	DPRINTF(E_WARN, L_MDNS, "Avahi Resolver failure: service '%s' type '%s' proto %d: %s\n", name, type, proto, MDNSERR);
+	{
+	  // A resolver timeout for a departed device re-fires
+	  // indefinitely (the resolver is kept alive on purpose), so rate-
+	  // limit it; keep other, distinguishable resolver failures at WARN
+	  // unconditionally.
+	  if (avahi_client_errno(mdns_client) == AVAHI_ERR_TIMEOUT)
+	    DPRINTF(resolver_timeout_warn_allowed(name, type) ? E_WARN : E_DBG, L_MDNS,
+	            "Avahi Resolver failure: service '%s' type '%s' proto %d: %s\n", name, type, proto, MDNSERR);
+	  else
+	    DPRINTF(E_WARN, L_MDNS, "Avahi Resolver failure: service '%s' type '%s' proto %d: %s\n", name, type, proto, MDNSERR);
+	}
       else
 	DPRINTF(E_LOG, L_MDNS, "Avahi Resolver empty callback\n");
 
