@@ -31,8 +31,9 @@ enum transcode_profile
   // payload for bufferStream format 23
   XCODE_AAC48K_STEREO,
   // Raw AAC-LC 44.1kHz stereo (no container) - buffered AirPlay 2 stereo
-  // payload for bufferStream format 22 (no resample: pipe input is already
-  // 44.1kHz)
+  // payload for bufferStream format 22. The pipe is nominally 48kHz; this
+  // is the resampling fallback path for 44.1kHz-only receivers, not the
+  // no-resample case.
   XCODE_AAC44K_STEREO,
   // Raw ALAC 48kHz/24-bit stereo (no container) - the buffered AirPlay 2
   // stereo payload for bufferStream format 21

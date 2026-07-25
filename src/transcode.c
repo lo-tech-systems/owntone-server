@@ -372,8 +372,10 @@ init_settings(struct settings_ctx *settings, enum transcode_profile profile, str
 	break;
 
       // Raw AAC-LC frames at 44.1kHz stereo (no container) - the buffered
-      // AirPlay 2 payload for bufferStream format 22 (no resample: pipe
-      // input is already 44.1kHz).
+      // AirPlay 2 payload for bufferStream format 22. The pipe is nominally
+      // 48kHz; this is the resampling fallback path for receivers that only
+      // advertise format 22 (44.1kHz-only receivers), not the no-resample
+      // case.
       case XCODE_AAC44K_STEREO:
 	settings->encode_audio = true;
 	settings->format = "data";

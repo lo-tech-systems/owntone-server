@@ -113,8 +113,9 @@
 // buffered transport.
 #define AIRPLAY_FORMAT_ID_AAC_STEREO        23
 // AAC-LC 44.1kHz stereo. A lower-priority alternative to format 23, used
-// only when a receiver advertises it (and not 23); needs no resample since
-// the pipe input is already 44.1kHz.
+// only when a receiver advertises it (and not 23); the pipe is nominally
+// 48kHz, so this is the resampling fallback path for 44.1kHz-only
+// receivers, not a no-resample case.
 #define AIRPLAY_FORMAT_ID_AAC44K_STEREO     22
 // ALAC 48kHz/24-bit stereo, for lossless sources. The bufferStream capability
 // list encodes each format id as a bit position (format id N is bit N of the
@@ -1349,10 +1350,12 @@ static struct airplay_master_session *
 master_session_make(struct media_quality *quality, bool use_ptp, enum airplay_buffered_kind kind)
 {
   struct airplay_master_session *ams;
-  struct media_quality alac24_quality;
+  struct media_quality buffered_quality;
   uint64_t buffer_duration_ms;
   bool buffered = (kind != AIRPLAY_BUFFERED_KIND_NONE);
   bool alac24 = (kind == AIRPLAY_BUFFERED_KIND_ALAC24);
+  bool aac48k = (kind == AIRPLAY_BUFFERED_KIND_AAC_STEREO || kind == AIRPLAY_BUFFERED_KIND_SURROUND_STEREO
+                 || kind == AIRPLAY_BUFFERED_KIND_SURROUND_UPMIX);
   enum transcode_profile profile;
   struct transcode_encode_setup_args encode_args;
   uint64_t clock_id;
@@ -1360,19 +1363,27 @@ master_session_make(struct media_quality *quality, bool use_ptp, enum airplay_bu
   int cost;
   int budget;
 
-  // For the ALAC 48k/24 profile the session subscribes at 48k/32-bit/2ch
-  // instead of the device default, so a >16-bit source reaches the encoder
-  // without truncation and without a resample away from 48k. 16-bit sources
-  // arrive converted/zero-padded by the player, same audible result as
-  // before. Must be set before the reuse check below so equality compares the
-  // real subscription quality.
-  if (alac24)
+  // For the ALAC 48k/24 profile and the 48k AAC buffered kinds (AAC stereo,
+  // surround stereo, surround upmix) the session subscribes at 48k instead of
+  // the device default, so a 44.1k pipe reaches the encoder without a second,
+  // encoder-side resample - the 44.1->48 conversion (if any) happens once, in
+  // this outputs.c subscription, and a 48k pipe reaches the encoder with zero
+  // rate conversion at all. ALAC24 additionally subscribes at 32-bit so a
+  // >16-bit source reaches the encoder without truncation; the AAC kinds stay
+  // at 16-bit since AAC-LC gains nothing from a higher input depth. 16-bit
+  // sources arrive converted/zero-padded by the player, same audible result
+  // as before. Must be set before the reuse check below so equality compares
+  // the real subscription quality. AAC44_STEREO is the intentional
+  // 44.1k-only fallback for receivers that don't support 48k AAC and is
+  // deliberately excluded here - it always resamples to 44.1k regardless of
+  // pipe rate (see ams->buffered_sample_rate below).
+  if (alac24 || aac48k)
     {
-      memset(&alac24_quality, 0, sizeof(alac24_quality));
-      alac24_quality.sample_rate = 48000;
-      alac24_quality.bits_per_sample = 32;
-      alac24_quality.channels = 2;
-      quality = &alac24_quality;
+      memset(&buffered_quality, 0, sizeof(buffered_quality));
+      buffered_quality.sample_rate = 48000;
+      buffered_quality.bits_per_sample = alac24 ? 32 : 16;
+      buffered_quality.channels = 2;
+      quality = &buffered_quality;
     }
 
   encoder_budget_rejected = false;
