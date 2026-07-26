@@ -1,5 +1,25 @@
 # Changelog
 
+## Version 1.1.0
+
+Changes since 1.0.0:
+
+- improved: 48kHz sessions are now fully calibrated: the PTP time-announce
+  latency and realtime SETUP latencyMin/latencyMax are derived from the
+  session sample rate instead of 44.1kHz literals (44.1kHz sessions produce
+  bit-identical wire output; 48kHz sessions get correct 250ms/12000-sample
+  values)
+- improved: the 48kHz AAC buffered kinds (AAC_STEREO, SURROUND_STEREO,
+  SURROUND_UPMIX) subscribe at 48000/16/2, eliminating rate conversion
+  entirely for a 48kHz pipe and moving the single resample for a 44.1kHz
+  pipe out of the encoder; AAC44K (format 22) remains the 44.1kHz-only
+  receiver fallback
+- improved: steady-state log noise from mDNS TTL refreshes is largely
+  eliminated to reduce microSD write wear: stereo-group state and AirPlay
+  device-add lines log on change only (unchanged re-resolves at debug),
+  and the resolver-timeout warning is rate-limited to one per service per
+  10 minutes; genuine adds, changes and recoveries still log at info/warn
+
 ## Version 1.0.0
 
 First independently versioned release. Renames the project to owntone-mini and
