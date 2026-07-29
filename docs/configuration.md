@@ -92,6 +92,21 @@ generous for your hardware, or to deliberately cap concurrent buffered
 outputs. A rejected activation returns HTTP 503 with
 `{"error": "encoder_capacity"}` (see [json-api.md](json-api.md)).
 
+### player: resample_quality
+
+String, `high` or `standard`, default `standard`. Also settable at runtime via
+`PUT /api/settings/player/resample_quality` (takes effect on the next
+playback session, no restart required).
+
+Controls the resampler used for any output whose format doesn't match the
+pipe input (for example an AirPlay 1 receiver at 44.1kHz/16-bit fed from a
+48kHz/32-bit pipe). `standard` leaves libavfilter's auto-inserted resample
+stage at its default settings. `high` requests the soxr resampler at VHQ
+precision with dither, at a modest CPU cost. Outputs whose format already
+matches the pipe (for example a 48kHz buffered AirPlay 2 receiver) never
+insert a resample stage and are unaffected either way. An unrecognised value
+is treated as `standard`.
+
 ## Other settings
 
 See the repository `owntone-settings.json` file for the current reference

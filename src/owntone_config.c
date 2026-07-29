@@ -118,6 +118,11 @@ config_defaults_build(void)
   // change to these built-in defaults.
   json_object_object_add(defaults, "pipe_sample_rate", json_object_new_int(44100));
   json_object_object_add(defaults, "pipe_bits_per_sample", json_object_new_int(16));
+  // Read at filtergraph creation (per playback session), not cached at
+  // startup, so a change takes effect on the next session with no restart -
+  // see config_key_requires_restart() below, which deliberately omits this
+  // key.
+  json_object_object_add(defaults, "resample_quality", json_object_new_string("standard"));
   json_object_object_add(defaults, "ipv6", json_object_new_boolean(true));
   json_object_object_add(defaults, "start_buffer_ms", json_object_new_int(2250));
   json_object_object_add(defaults, "uncompressed_alac", json_object_new_boolean(false));
@@ -147,6 +152,7 @@ static const char *api_settable_keys[] = {
   "buffered_encoder_budget",
   "pipe_sample_rate",
   "pipe_bits_per_sample",
+  "resample_quality",
   NULL
 };
 
