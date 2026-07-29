@@ -192,6 +192,7 @@ static const struct setting_entry settings_table[] = {
   { "player", "buffered_encoder_budget",     SETTING_TYPE_INT,  "buffered_encoder_budget"     },
   { "player", "pipe_sample_rate",            SETTING_TYPE_INT,  "pipe_sample_rate"            },
   { "player", "pipe_bits_per_sample",        SETTING_TYPE_INT,  "pipe_bits_per_sample"        },
+  { "player", "resample_quality",            SETTING_TYPE_STR,  "resample_quality"            },
 };
 
 static const struct setting_entry *

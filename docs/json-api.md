@@ -396,6 +396,7 @@ There are no category-listing or option-listing endpoints in this build.
 | `/api/settings/player/uncompressed_alac` | boolean | ALAC output preference, restart required |
 | `/api/settings/player/buffered_audio_enabled` | boolean | Prefer buffered AAC-LC over realtime for AirPlay 2 outputs left on `auto` (default `true`, gated per device on an advertised buffered format); takes effect on the next output start |
 | `/api/settings/player/buffered_encoder_budget` | integer | Buffered-encode capacity budget override, valid range `0` to `64` (`0` = auto, CPU-based); takes effect on the next output activation |
+| `/api/settings/player/resample_quality` | string | Output resampler quality for format-mismatched paths, `high` or `standard` (default `standard`); unknown values fall back to `standard`; takes effect on the next playback session, no restart required |
 
 ### Get a setting
 

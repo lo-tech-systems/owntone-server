@@ -37,6 +37,7 @@
 
 #include "logger.h"
 #include "misc.h"
+#include "owntone_config.h"
 #include "transcode.h"
 
 // Switches for compability with ffmpeg's ever changing API
@@ -1263,14 +1264,53 @@ add_filters(int *num_added, AVFilterGraph *filter_graph, struct filters *filters
   return 0;
 }
 
+// Reads the resample_quality setting for the graph about to be built.
+// Read fresh on every call (no caching) so an API-triggered change is picked
+// up by the next create_filtergraph() call - i.e. the next playback session
+// - without an owntone restart. Unknown/invalid values fall back to
+// "standard" with a single log line rather than being rejected at the config
+// layer, matching this setting's "no CPU/model gate here, caller decides"
+// contract.
+static bool
+resample_quality_want_high(void)
+{
+  const char *value = config_get_str("resample_quality", "standard");
+
+  if (strcmp(value, "high") == 0)
+    return true;
+
+  if (strcmp(value, "standard") != 0)
+    DPRINTF(E_WARN, L_XCODE, "Unknown resample_quality '%s', using 'standard'\n", value);
+
+  return false;
+}
+
 static int
 create_filtergraph(struct stream_ctx *out_stream, struct filters *filters, size_t filters_len, struct stream_ctx *in_stream)
 {
   AVFilterGraph *filter_graph;
+  bool high_quality;
   int ret;
   int added;
 
+  high_quality = resample_quality_want_high();
+
+ retry:
   CHECK_NULL(L_XCODE, filter_graph = avfilter_graph_alloc());
+
+  // resample_quality=="high": ask for the soxr resampler (VHQ precision) with
+  // dither on any aresample stage libavfilter auto-inserts to bridge a
+  // format-mismatched link (e.g. sample rate or bit depth change) in this
+  // graph. This option is graph-global, not tied to a specific filter
+  // instance, so it deliberately applies to whichever aresample instance(s)
+  // this graph ends up needing - including none, for a profile that needs no
+  // resampling. "standard" leaves the option unset, i.e. stock swr defaults.
+  if (high_quality)
+    {
+      ret = av_opt_set(filter_graph, "aresample_swr_opts", "resampler=soxr:precision=28:dither_method=triangular_hp", 0);
+      if (ret < 0)
+        DPRINTF(E_WARN, L_XCODE, "Could not request high-quality resampling, using standard: %s\n", err2str(ret));
+    }
 
   ret = add_filters(&added, filter_graph, filters, filters_len, out_stream, in_stream);
   if (ret < 0)
@@ -1281,6 +1321,19 @@ create_filtergraph(struct stream_ctx *out_stream, struct filters *filters, size_
   ret = avfilter_graph_config(filter_graph, NULL);
   if (ret < 0)
     {
+      if (high_quality)
+        {
+          // The "soxr" engine name is always a valid option value, but
+          // libswresample may not have been built with libsoxr support, in
+          // which case swr_init() only fails once the auto-inserted
+          // aresample filter actually tries to instantiate it here. Fall
+          // back to the standard resampler rather than losing playback.
+          DPRINTF(E_WARN, L_XCODE, "High-quality resample setup failed (%s), retrying with standard resampler\n", err2str(ret));
+          avfilter_graph_free(&filter_graph);
+          high_quality = false;
+          goto retry;
+        }
+
       DPRINTF(E_LOG, L_XCODE, "Filter graph config failed: %s\n", err2str(ret));
       goto out_fail;
     }

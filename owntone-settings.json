@@ -8,6 +8,7 @@
   "pipe_autostart": true,
   "pipe_sample_rate": 44100,
   "pipe_bits_per_sample": 16,
+  "resample_quality": "standard",
   "ipv6": true,
   "start_buffer_ms": 2250,
   "uncompressed_alac": false,
