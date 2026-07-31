@@ -1,5 +1,17 @@
 # Changelog
 
+## Version 1.1.1
+
+Changes since 1.1.0:
+
+- new: `resample_quality` player setting (`high` or `standard`, default
+  `standard`) — `high` requests the soxr resampler at very-high precision
+  with dither on format-mismatched output paths; paths whose output format
+  already matches the pipe insert no resampler and are byte-identical
+  either way
+- fix: an intermittent crash (abort and automatic restart) when starting
+  playback on a pipe source; the metadata watch lifecycle is now serialized
+
 ## Version 1.1.0
 
 Changes since 1.0.0:
