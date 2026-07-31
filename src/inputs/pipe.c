@@ -130,6 +130,13 @@ struct pipe_metadata
   struct pipe_metadata_prepared prepared;
   // True if there is new metadata to push to the player
   bool is_new;
+  // .pipe and .evbuf are set up/torn down by pipe_metadata_watch_add()/
+  // pipe_metadata_watch_del(), which run as jobs on the (multi-threaded)
+  // worker pool, and are also read from the pipe thread in
+  // pipe_metadata_read_cb() and from the input thread in stop(). This mutex
+  // protects .pipe and .evbuf specifically (not .prepared, which has its own
+  // lock above).
+  pthread_mutex_t lock;
 };
 
 union pipe_arg
@@ -985,8 +992,9 @@ pipe_thread_run(void *arg)
 /* --------------------------- METADATA PIPE HANDLING ----------------------- */
 /*                                Thread: worker                              */
 
+// Caller must hold pipe_metadata.lock
 static void
-pipe_metadata_watch_del(void *arg)
+pipe_metadata_watch_del_locked(void)
 {
   if (!pipe_metadata.pipe)
     return;
@@ -1000,6 +1008,14 @@ pipe_metadata_watch_del(void *arg)
   pipe_metadata.prepared.pict_tmpfile_fd = -1;
 }
 
+static void
+pipe_metadata_watch_del(void *arg)
+{
+  pthread_mutex_lock(&pipe_metadata.lock);
+  pipe_metadata_watch_del_locked();
+  pthread_mutex_unlock(&pipe_metadata.lock);
+}
+
 // Some metadata arrived on a pipe we watch
 static void
 pipe_metadata_read_cb(evutil_socket_t fd, short event, void *arg)
@@ -1008,11 +1024,25 @@ pipe_metadata_read_cb(evutil_socket_t fd, short event, void *arg)
   size_t len;
   int ret;
 
+  // .pipe and .evbuf are shared with the worker pool (add/del) and the input
+  // thread (stop), so use mutex. Lock ordering: pipe_metadata.lock (outer),
+  // then pipe_metadata.prepared.lock (inner) - never the reverse.
+  pthread_mutex_lock(&pipe_metadata.lock);
+
+  // The watch may have been torn down (and .pipe/.evbuf freed) between this
+  // event firing and the lock being acquired
+  if (!pipe_metadata.pipe || !pipe_metadata.evbuf)
+    {
+      pthread_mutex_unlock(&pipe_metadata.lock);
+      return;
+    }
+
   ret = evbuffer_read(pipe_metadata.evbuf, pipe_metadata.pipe->fd, PIPE_READ_MAX);
   if (ret < 0)
     {
       if (errno != EAGAIN)
-	pipe_metadata_watch_del(NULL);
+	pipe_metadata_watch_del_locked();
+      pthread_mutex_unlock(&pipe_metadata.lock);
       return;
     }
   else if (ret == 0)
@@ -1020,7 +1050,10 @@ pipe_metadata_read_cb(evutil_socket_t fd, short event, void *arg)
       // Reset the pipe
       ret = watch_reset(pipe_metadata.pipe);
       if (ret < 0)
-	return;
+	{
+	  pthread_mutex_unlock(&pipe_metadata.lock);
+	  return;
+	}
       goto readd;
     }
 
@@ -1057,12 +1090,14 @@ pipe_metadata_read_cb(evutil_socket_t fd, short event, void *arg)
  readd:
   if (pipe_metadata.pipe && pipe_metadata.pipe->ev)
     event_add(pipe_metadata.pipe->ev, NULL);
+
+  pthread_mutex_unlock(&pipe_metadata.lock);
 }
 
+// Caller must hold pipe_metadata.lock
 static void
-pipe_metadata_watch_add(void *arg)
+pipe_metadata_watch_add_locked(const char *base_path)
 {
-  char *base_path = arg;
   char path[PATH_MAX];
   int ret;
 
@@ -1070,7 +1105,7 @@ pipe_metadata_watch_add(void *arg)
   if ((ret < 0) || (ret > sizeof(path)))
     return;
 
-  pipe_metadata_watch_del(NULL); // Just in case we somehow already have a metadata pipe open
+  pipe_metadata_watch_del_locked(); // Just in case we somehow already have a metadata pipe open
 
   pipe_metadata.pipe = pipe_create(path, 0, PIPE_METADATA, pipe_metadata_read_cb);
   pipe_metadata.evbuf = evbuffer_new();
@@ -1083,6 +1118,16 @@ pipe_metadata_watch_add(void *arg)
       pipe_metadata.pipe = NULL;
       return;
     }
+}
+
+static void
+pipe_metadata_watch_add(void *arg)
+{
+  char *base_path = arg;
+
+  pthread_mutex_lock(&pipe_metadata.lock);
+  pipe_metadata_watch_add_locked(base_path);
+  pthread_mutex_unlock(&pipe_metadata.lock);
 }
 
 
@@ -1321,8 +1366,10 @@ stop(struct input_source *source)
       commands_exec_async(cmdbase, pipe_watch_reset, cmdarg);
     }
 
+  pthread_mutex_lock(&pipe_metadata.lock);
   if (pipe_metadata.pipe)
     worker_execute(pipe_metadata_watch_del, NULL, 0, 0);
+  pthread_mutex_unlock(&pipe_metadata.lock);
 
   pipe_free(pipe);
 
@@ -1434,6 +1481,7 @@ init(void)
   int ret;
 
   CHECK_ERR(L_PLAYER, mutex_init(&pipe_metadata.prepared.lock));
+  CHECK_ERR(L_PLAYER, mutex_init(&pipe_metadata.lock));
 
   pipe_metadata.prepared.pict_tmpfile_fd = -1;
 
@@ -1491,6 +1539,7 @@ deinit(void)
   pipe_autostart_id = 0;
 
   CHECK_ERR(L_PLAYER, pthread_mutex_destroy(&pipe_metadata.prepared.lock));
+  CHECK_ERR(L_PLAYER, pthread_mutex_destroy(&pipe_metadata.lock));
 }
 
 struct input_definition input_pipe =
