@@ -114,7 +114,7 @@ prefix_is_equal(uint8_t *addr1, uint8_t *addr2, uint8_t *mask, size_t len)
 static bool
 net_address_is_local(union net_sockaddr *naddr)
 {
-  struct ifaddrs *ifaddrs;
+  struct ifaddrs *ifaddrs = NULL;
   struct ifaddrs *iap;
   void *if_addr;
   void *if_netmask;
@@ -147,7 +147,11 @@ net_address_is_local(union net_sockaddr *naddr)
       return false;
     }
 
-  getifaddrs(&ifaddrs);
+  if (getifaddrs(&ifaddrs) < 0)
+    {
+      DPRINTF(E_LOG, L_MISC, "Could not enumerate network interfaces: %s\n", strerror(errno));
+      return false;
+    }
 
   for (iap = ifaddrs; iap && !is_local; iap = iap->ifa_next)
     {
@@ -284,13 +288,17 @@ net_port_get(unsigned short *port, union net_sockaddr *naddr)
 int
 net_if_get(char *ifname, size_t ifname_len, const char *addr)
 {
-  struct ifaddrs *ifaddrs;
+  struct ifaddrs *ifaddrs = NULL;
   struct ifaddrs *iap;
   char s[64];
 
   memset(ifname, 0, ifname_len);
 
-  getifaddrs(&ifaddrs);
+  if (getifaddrs(&ifaddrs) < 0)
+    {
+      DPRINTF(E_LOG, L_MISC, "Could not enumerate network interfaces: %s\n", strerror(errno));
+      return -1;
+    }
 
   for (iap = ifaddrs; iap; iap = iap->ifa_next)
     {
