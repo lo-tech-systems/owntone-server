@@ -162,6 +162,9 @@ struct httpd_request {
   // Source IP address (ipv4 or ipv6) and port of the request (if available)
   const char *peer_address;
   unsigned short peer_port;
+  // Whether the peer is trusted (based on ip address), captured when the
+  // request arrived - see httpd_request_new()
+  bool peer_is_trusted;
 
   // The original, request URI. The URI may have been complete:
   //   scheme:[//[user[:password]@]host[:port]][/path][?query][#fragment]

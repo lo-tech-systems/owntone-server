@@ -222,7 +222,15 @@ net_peer_address_is_trusted(union net_sockaddr *naddr)
 	return true;
 
       if (strcmp(network, "localhost") == 0)
-	network = (naddr->sa.sa_family == AF_INET6) ? "::1" : "127.0.0.1";
+	{
+	  // A v4-mapped ipv6 address (::ffff:127.0.0.1) has sa_family AF_INET6,
+	  // but net_address_has_prefix() below compares against the textual
+	  // ipv4 form for those, so match it against "127.0.0.1", not "::1"
+	  if (naddr->sa.sa_family == AF_INET6 && !IN6_IS_ADDR_V4MAPPED(&naddr->sin6.sin6_addr))
+	    network = "::1";
+	  else
+	    network = "127.0.0.1";
+	}
 
       if (net_address_has_prefix(naddr, network))
 	return true;

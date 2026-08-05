@@ -221,6 +221,14 @@ httpd_request_new(httpd_backend *backend, httpd_server *server, const char *uri,
       httpd_backend_method_get(&hreq->method, backend);
       httpd_backend_peer_get(&hreq->peer_address, &hreq->peer_port, backend, backend_data);
 
+      // Trust is evaluated here, at arrival, instead of when the request is
+      // actually handled, because handling may be deferred to a worker
+      // thread and happen after the client has disconnected - at which
+      // point the connection this check depends on no longer exists (or may
+      // be in the process of being torn down by libevent), so the auth
+      // decision must not depend on it being re-evaluated later
+      hreq->peer_is_trusted = httpd_backend_peer_is_trusted(backend);
+
       hreq->user_agent = httpd_header_find(hreq->in_headers, "User-Agent");
     }
   else

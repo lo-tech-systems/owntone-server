@@ -544,7 +544,7 @@ httpd_send_error(struct httpd_request *hreq, int error, const char *reason)
 bool
 httpd_request_is_trusted(struct httpd_request *hreq)
 {
-  return httpd_backend_peer_is_trusted(hreq->backend);
+  return hreq->peer_is_trusted;
 }
 
 bool
@@ -559,7 +559,7 @@ httpd_request_is_authorized(struct httpd_request *hreq)
   passwd = config_get_str("admin_password", NULL);
   if (!passwd)
     {
-      DPRINTF(E_LOG, L_HTTPD, "Web interface request to '%s' denied: No password set in the config\n", hreq->uri);
+      DPRINTF(E_LOG, L_HTTPD, "%s request to '%s' denied: No password set in the config\n", hreq->module ? hreq->module->name : "HTTP", hreq->uri);
 
       httpd_send_error(hreq, HTTP_FORBIDDEN, "Forbidden");
       return false;
