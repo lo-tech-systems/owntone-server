@@ -101,6 +101,15 @@ client_free(struct airplay_events_client *client)
   if (client->listener)
     event_free(client->listener);
 
+  // client->fd is owned by this client from the moment client_add() is
+  // called (see client_add() below), whether or not client_add() ends up
+  // succeeding, so it is always safe - and always necessary - to close it
+  // here. A default-initialised value of -1 (rather than the calloc'd 0,
+  // which is itself a valid fd) means a client that never actually got a
+  // socket assigned will not close an fd it never owned.
+  if (client->fd >= 0)
+    close(client->fd);
+
   evbuffer_free(client->incoming);
   evbuffer_free(client->pending);
 
@@ -135,10 +144,16 @@ client_add(const char *name, int fd, const uint8_t *key, size_t key_len)
   struct airplay_events_client *client;
 
   CHECK_NULL(L_AIRPLAY, client = calloc(1, sizeof(struct airplay_events_client)));
+  client->fd = -1; // Not yet owned; see client_free()
+
   CHECK_NULL(L_AIRPLAY, client->name = strdup(name));
   CHECK_NULL(L_AIRPLAY, client->incoming = evbuffer_new());
   CHECK_NULL(L_AIRPLAY, client->pending = evbuffer_new());
 
+  // From here on, client_add() owns fd on every path, success or failure:
+  // either it is closed via client_free() below, or it is closed later via
+  // client_remove()/client_free() once the client is live. The caller must
+  // not close fd itself after calling client_add().
   client->fd = fd;
 
   client->listener = event_new(evbase, fd, EV_READ | EV_PERSIST, incoming_cb, client);
@@ -482,10 +497,11 @@ airplay_events_listen(const char *name, const char *address, unsigned short port
       return -1;
     }
 
+  // client_add() takes ownership of fd on both success and failure, closing
+  // it itself if it fails, so it must not also be closed here.
   ret = client_add(name, fd, key, key_len);
   if (ret < 0)
     {
-      close(fd);
       return -1;
     }
 
