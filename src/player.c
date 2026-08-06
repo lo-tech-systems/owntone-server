@@ -3053,6 +3053,19 @@ input_config_reload_cmd(void *arg, int *retval)
   return COMMAND_END;
 }
 
+// Backends can have async teardowns (e.g. RTSP session close) that complete
+// via callbacks dispatched on the player event loop. Tearing outputs down
+// from another thread would race those callbacks over the same session
+// objects, so this runs outputs_deinit() as a command on the player thread,
+// serializing it with any in-flight teardown callbacks on that loop.
+static enum command_state
+outputs_deinit_cmd(void *arg, int *retval)
+{
+  outputs_deinit();
+  *retval = 0;
+  return COMMAND_END;
+}
+
 /* ------------------------------- Player API ------------------------------- */
 
 int
@@ -3591,7 +3604,13 @@ player_deinit(void)
 
   input_deinit();
 
-  outputs_deinit();
+  // Run on the player thread rather than calling outputs_deinit() directly
+  // here: backend session teardown started by player_playback_abort() above
+  // is asynchronous and completes via callbacks on the player event loop.
+  // Freeing backend state from this (main) thread concurrently with those
+  // callbacks races over shared session objects, so marshal it onto the
+  // player thread and let it serialize with the loop that owns the data.
+  commands_exec_sync(cmdbase, outputs_deinit_cmd, NULL, NULL);
 
   player_exit = 1;
   commands_base_destroy(cmdbase);
