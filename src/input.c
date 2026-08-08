@@ -962,16 +962,13 @@ input_deinit(void)
 
   input_stop_sync();
 
-  for (i = 0; inputs[i]; i++)
-    {
-      if (inputs[i]->disabled)
-	continue;
-
-      if (inputs[i]->deinit)
-        inputs[i]->deinit();
-    }
-
   input_initialized = false;
+
+  // Shut the input thread down and join it before tearing any input down. An
+  // input's stop() runs on this thread and reaches into that input's own state
+  // -- the pipe input posts to its command base, which its deinit() frees. A
+  // stop queued asynchronously can still be in flight here, so deiniting first
+  // frees that state underneath the thread still using it.
   commands_base_destroy(cmdbase);
 
   ret = pthread_join(tid_input, NULL);
@@ -979,6 +976,15 @@ input_deinit(void)
     {
       DPRINTF(E_FATAL, L_MAIN, "Could not join input thread: %s\n", strerror(errno));
       return;
+    }
+
+  for (i = 0; inputs[i]; i++)
+    {
+      if (inputs[i]->disabled)
+	continue;
+
+      if (inputs[i]->deinit)
+        inputs[i]->deinit();
     }
 
   pthread_cond_destroy(&input_buffer.cond);
