@@ -677,13 +677,23 @@ packet_prepare(AVPacket *pkt, struct stream_ctx *s)
   // This "wonderful" peace of code makes sure that the timestamp always increases,
   // even if the user seeked backwards. The muxer will not accept non-increasing
   // timestamps.
-  pkt->pts += s->offset_pts;
-  if (pkt->pts < s->prev_pts)
+  //
+  // A packet can arrive with no timestamp, and AV_NOPTS_VALUE is the minimum
+  // value of the signed type. Feeding it into the arithmetic below overflows,
+  // and the overflowed result then corrupts offset_pts for every packet that
+  // follows. There is no timestamp to make monotonic in that case, so pass it
+  // through untouched; av_packet_rescale_ts() handles the unset value itself.
+  if (pkt->pts != AV_NOPTS_VALUE)
     {
-      s->offset_pts += s->prev_pts - pkt->pts;
-      pkt->pts = s->prev_pts;
+      pkt->pts += s->offset_pts;
+      if (pkt->pts < s->prev_pts)
+	{
+	  s->offset_pts += s->prev_pts - pkt->pts;
+	  pkt->pts = s->prev_pts;
+	}
+      s->prev_pts = pkt->pts;
     }
-  s->prev_pts = pkt->pts;
+
   pkt->dts = pkt->pts; //FIXME
 
   av_packet_rescale_ts(pkt, s->codec->time_base, s->stream->time_base);
