@@ -113,6 +113,9 @@ struct pipe_metadata_prepared
   // Picture (artwork) data
   int pict_tmpfile_fd;
   char pict_tmpfile_path[sizeof(PIPE_TMPFILE_TEMPLATE)];
+  // The tmpfile from the previous picture, kept on disk one generation longer
+  // than the fd -- see pict_tmpfile_recreate(). Empty when there is none.
+  char pict_tmpfile_path_prev[sizeof(PIPE_TMPFILE_TEMPLATE)];
   // Volume
   int volume;
   // Mutex to share the prepared metadata
@@ -381,14 +384,39 @@ pict_tmpfile_close(int fd, const char *path)
   unlink(path);
 }
 
+// Removes both the current artwork tmpfile and the retained previous one.
+// Used when metadata handling stops, so nothing is left behind in /tmp.
+static void
+pict_tmpfiles_remove(struct pipe_metadata_prepared *prepared)
+{
+  pict_tmpfile_close(prepared->pict_tmpfile_fd, prepared->pict_tmpfile_path);
+  prepared->pict_tmpfile_fd = -1;
+  prepared->pict_tmpfile_path[0] = '\0';
+
+  if (prepared->pict_tmpfile_path_prev[0])
+    {
+      unlink(prepared->pict_tmpfile_path_prev);
+      prepared->pict_tmpfile_path_prev[0] = '\0';
+    }
+}
+
 // Opens a tmpfile to store metadata artwork in. *ext is the extension to use
 // for the tmpfile, eg .jpg or .png. Extension cannot be longer than
-// PIPE_TMPFILE_TEMPLATE_EXTLEN. If fd is set (non-negative) then the file is
-// closed first and deleted (using unlink, so path must be valid). The path
-// buffer will be updated with the new tmpfile, and the fd is returned.
+// PIPE_TMPFILE_TEMPLATE_EXTLEN. The path buffer in *prepared is updated with
+// the new tmpfile, and the fd is returned.
+//
+// The outgoing tmpfile is closed but deliberately left on disk for one more
+// picture. Its path stays published as the queue item's artwork_url, and a
+// client can still be reading it when the next picture arrives -- deleting it
+// at that moment makes the read fail with ENOENT. Retiring it one generation
+// later instead gives readers the life of the following picture to finish. At
+// most two files exist at a time, and both are removed when metadata handling
+// stops.
 static int
-pict_tmpfile_recreate(char *path, size_t path_size, int fd, const char *ext)
+pict_tmpfile_recreate(struct pipe_metadata_prepared *prepared, const char *ext)
 {
+  char *path = prepared->pict_tmpfile_path;
+  char *path_prev = prepared->pict_tmpfile_path_prev;
   int offset = strlen(PIPE_TMPFILE_TEMPLATE) - PIPE_TMPFILE_TEMPLATE_EXTLEN;
 
   if (strlen(ext) > PIPE_TMPFILE_TEMPLATE_EXTLEN)
@@ -397,20 +425,22 @@ pict_tmpfile_recreate(char *path, size_t path_size, int fd, const char *ext)
       return -1;
     }
 
-  if (path_size < sizeof(PIPE_TMPFILE_TEMPLATE))
-    {
-      DPRINTF(E_LOG, L_PLAYER, "Invalid path buffer provided to pict_tmpfile_recreate\n");
-      return -1;
-    }
+  // Retire the picture before last; anything reading it has had a full
+  // picture's worth of time to do so.
+  if (path_prev[0])
+    unlink(path_prev);
 
-  pict_tmpfile_close(fd, path);
+  // Close the outgoing file but leave it on disk for one more generation.
+  if (prepared->pict_tmpfile_fd >= 0)
+    close(prepared->pict_tmpfile_fd);
+  prepared->pict_tmpfile_fd = -1;
+
+  memcpy(path_prev, path, sizeof(prepared->pict_tmpfile_path_prev));
 
   strcpy(path, PIPE_TMPFILE_TEMPLATE);
   strcpy(path + offset, ext);
 
-  fd = mkstemps(path, PIPE_TMPFILE_TEMPLATE_EXTLEN);
-
-  return fd;
+  return mkstemps(path, PIPE_TMPFILE_TEMPLATE_EXTLEN);
 }
 
 static int
@@ -527,7 +557,7 @@ parse_picture(struct pipe_metadata_prepared *prepared, uint8_t *data, int data_l
       goto error;
     }
 
-  prepared->pict_tmpfile_fd = pict_tmpfile_recreate(prepared->pict_tmpfile_path, sizeof(prepared->pict_tmpfile_path), prepared->pict_tmpfile_fd, ext);
+  prepared->pict_tmpfile_fd = pict_tmpfile_recreate(prepared, ext);
   if (prepared->pict_tmpfile_fd < 0)
     {
       DPRINTF(E_LOG, L_PLAYER, "Could not open tmpfile for pipe artwork '%s': %s\n", prepared->pict_tmpfile_path, strerror(errno));
@@ -1004,8 +1034,7 @@ pipe_metadata_watch_del_locked(void)
   pipe_free(pipe_metadata.pipe);
   pipe_metadata.pipe = NULL;
 
-  pict_tmpfile_close(pipe_metadata.prepared.pict_tmpfile_fd, pipe_metadata.prepared.pict_tmpfile_path);
-  pipe_metadata.prepared.pict_tmpfile_fd = -1;
+  pict_tmpfiles_remove(&pipe_metadata.prepared);
 }
 
 static void
