@@ -1811,7 +1811,10 @@ pb_suspend(void)
   // that causes issues, because sometimes pb_suspend() is called because of an
   // output delay, which was caused by e.g. changing quality of the output
   // during track change. So going back to playing_now would make that repeat.
-  if (pb_session.playing_now->next)
+  // playing_now is NULL once session_update_play_eof() has advanced past the
+  // last source, and pb_suspend() is reachable in that window from the output
+  // write-failure and underrun paths.
+  if (pb_session.playing_now && pb_session.playing_now->next)
     {
       // So we restart the session with the head source, not playing_now
       queue_item = db_queue_fetch_byitemid(pb_session.source_list->item_id);
