@@ -709,10 +709,11 @@ static int encoder_cost_budget;
 // without master_session_make needing a device pointer just for this.
 static bool encoder_budget_rejected;
 
-/* Our own device ID, name and user agent */
+/* Our own device ID, name and user agent. The two strings are owned copies:
+ * see the note where they are set in airplay_init(). */
 static uint64_t airplay_device_id;
-static const char *airplay_client_name;
-static const char *airplay_user_agent;
+static char *airplay_client_name;
+static char *airplay_user_agent;
 
 /* Precision Time Protocol */
 static char airplay_ptp_clock_uuid[37];
@@ -6390,6 +6391,7 @@ encoder_budget_compute(void)
 static int
 airplay_init(void)
 {
+  const char *cfg_str;
   int ret;
   int i;
   int timing_port;
@@ -6414,8 +6416,16 @@ airplay_init(void)
 
   CHECK_NULL(L_AIRPLAY, keep_alive_timer = evtimer_new(evbase_player, airplay_keep_alive_timer_cb, NULL));
 
-  airplay_user_agent = cfg_getstr(cfg_getsec(cfg, "general"), "user_agent");
-  airplay_client_name = cfg_getstr(cfg_getsec(cfg, "library"), "name");
+  // Take owned copies. cfg_getstr() returns a pointer into the settings
+  // object, and reloading settings frees that object -- so caching the raw
+  // pointer here leaves it dangling for the rest of the process, and these
+  // are read on every RTSP request the player thread sends.
+  cfg_str = cfg_getstr(cfg_getsec(cfg, "general"), "user_agent");
+  CHECK_NULL(L_AIRPLAY,
+             airplay_user_agent = strdup(cfg_str ? cfg_str : PACKAGE_NAME "/" PACKAGE_VERSION));
+
+  cfg_str = cfg_getstr(cfg_getsec(cfg, "library"), "name");
+  CHECK_NULL(L_AIRPLAY, airplay_client_name = strdup(cfg_str ? cfg_str : PACKAGE_NAME));
 
   timing_port = cfg_getint(cfg_getsec(cfg, "airplay_shared"), "timing_port");
   ret = service_start(&airplay_timing_svc, timing_svc_cb, timing_port, "AirPlay timing");
@@ -6489,6 +6499,11 @@ airplay_deinit(void)
 
   // After freeing sessions, since that's where the active ptp peers get removed
   ptpd_deinit();
+
+  free(airplay_user_agent);
+  airplay_user_agent = NULL;
+  free(airplay_client_name);
+  airplay_client_name = NULL;
 }
 
 struct output_definition output_airplay =
