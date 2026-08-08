@@ -1,0 +1,38 @@
+name: Static analysis
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - minimal
+    paths-ignore:
+      - 'docs/**'
+  pull_request:
+    branches:
+      - minimal
+    paths-ignore:
+      - 'docs/**'
+  workflow_dispatch:
+
+jobs:
+  analyse:
+    name: scan-build
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -yq build-essential clang clang-tools git autotools-dev autoconf automake libtool gettext gawk gperf bison flex libconfuse-dev libunistring-dev libavcodec-dev libavformat-dev libavfilter-dev libswscale-dev libavutil-dev libxml2-dev libgcrypt20-dev libavahi-client-dev zlib1g-dev libevent-dev libplist-dev libsodium-dev libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev libwebsockets-dev
+
+    # Compiles the tree and fails the run on any analyser finding
+    # (--status-bugs). This is the project's only automated build check.
+    - name: Build under the clang static analyser
+      run: |
+        autoreconf -vi
+        ./configure
+        scan-build --status-bugs -disable-checker deadcode.DeadStores --exclude src/parsers make
