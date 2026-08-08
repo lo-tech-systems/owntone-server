@@ -40,11 +40,9 @@
 		"source=owntone-bashhistory,target=/commandhistory,type=volume",
 		// Persist ~/.local/share to persist state of additionally installed tools (e. g. atuin, zoxide)
 		"source=owntone-localshare,target=/home/vscode/.local/share,type=volume",
-		// Bind mounts for owntone config file and logs, cache, music directories
+		// Bind mounts for the owntone settings file and logs directory
 		//"source=<path-to-local-logs-dir>,target=/data/logs,type=bind,consistency=cached",
-		//"source=<path-to-local-cache-dir>,target=/data/cache,type=bind,consistency=cached",
-		//"source=<path-to-local-music-dir>,target=/data/music,type=bind,consistency=cached",
-		"source=${localWorkspaceFolder}/.devcontainer/data/devcontainer-owntone.conf,target=/data/conf/owntone.conf,type=bind,consistency=cached"
+		"source=${localWorkspaceFolder}/.devcontainer/data/devcontainer-owntone-settings.json,target=/data/conf/owntone-settings.json,type=bind,consistency=cached"
 	],
 
 	// Use 'postCreateCommand' to run commands after the container is created.

@@ -47,42 +47,6 @@
                 "kind": "build",
                 "isDefault": false
             }
-        },
-        {
-            "label": "[web] install",
-            "type": "npm",
-            "script": "install",
-            "options": {
-                "cwd": "${workspaceFolder}/web-src"
-            },
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            }
-        },
-        {
-            "label": "[web] build",
-            "type": "npm",
-            "script": "build",
-            "options": {
-                "cwd": "${workspaceFolder}/web-src"
-            },
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            }
-        },
-        {
-            "label": "[web] serve",
-            "type": "npm",
-            "script": "serve",
-            "options": {
-                "cwd": "${workspaceFolder}/web-src"
-            },
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            }
         }
     ]
 }

@@ -1,0 +1,24 @@
+{
+  "uid": "vscode",
+  "server_name": "owntone-mini (devcontainer)",
+  "loglevel": 4,
+  "logfile": "/data/logs/owntone.log",
+  "pipe_path": "/tmp/owntone.fifo",
+  "pipe_autostart": true,
+  "pipe_sample_rate": 44100,
+  "pipe_bits_per_sample": 16,
+  "resample_quality": "standard",
+  "ipv6": true,
+  "start_buffer_ms": 2250,
+  "uncompressed_alac": false,
+  "buffered_audio_enabled": true,
+  "buffered_encoder_budget": 0,
+  "device_removal_grace_period": 180,
+  "airplay_timing_port": 0,
+  "airplay_control_port": 0,
+  "trusted_networks": [
+    "localhost",
+    "lan"
+  ],
+  "airplay_devices": {}
+}

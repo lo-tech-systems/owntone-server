@@ -5,7 +5,7 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/src/owntone",
-            "args": ["-f", "-c", "/data/conf/owntone.conf", "-w", "${workspaceFolder}/htdocs", "-s", "${workspaceFolder}/sqlext/.libs/owntone-sqlext.so"],
+            "args": ["-f", "-c", "/data/conf/owntone-settings.json"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "externalConsole": false,
