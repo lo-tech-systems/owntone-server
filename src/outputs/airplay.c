@@ -5652,13 +5652,21 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
   if (cur_request->payload_make)
     {
       ret = cur_request->payload_make(req, session, seq_ctx->payload_make_arg);
-      if (ret > 0) // Skip to next request in sequence, if none -> error
+      if (ret > 0) // Skip to next request in sequence, if none -> sequence done
         {
 	  seq_ctx->cur_request++;
 	  if (!seq_ctx->cur_request->name)
 	    {
-	      DPRINTF(E_LOG, L_AIRPLAY, "Bug! payload_make signaled skip request, but there is nothing to skip to\n");
-	      goto error;
+	      // Every remaining request was skipped, so the sequence is
+	      // complete. A normal outcome for sequences whose rows gate
+	      // themselves out (once-per-session sends, deduplicated
+	      // pushes) - complete like any other success rather than
+	      // failing the session.
+	      evrtsp_request_free(req);
+	      if (seq_ctx->on_success)
+		seq_ctx->on_success(session);
+	      free(seq_ctx);
+	      return;
 	    }
 
 	  evrtsp_request_free(req);
