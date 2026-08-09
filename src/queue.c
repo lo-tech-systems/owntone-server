@@ -17,13 +17,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <pthread.h>
 
 #include "queue.h"
 #include "logger.h"
 
-/* The single queue item representing the configured pipe. */
+/* The single queue item representing the configured pipe. Read and written
+ * from several threads (player, worker, httpd), so every access to it -
+ * including the deep copies handed out by the fetch functions - runs under
+ * g_item_lck. Fetchers get their own copy back, never interior pointers,
+ * so callers need no locking of their own. */
 static struct db_queue_item g_item;
 static int g_item_valid = 0;
+static pthread_mutex_t g_item_lck = PTHREAD_MUTEX_INITIALIZER;
 
 /* Populate the queue from the configured pipe path.
  * Called once from player_init(). */
@@ -32,6 +38,8 @@ db_queue_set_pipe(const char *path)
 {
   if (!path)
     return;
+
+  pthread_mutex_lock(&g_item_lck);
 
   if (g_item_valid)
     free_queue_item(&g_item, 1);
@@ -55,13 +63,20 @@ db_queue_set_pipe(const char *path)
   DPRINTF(E_DBG, L_PLAYER, "In-memory queue configured for pipe '%s'\n", path);
 }
 
+// Returns an interior pointer, valid only until the next db_queue_set_pipe().
+// Today both are only reached from the httpd thread (plus one-time player
+// init), so this is safe; a caller on any other thread would need a copy
+// taken under the lock instead.
 const char *
 db_queue_get_pipe_path(void)
 {
-  if (!g_item_valid)
-    return NULL;
+  const char *path;
 
-  return g_item.path;
+  pthread_mutex_lock(&g_item_lck);
+  path = g_item_valid ? g_item.path : NULL;
+  pthread_mutex_unlock(&g_item_lck);
+
+  return path;
 }
 
 /* Deep-copy the global item and return the copy. */
@@ -94,17 +109,25 @@ item_copy(void)
 struct db_queue_item *
 db_queue_fetch_byitemid(uint32_t item_id)
 {
-  if (!g_item_valid || item_id != g_item.id)
-    return NULL;
-  return item_copy();
+  struct db_queue_item *copy;
+
+  pthread_mutex_lock(&g_item_lck);
+  copy = (g_item_valid && item_id == g_item.id) ? item_copy() : NULL;
+  pthread_mutex_unlock(&g_item_lck);
+
+  return copy;
 }
 
 struct db_queue_item *
 db_queue_fetch_bypos(int pos, char shuffle)
 {
-  if (!g_item_valid || pos != 0)
-    return NULL;
-  return item_copy();
+  struct db_queue_item *copy;
+
+  pthread_mutex_lock(&g_item_lck);
+  copy = (g_item_valid && pos == 0) ? item_copy() : NULL;
+  pthread_mutex_unlock(&g_item_lck);
+
+  return copy;
 }
 
 /* A single-item queue has no next. */
@@ -117,8 +140,16 @@ db_queue_fetch_next(uint32_t item_id, char shuffle)
 int
 db_queue_item_update(struct db_queue_item *qi)
 {
-  if (!g_item_valid || !qi || qi->id != g_item.id)
+  if (!qi)
     return -1;
+
+  pthread_mutex_lock(&g_item_lck);
+
+  if (!g_item_valid || qi->id != g_item.id)
+    {
+      pthread_mutex_unlock(&g_item_lck);
+      return -1;
+    }
 
 #define UPD_STR(f) \
   if (qi->f) { free(g_item.f); g_item.f = strdup(qi->f); }
@@ -131,6 +162,8 @@ db_queue_item_update(struct db_queue_item *qi)
 
   if (qi->song_length)
     g_item.song_length = qi->song_length;
+
+  pthread_mutex_unlock(&g_item_lck);
 
   return 0;
 }
