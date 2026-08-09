@@ -56,6 +56,9 @@ enum airplay_events
 struct airplay_events_client
 {
   char *name;
+  // The output device this event channel belongs to, so a command sent by
+  // the device (e.g. pause) can be applied to that output alone
+  uint64_t device_id;
   int fd;
   struct event *listener;
   struct pair_cipher_context *cipher_ctx;
@@ -140,12 +143,13 @@ client_remove(struct airplay_events_client *client)
 }
 
 static int
-client_add(const char *name, int fd, const uint8_t *key, size_t key_len)
+client_add(const char *name, uint64_t device_id, int fd, const uint8_t *key, size_t key_len)
 {
   struct airplay_events_client *client;
 
   CHECK_NULL(L_AIRPLAY, client = calloc(1, sizeof(struct airplay_events_client)));
   client->fd = -1; // Not yet owned; see client_free()
+  client->device_id = device_id;
 
   CHECK_NULL(L_AIRPLAY, client->name = strdup(name));
   CHECK_NULL(L_AIRPLAY, client->incoming = evbuffer_new());
@@ -359,7 +363,7 @@ rtsp_parse(enum airplay_events *event, uint8_t *in, size_t in_len)
 /* --------------------------- Message handling ----------------------------- */
 
 static void
-handle_event(enum airplay_events event)
+handle_event(struct airplay_events_client *client, enum airplay_events event)
 {
   struct player_status status;
 
@@ -369,6 +373,16 @@ handle_event(enum airplay_events event)
   // send unsolicited 'play' while we are already playing (observed from an
   // Apple TV's now-playing service right after artwork is delivered), and a
   // toggle turns that into a pause of a healthy stream.
+  //
+  // A pause from a device is also not a request to pause everything: it says
+  // that this receiver wants to stop taking audio (an Apple TV entering
+  // standby, say). So it deselects that output alone -- the equivalent of
+  // toggling it off -- and playback continues on any remaining outputs. For
+  // a live pipe source the player keeps running even if this was the last
+  // output, so the source keeps being consumed and a later re-enable joins a
+  // running stream. player_speaker_disable_by_device() marks the output as
+  // paused_by_device in the outputs listing so a supervisor can tell this
+  // state apart from a fault.
   switch (event)
     {
       case AIRPLAY_EVENT_PLAY:
@@ -376,7 +390,9 @@ handle_event(enum airplay_events event)
 	  player_playback_start();
 	break;
       case AIRPLAY_EVENT_PAUSE:
-	if (status.status == PLAY_PLAYING)
+	if (client->device_id)
+	  player_speaker_disable_by_device(client->device_id);
+	else if (status.status == PLAY_PLAYING)
 	  player_playback_pause();
 	break;
       default:
@@ -472,7 +488,7 @@ incoming_cb(int fd, short what, void *arg)
 
   evbuffer_drain(client->pending, -1);
 
-  handle_event(event);
+  handle_event(client, event);
 
   ret = respond(client);
   if (ret < 0)
@@ -505,7 +521,7 @@ airplay_events(void *arg)
 /* ------------------------------- Interface -------------------------------- */
 
 int
-airplay_events_listen(const char *name, const char *address, unsigned short port, const uint8_t *key, size_t key_len)
+airplay_events_listen(const char *name, uint64_t device_id, const char *address, unsigned short port, const uint8_t *key, size_t key_len)
 {
   int fd;
   int ret;
@@ -518,7 +534,7 @@ airplay_events_listen(const char *name, const char *address, unsigned short port
 
   // client_add() takes ownership of fd on both success and failure, closing
   // it itself if it fails, so it must not also be closed here.
-  ret = client_add(name, fd, key, key_len);
+  ret = client_add(name, device_id, fd, key, key_len);
   if (ret < 0)
     {
       return -1;

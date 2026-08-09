@@ -2225,6 +2225,7 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
   spk->needs_auth_key = (device->requires_auth && device->auth_key == NULL);
   spk->prevent_playback = device->prevent_playback;
   spk->busy = device->busy;
+  spk->paused_by_device = device->paused_by_device;
 }
 
 static bool
@@ -2647,7 +2648,11 @@ speaker_set(void *arg, int *retval)
   for (device = outputs_list(); device; device = device->next)
     {
       if (speaker_is_in_selected_set(device, ids, nspk))
-        outputs_device_select(device, max_volume);
+        {
+          // Any explicit (re)selection supersedes a device-requested pause
+          device->paused_by_device = 0;
+          outputs_device_select(device, max_volume);
+        }
       else
         outputs_device_deselect(device);
     }
@@ -2674,6 +2679,9 @@ speaker_enable(void *arg, int *retval)
     return COMMAND_END;
 
   DPRINTF(E_DBG, L_PLAYER, "Speaker enable: '%s' (id=%" PRIu64 ")\n", outputs_device_display_name(device), *id);
+
+  // Any explicit (re)selection supersedes a device-requested pause
+  device->paused_by_device = 0;
 
   max_volume = (player_state != PLAY_STOPPED) ? outputs_volume_get() : -1;
 
@@ -2709,6 +2717,29 @@ speaker_disable(void *arg, int *retval)
     return COMMAND_PENDING; // async
 
   return COMMAND_END;
+}
+
+// Same as speaker_disable(), but marks the device as having requested the
+// stop itself (receiver-side pause). Only the device the request came from
+// carries the mark -- a group deselect fans out to members, but one marked
+// device is enough for a supervisor to tell the resulting state was
+// device-initiated.
+static enum command_state
+speaker_disable_bydevice(void *arg, int *retval)
+{
+  uint64_t *id = arg;
+  struct output_device *device;
+
+  device = outputs_device_get(*id);
+  if (!device)
+    {
+      *retval = -1;
+      return COMMAND_END;
+    }
+
+  device->paused_by_device = 1;
+
+  return speaker_disable(arg, retval);
 }
 
 static enum command_state
@@ -3282,6 +3313,16 @@ player_speaker_disable(uint64_t id)
   int ret;
 
   ret = commands_exec_sync(cmdbase, speaker_disable, speaker_generic_bh, &id);
+
+  return ret;
+}
+
+int
+player_speaker_disable_by_device(uint64_t id)
+{
+  int ret;
+
+  ret = commands_exec_sync(cmdbase, speaker_disable_bydevice, speaker_generic_bh, &id);
 
   return ret;
 }

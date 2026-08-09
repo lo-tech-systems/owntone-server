@@ -41,6 +41,7 @@ struct player_speaker_info {
 
   bool prevent_playback;
   bool busy;
+  bool paused_by_device;
 
   bool has_video;
 };
@@ -95,6 +96,12 @@ player_speaker_enable(uint64_t id);
 
 int
 player_speaker_disable(uint64_t id);
+
+// Same as player_speaker_disable(), but records that the deselection was
+// requested by the device itself (receiver-side pause) rather than by a user
+// or API caller -- the outputs listing then reports paused_by_device for it.
+int
+player_speaker_disable_by_device(uint64_t id);
 
 void
 player_speaker_resurrect(void *arg);

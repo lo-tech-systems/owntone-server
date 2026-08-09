@@ -496,6 +496,7 @@ speaker_to_json(struct player_speaker_info *spk)
   json_object_object_add(output, "name", json_object_new_string(spk->name));
   json_object_object_add(output, "type", json_object_new_string(spk->output_type));
   json_object_object_add(output, "selected", json_object_new_boolean(spk->selected));
+  json_object_object_add(output, "paused_by_device", json_object_new_boolean(spk->paused_by_device));
   json_object_object_add(output, "has_password", json_object_new_boolean(spk->has_password));
   json_object_object_add(output, "requires_auth", json_object_new_boolean(spk->requires_auth));
   json_object_object_add(output, "needs_auth_key", json_object_new_boolean(spk->needs_auth_key));
