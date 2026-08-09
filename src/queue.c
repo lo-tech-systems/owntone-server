@@ -60,6 +60,8 @@ db_queue_set_pipe(const char *path)
 
   g_item_valid = 1;
 
+  pthread_mutex_unlock(&g_item_lck);
+
   DPRINTF(E_DBG, L_PLAYER, "In-memory queue configured for pipe '%s'\n", path);
 }
 
