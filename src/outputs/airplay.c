@@ -3450,6 +3450,161 @@ payload_make_send_text(struct evrtsp_request *req, struct airplay_session *sessi
   return 0;
 }
 
+// Sends DEVICE_INFO, gated so it only ever goes out once per session and
+// always ahead of every other MRP message (it is the first row of
+// AIRPLAY_SEQ_SEND_NOWPLAYING). devname is the
+// sender's own advertised name; the dacp id is the exact string
+// request_headers_add() already places in the DACP-ID header (derived from
+// the process-wide libhash, formatted the same way).
+static int
+payload_make_deviceinfo(struct evrtsp_request *req, struct airplay_session *session, void *arg)
+{
+  char dacp_id[17];
+  int ret;
+
+  if (!session->mrp || session->mrp->device_info_sent)
+    return 1; // Skip: already sent, or receiver isn't gated into MediaRemote
+
+  snprintf(dacp_id, sizeof(dacp_id), "%" PRIX64, libhash);
+
+  ret = airplay_mrp_deviceinfo_make(req->output_buffer, session->mrp, session->devname, session->session_uuid, session->group_uuid, dacp_id);
+  if (ret < 0)
+    return -1;
+
+  session->mrp->device_info_sent = true;
+
+  return 0;
+}
+
+// The full MediaRemote (MRP) command table, sent once per session as part of
+// the extended-registration burst. This is
+// deliberately a SEPARATE builder from payload_make_command_supported_commands_full:
+// that one is buffered-mode-only and uses a different, larger id space (its
+// command_ids[] holds values like 0x61bd that aren't part of the
+// MRMediaRemoteCommand enum this table uses) - reusing or extending it would
+// either break the buffered path's existing behaviour or send the wrong ids
+// on this one. Gated on session->mrp->registered so it fires exactly once,
+// regardless of buffered_mode.
+static int
+payload_make_mrp_supported_commands(struct evrtsp_request *req, struct airplay_session *session, void *arg)
+{
+  static const struct
+  {
+    uint32_t id;
+    bool enabled;
+    int opts; // 0 none, 1 shuffle, 2 repeat, 3 scrub, 4 empty-intervals
+  } commands[] = {
+      { 26, true,  1 },
+      { 25, true,  2 },
+      { 24, true,  3 },
+      { 18, false, 4 },
+      { 17, false, 4 },
+      { 10, true,  0 },
+      { 11, true,  0 },
+      { 8,  true,  0 },
+      { 9,  true,  0 },
+      { 5,  true,  0 },
+      { 4,  true,  0 },
+      { 3,  true,  0 },
+      { 2,  true,  0 },
+      { 1,  true,  0 },
+      { 0,  true,  0 },
+  };
+  plist_t root;
+  plist_t params;
+  plist_t commands_arr;
+  plist_t cmdinfo;
+  plist_t options;
+  uint8_t *blob;
+  size_t blob_len;
+  uint8_t *data;
+  size_t len;
+  unsigned int i;
+  int ret;
+
+  if (!session->mrp || session->mrp->registered)
+    return 1; // Skip: already registered, or receiver isn't gated into MediaRemote
+
+  commands_arr = plist_new_array();
+  for (i = 0; i < ARRAY_SIZE(commands); i++)
+    {
+      cmdinfo = plist_new_dict();
+      wplist_dict_add_uint(cmdinfo, "kCommandInfoCommandKey", commands[i].id);
+      wplist_dict_add_bool(cmdinfo, "kCommandInfoEnabledKey", commands[i].enabled);
+
+      options = NULL;
+      switch (commands[i].opts)
+	{
+	  case 1:
+	    options = plist_new_dict();
+	    wplist_dict_add_uint(options, "kMRMediaRemoteCommandInfoShuffleMode", 1);
+	    break;
+
+	  case 2:
+	    options = plist_new_dict();
+	    wplist_dict_add_uint(options, "kMRMediaRemoteCommandInfoRepeatMode", 1);
+	    break;
+
+	  case 3:
+	    options = plist_new_dict();
+	    wplist_dict_add_bool(options, "kMRMediaRemoteCommandInfoCanBeControlledByScrubbingKey", false);
+	    wplist_dict_add_bool(options, "kMRMediaRemoteCommandInfoSupportsReferencePosition", false);
+	    break;
+
+	  case 4:
+	    options = plist_new_dict();
+	    plist_dict_set_item(options, "kMRMediaRemoteCommandInfoPreferredIntervalsKey", plist_new_array());
+	    break;
+
+	  default:
+	    break;
+	}
+
+      if (options)
+	plist_dict_set_item(cmdinfo, "kCommandInfoOptionsKey", options);
+
+      ret = wplist_to_bin(&blob, &blob_len, cmdinfo);
+      plist_free(cmdinfo);
+      if (ret < 0)
+	{
+	  plist_free(commands_arr);
+	  return -1;
+	}
+
+      plist_array_append_item(commands_arr, plist_new_data((const char *)blob, blob_len));
+      free(blob);
+    }
+
+  params = plist_new_dict();
+  plist_dict_set_item(params, "mrSupportedCommandsFromSender", commands_arr);
+
+  root = plist_new_dict();
+  wplist_dict_add_string(root, "type", "updateMRSupportedCommands");
+  plist_dict_set_item(root, "params", params);
+
+  ret = wplist_to_bin(&data, &len, root);
+  plist_free(root);
+  if (ret < 0)
+    return -1;
+
+  evbuffer_add(req->output_buffer, data, len);
+  free(data);
+
+  return 0;
+}
+
+// Sends updateMRNowPlayingClient, the tail of the extended-registration
+// burst. Gated on mrp->registered so it fires exactly once; the builder
+// itself sets mrp->registered on success (see airplay_mrp_nowplaying_client_make).
+static int
+payload_make_nowplaying_client(struct evrtsp_request *req, struct airplay_session *session, void *arg)
+{
+  if (!session->mrp || session->mrp->registered)
+    return 1;
+
+  return airplay_mrp_nowplaying_client_make(req->output_buffer, session->mrp, session->devname);
+}
+
 // Wall-clock ElapsedTime (seconds) for a metadata push: metadata->pos_ms was
 // correct as of metadata->pts (CLOCK_MONOTONIC), so add however much
 // monotonic time has passed since then. This is deliberately NOT
@@ -5339,8 +5494,15 @@ static struct airplay_seq_request airplay_seq_request[][10] =
     // proceed_on_rtsp_not_ok is true throughout: MediaRemote is a cosmetic
     // add-on to the stream, a device rejecting one of these must never abort
     // playback (mirrors the legacy SEND_TEXT/PROGRESS/ARTWORK sequences).
+    // Row order matches the sequence a receiver expects at connect: DEVICE_INFO
+    // (once, must precede all other MRP messages) and updateMRSupportedCommands/
+    // updateMRNowPlayingClient (once, extended-registration burst) are no-ops
+    // via their payload_make gates on every push after the first.
+    { AIRPLAY_SEQ_SEND_NOWPLAYING, "POST /command (DEVICE_INFO)", EVRTSP_REQ_POST, payload_make_deviceinfo, NULL, "application/x-apple-binary-plist", "/command", true },
     { AIRPLAY_SEQ_SEND_NOWPLAYING, "POST /command (NowPlayingInfo replace)", EVRTSP_REQ_POST, payload_make_nowplaying, NULL, "application/x-apple-binary-plist", "/command", true },
+    { AIRPLAY_SEQ_SEND_NOWPLAYING, "POST /command (supported commands)", EVRTSP_REQ_POST, payload_make_mrp_supported_commands, NULL, "application/x-apple-binary-plist", "/command", true },
     { AIRPLAY_SEQ_SEND_NOWPLAYING, "POST /command (PlaybackState)", EVRTSP_REQ_POST, payload_make_playback_state, NULL, "application/x-apple-binary-plist", "/command", true },
+    { AIRPLAY_SEQ_SEND_NOWPLAYING, "POST /command (NowPlayingClient)", EVRTSP_REQ_POST, payload_make_nowplaying_client, NULL, "application/x-apple-binary-plist", "/command", true },
   },
   {
     { AIRPLAY_SEQ_SEND_NOWPLAYING_PROGRESS, "POST /command (NowPlayingInfo update)", EVRTSP_REQ_POST, payload_make_nowplaying_update, NULL, "application/x-apple-binary-plist", "/command", true },

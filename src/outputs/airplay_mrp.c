@@ -41,6 +41,7 @@
 #include <string.h>
 #include <time.h>
 #include <inttypes.h>
+#include <unistd.h>
 
 #include <event2/buffer.h>
 #include <plist/plist.h>
@@ -140,16 +141,139 @@ airplay_mrp_free(struct airplay_mrp *mrp)
   free(mrp);
 }
 
-/* ---------------------------- message builders -----------------------------
- *
- * Stubs only - the field sets and outer bplist envelopes are added in a
- * later commit. Not wired into any send path yet.
- */
+/* ---------------------------- message builders ----------------------------- */
 
+// ProtocolMessage field 85 and DeviceInfoMessage field 1 are both
+// "uniqueIdentifier" strings shaped like a UUID (8-4-4-4-12 uppercase hex).
+// Observed receiver behaviour indicates it only cares about the
+// shape, not any particular derivation algorithm - the reference mints
+// field 85 fresh per message and derives field 1 from the sender's
+// identity, but nothing in the confirmed field table implies the receiver
+// validates either value beyond "looks like a UUID". This derives a
+// UUID-shaped string from a 64-bit seed by hashing it twice with different
+// seeds into 16 bytes and patching in version-5/variant bits - deterministic
+// and collision-resistant enough for a per-session/per-message identifier,
+// without pulling in a UUID library dependency.
+static void
+mrp_uuid_from_seed(char out[37], uint64_t seed)
+{
+  uint64_t hi = murmur_hash64(&seed, sizeof(seed), 0);
+  uint64_t lo = murmur_hash64(&seed, sizeof(seed), 1);
+  uint8_t b[16];
+  int i;
+
+  for (i = 0; i < 8; i++)
+    b[i] = (uint8_t)(hi >> (8 * (7 - i)));
+  for (i = 0; i < 8; i++)
+    b[8 + i] = (uint8_t)(lo >> (8 * (7 - i)));
+
+  b[6] = (b[6] & 0x0f) | 0x50; // version 5
+  b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant
+
+  snprintf(out, 37, "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+      b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+      b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+}
+
+// Builds the DEVICE_INFO ProtocolMessage (proto2: field 1 = type 15, field
+// 20 = the DeviceInfoMessage submessage, field 85 = a UUID string) and wraps
+// it as { params: { data: <varint length prefix + protobuf> } } - no outer
+// "type" key. devname is the SENDER's own advertised name (not the
+// receiver's); dacp_id is the exact DACP-ID header string airplay.c already
+// sends on every request. session_uuid/group_uuid (fields 41/42) are omitted
+// from the submessage when empty, matching a session that hasn't joined a
+// group yet.
 int
 airplay_mrp_deviceinfo_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, const char *devname, const char *session_uuid, const char *group_uuid, const char *dacp_id)
 {
-  return -1;
+  struct evbuffer *submsg;
+  struct evbuffer *protomsg;
+  struct evbuffer *blob;
+  plist_t root;
+  plist_t params;
+  uint8_t *proto_data;
+  size_t proto_len;
+  uint8_t *plist_data;
+  size_t plist_len;
+  char device_uuid[37];
+  char msg_uuid[37];
+  uint64_t dacp_hash;
+  int ret;
+
+  CHECK_NULL(L_AIRPLAY, submsg = evbuffer_new());
+  CHECK_NULL(L_AIRPLAY, protomsg = evbuffer_new());
+
+  // Field 1 (DeviceInfoMessage.uniqueIdentifier): deterministic from the
+  // sender's own identity so it is stable across messages/sessions - the
+  // receiver only appears to care about the UUID shape, so hashing the
+  // DACP-ID (the sender's stable per-instance identity string) is
+  // sufficient; there is no requirement it match any particular derivation.
+  dacp_hash = dacp_id ? murmur_hash64(dacp_id, (int)strlen(dacp_id), 0) : 0;
+  mrp_uuid_from_seed(device_uuid, dacp_hash);
+
+  mrp_pb_add_string_field(submsg, 1, device_uuid);
+  mrp_pb_add_string_field(submsg, 2, devname ? devname : "");
+  mrp_pb_add_string_field(submsg, 3, "iPhone");
+  mrp_pb_add_string_field(submsg, 4, "21F90");
+  mrp_pb_add_string_field(submsg, 5, "com.apple.Music");
+  mrp_pb_add_varint_field(submsg, 7, 1);
+  mrp_pb_add_varint_field(submsg, 8, 139);
+  mrp_pb_add_bool_field(submsg, 9, true);
+  mrp_pb_add_bool_field(submsg, 10, true);
+  mrp_pb_add_string_field(submsg, 12, "com.apple.Music");
+  mrp_pb_add_bool_field(submsg, 13, true);
+  mrp_pb_add_bool_field(submsg, 14, true);
+  mrp_pb_add_bool_field(submsg, 15, true);
+  mrp_pb_add_varint_field(submsg, 17, 2);
+  mrp_pb_add_string_field(submsg, 19, dacp_id ? dacp_id : "");
+  mrp_pb_add_varint_field(submsg, 21, 1);
+  mrp_pb_add_varint_field(submsg, 22, 1);
+  mrp_pb_add_string_field(submsg, 31, "com.apple.podcasts");
+  mrp_pb_add_string_field(submsg, 39, "iPhone17,1");
+  if (session_uuid && session_uuid[0])
+    mrp_pb_add_string_field(submsg, 41, session_uuid);
+  if (group_uuid && group_uuid[0])
+    mrp_pb_add_string_field(submsg, 42, group_uuid);
+  mrp_pb_add_string_field(submsg, 43, "com.apple.iBooks");
+
+  // ProtocolMessage: field 1 (type) first, then field 20 (the submessage
+  // just built), then field 85 - a UUID string. A per-session derivation
+  // (from the session's own uuid where available, else the device_uuid just
+  // derived) is acceptable, since field 85's only
+  // observed requirement is "looks like a UUID"; this keeps the value
+  // deterministic per session rather than pulling in a random source.
+  mrp_pb_add_varint_field(protomsg, 1, 15);
+  mrp_pb_add_bytes_field(protomsg, 20, evbuffer_pullup(submsg, -1), evbuffer_get_length(submsg));
+  mrp_uuid_from_seed(msg_uuid, murmur_hash64(session_uuid && session_uuid[0] ? session_uuid : device_uuid,
+      (int)strlen(session_uuid && session_uuid[0] ? session_uuid : device_uuid), 1));
+  mrp_pb_add_string_field(protomsg, 85, msg_uuid);
+
+  evbuffer_free(submsg);
+
+  proto_len = evbuffer_get_length(protomsg);
+  proto_data = evbuffer_pullup(protomsg, -1);
+
+  CHECK_NULL(L_AIRPLAY, blob = evbuffer_new());
+  mrp_pb_add_varint(blob, proto_len);
+  evbuffer_add(blob, proto_data, proto_len);
+
+  params = plist_new_dict();
+  wplist_dict_add_data(params, "data", evbuffer_pullup(blob, -1), evbuffer_get_length(blob));
+  evbuffer_free(blob);
+  evbuffer_free(protomsg);
+
+  root = plist_new_dict();
+  plist_dict_set_item(root, "params", params);
+
+  ret = wplist_to_bin(&plist_data, &plist_len, root);
+  plist_free(root);
+  if (ret < 0)
+    return -1;
+
+  evbuffer_add(evbuf, plist_data, plist_len);
+  free(plist_data);
+
+  return 0;
 }
 
 // Derives the 16-lowercase-hex-char ArtworkIdentifier from the artwork
@@ -302,8 +426,48 @@ airplay_mrp_playback_state_make(struct evbuffer *evbuf, struct airplay_mrp *mrp,
   return 0;
 }
 
+// Builds the bare (unprefixed, no ProtocolMessage envelope) NowPlayingClient
+// protobuf - f1 pid, f2 bundle id, f7 display name - and wraps it as
+// { type: "updateMRNowPlayingClient", params: { mrNowPlayingClient: <data> } },
+// matching what a real Apple sender emits.
 int
 airplay_mrp_nowplaying_client_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, const char *devname)
 {
-  return -1;
+  struct evbuffer *proto;
+  plist_t root;
+  plist_t params;
+  uint8_t *proto_data;
+  size_t proto_len;
+  uint8_t *plist_data;
+  size_t plist_len;
+  int ret;
+
+  CHECK_NULL(L_AIRPLAY, proto = evbuffer_new());
+
+  mrp_pb_add_varint_field(proto, 1, (uint64_t)getpid());
+  mrp_pb_add_string_field(proto, 2, "com.apple.Music");
+  mrp_pb_add_string_field(proto, 7, devname ? devname : "");
+
+  proto_len = evbuffer_get_length(proto);
+  proto_data = evbuffer_pullup(proto, -1);
+
+  params = plist_new_dict();
+  wplist_dict_add_data(params, "mrNowPlayingClient", proto_data, proto_len);
+  evbuffer_free(proto);
+
+  root = plist_new_dict();
+  wplist_dict_add_string(root, "type", "updateMRNowPlayingClient");
+  plist_dict_set_item(root, "params", params);
+
+  ret = wplist_to_bin(&plist_data, &plist_len, root);
+  plist_free(root);
+  if (ret < 0)
+    return -1;
+
+  evbuffer_add(evbuf, plist_data, plist_len);
+  free(plist_data);
+
+  mrp->registered = true;
+
+  return 0;
 }
