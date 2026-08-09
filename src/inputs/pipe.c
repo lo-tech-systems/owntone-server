@@ -289,11 +289,18 @@ watch_add(struct pipe *pipe)
   return 0;
 }
 
+// Idempotent: a watch can legitimately be deleted twice - the quiesce pass
+// disarms every watch, but a watch-update command already queued behind it
+// still runs its own removal afterwards - so the freed event must not stay
+// dangling.
 static void
 watch_del(struct pipe *pipe)
 {
   if (pipe->ev)
-    event_free(pipe->ev);
+    {
+      event_free(pipe->ev);
+      pipe->ev = NULL;
+    }
 
   pipe_close(pipe->fd);
 
