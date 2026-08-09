@@ -297,13 +297,17 @@ mrp_artwork_id_make(char out[17], const uint8_t *artwork, size_t artwork_len)
   snprintf(out, 17, "%016" PRIx64, hash);
 }
 
-// Derives a per-track UniqueIdentifier: a 64-bit hash over the fields that
-// identify "this is the same track" (item id plus the tag triple, so a
-// same-item_id refinement of the tags still lands on a related but distinct
-// value - the id only needs to be stable across refinements, which is
-// enforced by the caller not re-deriving it, not by the hash itself), masked
-// to 63 bits since kMRMediaRemoteNowPlayingInfoUniqueIdentifier must be a
-// non-negative int64.
+// Derives the per-track UniqueIdentifier: a 64-bit hash over the fields
+// that identify "this is the same track" (item id plus the tag triple),
+// masked to 63 bits since kMRMediaRemoteNowPlayingInfoUniqueIdentifier must
+// be a non-negative int64. Content-derived and recomputed on every push:
+// the pipe queue holds a single item whose id never changes - a track
+// change arrives as an in-place update of the same item - so the tag
+// triple, not the item id, is what actually distinguishes tracks. The
+// receiver keys its now-playing item on this identifier and ignores new
+// title text if it does not change, so it must flip exactly when the
+// content does (and hashing gives stability across identical pushes for
+// free).
 static uint64_t
 mrp_uid_make(uint32_t item_id, const char *title, const char *artist, const char *album)
 {
@@ -342,11 +346,7 @@ airplay_mrp_nowplaying_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, uin
 
   if (!timeline_only)
     {
-      if (item_id != mrp->last_item_id)
-	{
-	  mrp->nowplaying_uid = mrp_uid_make(item_id, title, artist, album);
-	  mrp->last_item_id = item_id;
-	}
+      mrp->nowplaying_uid = mrp_uid_make(item_id, title, artist, album);
 
       wplist_dict_add_string(inner_params, "kMRMediaRemoteNowPlayingInfoTitle", title ? title : "");
       wplist_dict_add_string(inner_params, "kMRMediaRemoteNowPlayingInfoArtist", artist ? artist : "");

@@ -36,18 +36,18 @@ struct evbuffer;
 // it.
 struct airplay_mrp
 {
-  // Current track's kMRMediaRemoteNowPlayingInfoUniqueIdentifier. Re-minted
-  // on a track change, held stable across same-track tag refinements.
+  // Current track's kMRMediaRemoteNowPlayingInfoUniqueIdentifier.
+  // Content-derived (hash of item id + title/artist/album) and recomputed
+  // on every replace push: the receiver keys its now-playing item on this
+  // value, so it must change exactly when the track content does - the
+  // pipe queue's single item id never changes, so the tag triple is what
+  // distinguishes tracks.
   uint64_t nowplaying_uid;
 
   // Current kMRMediaRemoteNowPlayingInfoArtworkIdentifier (16 lowercase hex
   // chars + nul). Held stable while the artwork bytes are unchanged, since a
   // receiver-visible re-render is triggered by an identifier flip alone.
   char artwork_id[17];
-
-  // Queue item id backing the current nowplaying_uid/artwork_id, used to
-  // detect a track change vs. a same-track metadata refinement.
-  uint32_t last_item_id;
 
   // Last mrPlaybackState value actually sent (AIRPLAY_MRP_STATE_*), for
   // dedup'ing updateMRPlaybackState pushes. Starts at 0, which is not a
@@ -94,10 +94,10 @@ airplay_mrp_deviceinfo_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, con
 // timeline_only selects between the two accepted message shapes:
 //  - false ("replace"): the full key set - title/artist/album (always, empty
 //    string if NULL), duration_s (omitted when <= 0), elapsed_s, playing,
-//    MediaType, UniqueIdentifier (re-minted when item_id changes from the
-//    last replace push), and artwork (when non-NULL) on every call. item_id,
-//    title, artist, album, duration_s and artwork/artwork_len/artwork_mime
-//    are used.
+//    MediaType, UniqueIdentifier (content-derived from item_id + the tag
+//    triple, so it flips exactly on a real track change), and artwork (when
+//    non-NULL) on every call. item_id, title, artist, album, duration_s and
+//    artwork/artwork_len/artwork_mime are used.
 //  - true ("update"): only ElapsedTime/PlaybackRate/DefaultPlaybackRate/
 //    Timestamp. item_id, title, artist, album, duration_s and artwork are
 //    ignored (pass 0/NULL) and mrp's track-identity state is left alone.
@@ -106,9 +106,8 @@ airplay_mrp_deviceinfo_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, con
 // "image/jpeg"/"image/png" - the caller already has this mapping for the
 // legacy SET_PARAMETER artwork send, see payload_make_send_artwork()).
 //
-// elapsed_s and playing apply in both shapes. Sets mrp->nowplaying_uid,
-// mrp->artwork_id and mrp->last_item_id as a side effect of a "replace"
-// call whose item_id differs from the last one seen.
+// elapsed_s and playing apply in both shapes. Sets mrp->nowplaying_uid and
+// mrp->artwork_id as a side effect of a "replace" call.
 int
 airplay_mrp_nowplaying_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, uint32_t item_id,
     const char *title, const char *artist, const char *album,
