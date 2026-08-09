@@ -172,6 +172,7 @@
 #define AIRPLAY_MD_WANTS_TEXT         (1 << 0)
 #define AIRPLAY_MD_WANTS_ARTWORK      (1 << 1)
 #define AIRPLAY_MD_WANTS_PROGRESS     (1 << 2)
+#define AIRPLAY_MD_WANTS_NOWPLAYING   (1 << 3)
 
 // ATV4 and Homepod disconnect for reasons that are not clear, but sending them
 // progress metadata at regular intervals reduces the problem. The below
@@ -410,6 +411,10 @@ struct airplay_session
 
   uint64_t statusflags;
   uint16_t wanted_metadata;
+  // Copy of extra->devtype (session_make()), needed to gate the MediaRemote
+  // now-playing path (Apple TV class receivers only) at dispatch time,
+  // where only the session - not the device's airplay_extra - is in scope.
+  enum airplay_devtype devtype;
   bool req_has_auth;
   bool supports_auth_setup;
   bool supports_encryption;
@@ -2017,6 +2022,7 @@ session_make(struct output_device *device, int callback_id)
   session->supports_auth_setup = extra->supports_auth_setup;
   session->wanted_metadata = extra->wanted_metadata;
   session->supports_encryption = extra->supports_encryption;
+  session->devtype = extra->devtype;
 
   // Buffered AirPlay 2 opt-in, derived from the device's selected output
   // mode. wants_buffered_kind is what response_handler_info_generic() checks
@@ -5822,6 +5828,7 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
   const char *features;
   uint64_t id;
   bool advertises_buffered = false;
+  bool wants_nowplaying_features = false;
   bool device_changed;
   int ret;
 
@@ -5951,6 +5958,12 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
     extra->wanted_metadata |= AIRPLAY_MD_WANTS_PROGRESS;
   if (keyval_get(&features_kv, "MetadataFeatures_2"))
     extra->wanted_metadata |= AIRPLAY_MD_WANTS_TEXT;
+  // MetadataFeatures_3 (bit 50) advertises the MediaRemote bplist channel.
+  // Only wanted for Apple TV class receivers, and devtype isn't known yet at
+  // this point in the function, so just remember the advertisement here and
+  // apply the devtype gate once it is (below).
+  if (keyval_get(&features_kv, "MetadataFeatures_3"))
+    wants_nowplaying_features = true;
   if (keyval_get(&features_kv, "Authentication_8"))
     extra->supports_auth_setup = 1;
   if (keyval_get(&features_kv, "SupportsPTP") && !(devcfg && cfg_getbool(devcfg, "ptp_disable")) && !airplay_ptp_is_disabled)
@@ -5996,6 +6009,13 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
     extra->devtype = AIRPLAY_DEV_HOMEPOD;
   else if (*p == '\0')
     DPRINTF(E_WARN, L_AIRPLAY, "AirPlay device '%s': am has no value\n", name);
+
+  // The MediaRemote now-playing channel is only meaningful to Apple TV class
+  // receivers; gate the bit-50 advertisement on devtype (now known) and let
+  // the per-device config veto it, mirroring the ptp_disable idiom above.
+  if (wants_nowplaying_features && airplay_is_appletv_device(extra->devtype)
+      && !(devcfg && cfg_getbool(devcfg, "nowplaying_disable")))
+    extra->wanted_metadata |= AIRPLAY_MD_WANTS_NOWPLAYING;
 
   extra->gid = safe_strdup(keyval_get(txt, "gid"));
   extra->gpn = safe_strdup(keyval_get(txt, "gpn"));
