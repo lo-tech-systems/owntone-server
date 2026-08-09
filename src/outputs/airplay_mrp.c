@@ -39,11 +39,15 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <inttypes.h>
 
 #include <event2/buffer.h>
+#include <plist/plist.h>
 
 #include "misc.h"
 #include "logger.h"
+#include "plist_wrap.h"
 #include "airplay_mrp.h"
 
 /* ------------------------------ proto2 emitter ----------------------------
@@ -148,16 +152,154 @@ airplay_mrp_deviceinfo_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, con
   return -1;
 }
 
-int
-airplay_mrp_nowplaying_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, const char *title, const char *artist, const char *album, double duration_s, double elapsed_s, bool playing, const uint8_t *artwork, size_t artwork_len)
+// Derives the 16-lowercase-hex-char ArtworkIdentifier from the artwork
+// content itself (a 64-bit hash of the bytes), rather than a random token:
+// this gives us "same bytes -> same identifier" for free, which is what the
+// receiver needs to avoid a spurious re-render, without having to keep
+// the actual bytes around
+// just to compare them next time.
+static void
+mrp_artwork_id_make(char out[17], const uint8_t *artwork, size_t artwork_len)
 {
-  return -1;
+  uint64_t hash = murmur_hash64(artwork, (int)artwork_len, 0);
+
+  snprintf(out, 17, "%016" PRIx64, hash);
+}
+
+// Derives a per-track UniqueIdentifier: a 64-bit hash over the fields that
+// identify "this is the same track" (item id plus the tag triple, so a
+// same-item_id refinement of the tags still lands on a related but distinct
+// value - the id only needs to be stable across refinements, which is
+// enforced by the caller not re-deriving it, not by the hash itself), masked
+// to 63 bits since kMRMediaRemoteNowPlayingInfoUniqueIdentifier must be a
+// non-negative int64.
+static uint64_t
+mrp_uid_make(uint32_t item_id, const char *title, const char *artist, const char *album)
+{
+  char buf[512];
+  int len;
+
+  len = snprintf(buf, sizeof(buf), "%" PRIu32 "|%s|%s|%s",
+      item_id, title ? title : "", artist ? artist : "", album ? album : "");
+  if (len < 0)
+    len = 0;
+  else if ((size_t)len >= sizeof(buf))
+    len = sizeof(buf) - 1;
+
+  return murmur_hash64(buf, len, 0) & 0x7fffffffffffffffULL;
+}
+
+int
+airplay_mrp_nowplaying_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, uint32_t item_id,
+    const char *title, const char *artist, const char *album,
+    double duration_s, double elapsed_s, bool playing,
+    const uint8_t *artwork, size_t artwork_len, const char *artwork_mime, bool timeline_only)
+{
+  plist_t root;
+  plist_t outer_params;
+  plist_t inner_params;
+  struct timespec now;
+  double now_s;
+  uint8_t *data;
+  size_t len;
+  int ret;
+
+  clock_gettime(CLOCK_REALTIME, &now);
+  now_s = (double)now.tv_sec + (double)now.tv_nsec / 1e9;
+
+  inner_params = plist_new_dict();
+
+  if (!timeline_only)
+    {
+      if (item_id != mrp->last_item_id)
+	{
+	  mrp->nowplaying_uid = mrp_uid_make(item_id, title, artist, album);
+	  mrp->last_item_id = item_id;
+	}
+
+      wplist_dict_add_string(inner_params, "kMRMediaRemoteNowPlayingInfoTitle", title ? title : "");
+      wplist_dict_add_string(inner_params, "kMRMediaRemoteNowPlayingInfoArtist", artist ? artist : "");
+      wplist_dict_add_string(inner_params, "kMRMediaRemoteNowPlayingInfoAlbum", album ? album : "");
+      if (duration_s > 0.0)
+	wplist_dict_add_real(inner_params, "kMRMediaRemoteNowPlayingInfoDuration", duration_s);
+    }
+
+  wplist_dict_add_real(inner_params, "kMRMediaRemoteNowPlayingInfoElapsedTime", elapsed_s);
+  wplist_dict_add_real(inner_params, "kMRMediaRemoteNowPlayingInfoPlaybackRate", playing ? 1.0 : 0.0);
+  wplist_dict_add_real(inner_params, "kMRMediaRemoteNowPlayingInfoDefaultPlaybackRate", 1.0);
+  wplist_dict_add_date(inner_params, "kMRMediaRemoteNowPlayingInfoTimestamp", now_s);
+
+  if (!timeline_only)
+    {
+      wplist_dict_add_string(inner_params, "kMRMediaRemoteNowPlayingInfoMediaType", "MRMediaRemoteMediaTypeMusic");
+      wplist_dict_add_int(inner_params, "kMRMediaRemoteNowPlayingInfoUniqueIdentifier", (int64_t)mrp->nowplaying_uid);
+
+      if (artwork && artwork_len > 0)
+	{
+	  // Content-derived, so identical bytes always land on the same
+	  // identifier without needing to keep the previous bytes around to
+	  // compare - and a real content change naturally mints a new one.
+	  // Keeping the identifier stable across unchanged bytes matters: an
+	  // identifier flip alone triggers a visible receiver-side re-render.
+	  mrp_artwork_id_make(mrp->artwork_id, artwork, artwork_len);
+
+	  wplist_dict_add_string(inner_params, "kMRMediaRemoteNowPlayingInfoArtworkIdentifier", mrp->artwork_id);
+	  wplist_dict_add_string(inner_params, "kMRMediaRemoteNowPlayingInfoArtworkMIMEType", artwork_mime ? artwork_mime : "image/jpeg");
+	  wplist_dict_add_data(inner_params, "kMRMediaRemoteNowPlayingInfoArtworkData", (uint8_t *)artwork, artwork_len);
+	}
+      else
+	{
+	  mrp->artwork_id[0] = '\0';
+	}
+    }
+
+  outer_params = plist_new_dict();
+  wplist_dict_add_string(outer_params, "type", "npi-text");
+  wplist_dict_add_string(outer_params, "mergePolicy", timeline_only ? "update" : "replace");
+  plist_dict_set_item(outer_params, "params", inner_params);
+
+  root = plist_new_dict();
+  wplist_dict_add_string(root, "type", "updateMRNowPlayingInfo");
+  plist_dict_set_item(root, "params", outer_params);
+
+  ret = wplist_to_bin(&data, &len, root);
+  plist_free(root);
+  if (ret < 0)
+    return -1;
+
+  evbuffer_add(evbuf, data, len);
+  free(data);
+
+  return 0;
 }
 
 int
 airplay_mrp_playback_state_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, int state)
 {
-  return -1;
+  plist_t root;
+  plist_t params;
+  uint8_t *data;
+  size_t len;
+  int ret;
+
+  params = plist_new_dict();
+  wplist_dict_add_uint(params, "mrPlaybackState", (uint64_t)state);
+
+  root = plist_new_dict();
+  wplist_dict_add_string(root, "type", "updateMRPlaybackState");
+  plist_dict_set_item(root, "params", params);
+
+  ret = wplist_to_bin(&data, &len, root);
+  plist_free(root);
+  if (ret < 0)
+    return -1;
+
+  evbuffer_add(evbuf, data, len);
+  free(data);
+
+  mrp->last_playback_state = state;
+
+  return 0;
 }
 
 int

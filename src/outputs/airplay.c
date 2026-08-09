@@ -62,6 +62,7 @@
 #include "airplay_common.h"
 #include "airplay_encoder.h"
 #include "airplay_crypto.h"
+#include "airplay_mrp.h"
 #include "pair_ap/pair.h"
 
 /* List of TODO's for AirPlay 2
@@ -244,6 +245,15 @@ enum airplay_seq_type
   AIRPLAY_SEQ_SEND_TEXT,
   AIRPLAY_SEQ_SEND_PROGRESS,
   AIRPLAY_SEQ_SEND_ARTWORK,
+  // Combined updateMRNowPlayingInfo + updateMRPlaybackState push (MediaRemote
+  // "replace" - full metadata + artwork, forced/dedup'd state). Started from
+  // airplay_metadata_send_generic() alongside (not instead of) the legacy
+  // DAAP text/artwork sends.
+  AIRPLAY_SEQ_SEND_NOWPLAYING,
+  // Timeline-only updateMRNowPlayingInfo ("update" mergePolicy) + a forced
+  // updateMRPlaybackState push. Used for pause/resume, where a bare state
+  // flip alone would leave the receiver's extrapolated position wrong.
+  AIRPLAY_SEQ_SEND_NOWPLAYING_PROGRESS,
   AIRPLAY_SEQ_PAIR_SETUP,
   AIRPLAY_SEQ_PAIR_VERIFY,
   AIRPLAY_SEQ_PAIR_TRANSIENT,
@@ -415,6 +425,13 @@ struct airplay_session
   // now-playing path (Apple TV class receivers only) at dispatch time,
   // where only the session - not the device's airplay_extra - is in scope.
   enum airplay_devtype devtype;
+
+  // Per-session MediaRemote (MRP) state, allocated in session_make() when
+  // wanted_metadata carries AIRPLAY_MD_WANTS_NOWPLAYING, freed in
+  // session_free(). NULL for every receiver that isn't an Apple TV
+  // advertising MetadataFeatures_3 - all MRP send paths must guard on this.
+  struct airplay_mrp *mrp;
+
   bool req_has_auth;
   bool supports_auth_setup;
   bool supports_encryption;
@@ -1612,6 +1629,8 @@ session_free(struct airplay_session *session)
   free(session->address);
   free(session->devname);
 
+  airplay_mrp_free(session->mrp);
+
   free(session);
 }
 
@@ -2024,6 +2043,11 @@ session_make(struct output_device *device, int callback_id)
   session->supports_encryption = extra->supports_encryption;
   session->devtype = extra->devtype;
 
+  // MRP state is only needed for receivers the wanted_metadata gate above
+  // (feature bit 50 + devtype + config) actually turned on for.
+  if (session->wanted_metadata & AIRPLAY_MD_WANTS_NOWPLAYING)
+    session->mrp = airplay_mrp_new();
+
   // Buffered AirPlay 2 opt-in, derived from the device's selected output
   // mode. wants_buffered_kind is what response_handler_info_generic() checks
   // to decide whether to attempt the buffered transport at all, and which
@@ -2198,6 +2222,12 @@ airplay_metadata_send_generic(struct airplay_session *session, struct output_met
 
   if (!only_progress && (session->wanted_metadata & AIRPLAY_MD_WANTS_ARTWORK) && rmd->artwork)
     sequence_start(AIRPLAY_SEQ_SEND_ARTWORK, session, metadata, "SET_PARAMETER (artwork)");
+
+  // MediaRemote: a combined replace-policy NowPlayingInfo + PlaybackState
+  // push, additive to (not a replacement for) the legacy DAAP text/artwork
+  // sends above.
+  if (!only_progress && (session->wanted_metadata & AIRPLAY_MD_WANTS_NOWPLAYING) && session->mrp)
+    sequence_start(AIRPLAY_SEQ_SEND_NOWPLAYING, session, metadata, "POST /command (NowPlayingInfo)");
 
   return 0;
 }
@@ -3418,6 +3448,130 @@ payload_make_send_text(struct evrtsp_request *req, struct airplay_session *sessi
     return -1;
 
   return 0;
+}
+
+// Wall-clock ElapsedTime (seconds) for a metadata push: metadata->pos_ms was
+// correct as of metadata->pts (CLOCK_MONOTONIC), so add however much
+// monotonic time has passed since then. This is deliberately NOT
+// metadata_rtptimes_get() - that returns rtptime units for the legacy RTSP
+// progress header, not the wall-clock seconds MediaRemote wants.
+static double
+airplay_mrp_elapsed_s(struct output_metadata *metadata)
+{
+  struct timespec now;
+  int64_t diff_ms;
+
+  clock_gettime(CLOCK_MONOTONIC, &now);
+
+  diff_ms = (now.tv_sec - metadata->pts.tv_sec) * 1000L + (now.tv_nsec - metadata->pts.tv_nsec) / 1000000L;
+
+  return ((double)metadata->pos_ms + (double)diff_ms) / 1000.0;
+}
+
+// Builds the "replace" updateMRNowPlayingInfo body: full metadata + artwork
+// (bytes ride EVERY replace push - the receiver does not cache artwork
+// across replaces) + timeline. Fetches the queue item directly rather than
+// going through the DMAP encoder/rmd->metadata, which only carries the
+// fields the legacy DAAP path needs.
+static int
+payload_make_nowplaying(struct evrtsp_request *req, struct airplay_session *session, void *arg)
+{
+  struct output_metadata *metadata = arg;
+  struct airplay_metadata *rmd = metadata->priv;
+  struct db_queue_item *queue_item;
+  const uint8_t *artwork;
+  size_t artwork_len;
+  const char *artwork_mime;
+  double duration_s;
+  int ret;
+
+  if (!session->mrp)
+    return 1; // Skip: receiver isn't gated into the MediaRemote path
+
+  queue_item = db_queue_fetch_byitemid(metadata->item_id);
+  if (!queue_item)
+    {
+      // Skip rather than abort: a failed metadata lookup must never tear
+      // down an otherwise healthy audio session over a cosmetic push.
+      DPRINTF(E_LOG, L_AIRPLAY, "Could not fetch queue item for NowPlayingInfo\n");
+      return 1;
+    }
+
+  duration_s = queue_item->song_length ? (queue_item->song_length / 1000.0) : 0.0;
+
+  artwork = NULL;
+  artwork_len = 0;
+  artwork_mime = NULL;
+  if (rmd && rmd->artwork)
+    {
+      // Same format -> content-type mapping as payload_make_send_artwork();
+      // an unsupported/unknown format just omits artwork rather than
+      // aborting the whole NowPlayingInfo push.
+      switch (rmd->artwork_fmt)
+	{
+	  case ART_FMT_PNG:
+	    artwork_mime = "image/png";
+	    break;
+
+	  case ART_FMT_JPEG:
+	    artwork_mime = "image/jpeg";
+	    break;
+
+	  default:
+	    DPRINTF(E_LOG, L_AIRPLAY, "Unsupported artwork format %d for NowPlayingInfo\n", rmd->artwork_fmt);
+	    break;
+	}
+
+      if (artwork_mime)
+	{
+	  artwork = evbuffer_pullup(rmd->artwork, -1);
+	  artwork_len = evbuffer_get_length(rmd->artwork);
+	}
+    }
+
+  ret = airplay_mrp_nowplaying_make(req->output_buffer, session->mrp, queue_item->id,
+      queue_item->title, queue_item->artist, queue_item->album,
+      duration_s, airplay_mrp_elapsed_s(metadata), !session->mrp->paused,
+      artwork, artwork_len, artwork_mime, false);
+
+  free_queue_item(queue_item, 0);
+
+  return ret;
+}
+
+// Builds the timeline-only ("update" mergePolicy) updateMRNowPlayingInfo
+// body used for pause/resume: ElapsedTime/PlaybackRate/DefaultPlaybackRate/
+// Timestamp only, no metadata or artwork keys (re-asserting those was
+// observed to trigger a receiver re-render).
+static int
+payload_make_nowplaying_update(struct evrtsp_request *req, struct airplay_session *session, void *arg)
+{
+  struct output_metadata *metadata = arg;
+
+  if (!session->mrp)
+    return 1;
+
+  return airplay_mrp_nowplaying_make(req->output_buffer, session->mrp, 0,
+      NULL, NULL, NULL, 0.0, airplay_mrp_elapsed_s(metadata), !session->mrp->paused,
+      NULL, 0, NULL, true);
+}
+
+// Builds updateMRPlaybackState, deduplicated against the last value actually
+// sent (mrp->last_playback_state starts at 0, which is not a valid state, so
+// the first push of a session is always forced through).
+static int
+payload_make_playback_state(struct evrtsp_request *req, struct airplay_session *session, void *arg)
+{
+  int state;
+
+  if (!session->mrp)
+    return 1;
+
+  state = session->mrp->paused ? AIRPLAY_MRP_STATE_PAUSED : AIRPLAY_MRP_STATE_PLAYING;
+  if (state == session->mrp->last_playback_state)
+    return 1; // Skip: no change since the last push
+
+  return airplay_mrp_playback_state_make(req->output_buffer, session->mrp, state);
 }
 
 
@@ -5110,6 +5264,8 @@ static struct airplay_seq_definition airplay_seq_definition[] =
   { AIRPLAY_SEQ_SEND_TEXT, NULL, session_failure },
   { AIRPLAY_SEQ_SEND_PROGRESS, NULL, session_failure },
   { AIRPLAY_SEQ_SEND_ARTWORK, NULL, session_failure },
+  { AIRPLAY_SEQ_SEND_NOWPLAYING, NULL, session_failure },
+  { AIRPLAY_SEQ_SEND_NOWPLAYING_PROGRESS, NULL, session_failure },
   { AIRPLAY_SEQ_PAIR_SETUP, session_pair_success, session_failure },
   { AIRPLAY_SEQ_PAIR_VERIFY, session_pair_success, session_failure },
   // Transient pairing only runs during session start (probe converts it to
@@ -5178,6 +5334,17 @@ static struct airplay_seq_request airplay_seq_request[][10] =
   },
   {
     { AIRPLAY_SEQ_SEND_ARTWORK, "SET_PARAMETER (artwork)", EVRTSP_REQ_SET_PARAMETER, payload_make_send_artwork, NULL, NULL, NULL, true },
+  },
+  {
+    // proceed_on_rtsp_not_ok is true throughout: MediaRemote is a cosmetic
+    // add-on to the stream, a device rejecting one of these must never abort
+    // playback (mirrors the legacy SEND_TEXT/PROGRESS/ARTWORK sequences).
+    { AIRPLAY_SEQ_SEND_NOWPLAYING, "POST /command (NowPlayingInfo replace)", EVRTSP_REQ_POST, payload_make_nowplaying, NULL, "application/x-apple-binary-plist", "/command", true },
+    { AIRPLAY_SEQ_SEND_NOWPLAYING, "POST /command (PlaybackState)", EVRTSP_REQ_POST, payload_make_playback_state, NULL, "application/x-apple-binary-plist", "/command", true },
+  },
+  {
+    { AIRPLAY_SEQ_SEND_NOWPLAYING_PROGRESS, "POST /command (NowPlayingInfo update)", EVRTSP_REQ_POST, payload_make_nowplaying_update, NULL, "application/x-apple-binary-plist", "/command", true },
+    { AIRPLAY_SEQ_SEND_NOWPLAYING_PROGRESS, "POST /command (PlaybackState)", EVRTSP_REQ_POST, payload_make_playback_state, NULL, "application/x-apple-binary-plist", "/command", true },
   },
   {
     { AIRPLAY_SEQ_PAIR_SETUP, "pair setup 1", EVRTSP_REQ_POST, payload_make_pair_setup1, response_handler_pair_setup1, "application/octet-stream", "/pair-setup", false },
@@ -6173,6 +6340,18 @@ airplay_device_flush(struct output_device *device, int callback_id)
 
   session->callback_id = callback_id;
 
+  // MediaRemote: a flush is how the player signals a pause to this backend.
+  // Push the timeline (elapsed/rate) update BEFORE the state flip - a bare
+  // state flip
+  // alone leaves the receiver's extrapolated position wrong, since it only
+  // recomputes position from a fresh ElapsedTime+Timestamp pair. This is
+  // independent of, and does not alter, the actual RTSP FLUSH below.
+  if (session->mrp && airplay_cur_metadata)
+    {
+      session->mrp->paused = true;
+      sequence_start(AIRPLAY_SEQ_SEND_NOWPLAYING_PROGRESS, session, airplay_cur_metadata, "POST /command (NowPlayingInfo update, pause)");
+    }
+
   sequence_start(session->buffered_mode ? AIRPLAY_SEQ_FLUSH_BUFFERED : AIRPLAY_SEQ_FLUSH, session, NULL, "flush");
 
   return 1;
@@ -6304,6 +6483,18 @@ airplay_write(struct output_buffer *obuf)
 	    evtimer_add(keep_alive_timer, &keep_alive_tv);
 
 	  session->state = AIRPLAY_STATE_STREAMING;
+
+	  // MediaRemote resume: this CONNECTED->STREAMING transition also
+	  // covers a session coming back from a flush/pause (see
+	  // airplay_device_flush()). A fresh join never sets mrp->paused, so
+	  // this only fires for a genuine resume, not on first connect (the
+	  // startup NowPlayingInfo/PlaybackState push is handled separately
+	  // by airplay_metadata_startup_send()).
+	  if (session->mrp && session->mrp->paused && airplay_cur_metadata)
+	    {
+	      session->mrp->paused = false;
+	      sequence_start(AIRPLAY_SEQ_SEND_NOWPLAYING_PROGRESS, session, airplay_cur_metadata, "POST /command (NowPlayingInfo update, resume)");
+	    }
 	}
 
       // Buffered receivers don't start playing until they've received a

@@ -25,9 +25,15 @@
 
 struct evbuffer;
 
+// updateMRPlaybackState's mrPlaybackState values, sent directly as the
+// plist integer.
+#define AIRPLAY_MRP_STATE_PLAYING  1
+#define AIRPLAY_MRP_STATE_PAUSED   2
+#define AIRPLAY_MRP_STATE_STOPPED  3
+
 // Per-session MediaRemote (MRP) state, hung off struct airplay_session once
 // a receiver advertises MetadataFeatures_3 (bit 50) and the config allows
-// it. Nothing allocates or consumes this yet - lifecycle only for now.
+// it.
 struct airplay_mrp
 {
   // Current track's kMRMediaRemoteNowPlayingInfoUniqueIdentifier. Re-minted
@@ -43,9 +49,18 @@ struct airplay_mrp
   // detect a track change vs. a same-track metadata refinement.
   uint32_t last_item_id;
 
-  // Last mrPlaybackState value actually sent (1 Playing / 2 Paused /
-  // 3 Stopped), for dedup'ing updateMRPlaybackState pushes.
+  // Last mrPlaybackState value actually sent (AIRPLAY_MRP_STATE_*), for
+  // dedup'ing updateMRPlaybackState pushes. Starts at 0, which is not a
+  // valid state, so the first push of a session is always sent regardless
+  // of what "playing" state a caller computes.
   int last_playback_state;
+
+  // Session-level pause/resume intent, set by the airplay.c flush/resume
+  // hooks. Drives both PlaybackRate inside NowPlayingInfo bodies and the
+  // mrPlaybackState pushed alongside them (Paused when true, Playing when
+  // false - Stopped is only ever used at teardown, out of scope for the
+  // pause/resume hooks).
+  bool paused;
 
   // Set once DEVICE_INFO has been sent - it must precede every other MRP
   // message on the session, and is only sent once.
@@ -66,17 +81,44 @@ airplay_mrp_new(void);
 void
 airplay_mrp_free(struct airplay_mrp *mrp);
 
-// Message-builder stubs. Each will, once implemented, append the bplist
-// (and where applicable, proto2-encoded) body for its message to evbuf and
-// return 0 on success, -1 on error. Not wired into the send path yet - all
-// currently return -1 unconditionally.
+// Message builders. Each appends the bplist (and where applicable,
+// proto2-encoded) body for its message to evbuf and returns 0 on success,
+// -1 on error. DEVICE_INFO and the NowPlayingClient builders are still
+// stubs (commit 5 scope) - both currently return -1 unconditionally.
 
 int
 airplay_mrp_deviceinfo_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, const char *devname, const char *session_uuid, const char *group_uuid, const char *dacp_id);
 
+// Builds an updateMRNowPlayingInfo body.
+//
+// timeline_only selects between the two accepted message shapes:
+//  - false ("replace"): the full key set - title/artist/album (always, empty
+//    string if NULL), duration_s (omitted when <= 0), elapsed_s, playing,
+//    MediaType, UniqueIdentifier (re-minted when item_id changes from the
+//    last replace push), and artwork (when non-NULL) on every call. item_id,
+//    title, artist, album, duration_s and artwork/artwork_len/artwork_mime
+//    are used.
+//  - true ("update"): only ElapsedTime/PlaybackRate/DefaultPlaybackRate/
+//    Timestamp. item_id, title, artist, album, duration_s and artwork are
+//    ignored (pass 0/NULL) and mrp's track-identity state is left alone.
+//
+// artwork_mime is the MIME type to advertise for a non-NULL artwork (e.g.
+// "image/jpeg"/"image/png" - the caller already has this mapping for the
+// legacy SET_PARAMETER artwork send, see payload_make_send_artwork()).
+//
+// elapsed_s and playing apply in both shapes. Sets mrp->nowplaying_uid,
+// mrp->artwork_id and mrp->last_item_id as a side effect of a "replace"
+// call whose item_id differs from the last one seen.
 int
-airplay_mrp_nowplaying_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, const char *title, const char *artist, const char *album, double duration_s, double elapsed_s, bool playing, const uint8_t *artwork, size_t artwork_len);
+airplay_mrp_nowplaying_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, uint32_t item_id,
+    const char *title, const char *artist, const char *album,
+    double duration_s, double elapsed_s, bool playing,
+    const uint8_t *artwork, size_t artwork_len, const char *artwork_mime, bool timeline_only);
 
+// Builds an updateMRPlaybackState body ({mrPlaybackState: state}, one of the
+// AIRPLAY_MRP_STATE_* values). Unconditional - the caller decides whether a
+// push is warranted (dedup, forced first send, etc). Updates
+// mrp->last_playback_state as a side effect of a successful build.
 int
 airplay_mrp_playback_state_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, int state);
 
