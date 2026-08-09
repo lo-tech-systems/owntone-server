@@ -128,6 +128,12 @@ struct input_definition
   // Reload runtime configuration after config_reload()
   int (*config_reload)(void);
 
+  // Optional. Called at the very start of shutdown, before any thread or
+  // command base is torn down: stop generating new work (watches, autostart
+  // triggers, timers) but leave all state alive for deinit. Must be safe to
+  // call while playback is still running.
+  void (*quiesce)(void);
+
   // Deinitialization function called at shutdown
   void (*deinit)(void);
 };
@@ -249,6 +255,14 @@ input_config_reload(void);
  */
 int
 pipe_path_validate(const char *path);
+
+/*
+ * Called by player_deinit at the very start of shutdown (main thread), before
+ * playback is aborted and before any thread or command base is torn down.
+ * Tells every input to stop generating new work; see the quiesce op.
+ */
+void
+input_quiesce(void);
 
 /*
  * Called by player_deinit (so will run in main thread)

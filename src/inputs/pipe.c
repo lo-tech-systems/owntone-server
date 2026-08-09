@@ -166,6 +166,11 @@ static int pipe_autostart_id;
 // Timer that keeps the watches in pipe_watch_list attached
 static struct event *pipe_watch_health_ev;
 
+// Set (on the pipe thread) once shutdown has begun: all watches are disarmed
+// and must stay disarmed, so that no autostart can fire into a player that is
+// being torn down. Read only on the pipe thread.
+static bool pipe_quiesced;
+
 // Global list of pipes we are watching (if watching/autostart is enabled)
 static struct pipe *pipe_watch_list;
 
@@ -262,6 +267,9 @@ static int
 watch_add(struct pipe *pipe)
 {
   bool silent;
+
+  if (pipe_quiesced)
+    return -1;
 
   silent = (pipe->type == PIPE_METADATA) || pipe->watch_failed;
   pipe->fd = pipe_open(pipe->path, silent);
@@ -912,6 +920,9 @@ pipe_watch_reset(void *arg, int *retval)
 
   pipe_autostart_id = 0;
 
+  if (pipe_quiesced)
+    return COMMAND_END;
+
   pipe = pipelist_find(pipe_watch_list, cmdarg->id);
   if (!pipe)
     return COMMAND_END;
@@ -996,6 +1007,9 @@ pipe_watch_health_cb(evutil_socket_t fd, short event, void *arg)
   struct pipe *pipe;
   int ret;
 
+  if (pipe_quiesced)
+    return;
+
   for (pipe = pipe_watch_list; pipe; pipe = pipe->next)
     {
       // The pipe we autostarted is reset by pipe_watch_reset when playback stops
@@ -1017,6 +1031,39 @@ pipe_watch_health_cb(evutil_socket_t fd, short event, void *arg)
     }
 
   evtimer_add(pipe_watch_health_ev, &tv);
+}
+
+// Runs on the pipe thread. Disarms every watch and the health timer and
+// latches pipe_quiesced, so that from this point nothing on the pipe thread
+// can start playback or re-arm a watch. State (the watch list, the command
+// base) stays alive for the normal deinit to tear down later.
+static enum command_state
+pipe_quiesce_cmd(void *arg, int *retval)
+{
+  struct pipe *pipe;
+
+  pipe_quiesced = true;
+
+  if (pipe_watch_health_ev)
+    event_del(pipe_watch_health_ev);
+
+  for (pipe = pipe_watch_list; pipe; pipe = pipe->next)
+    watch_del(pipe);
+
+  *retval = 0;
+  return COMMAND_END;
+}
+
+// Called from the shutdown path before any thread or command base is torn
+// down: once this returns, the pipe input generates no new work -- no
+// autostarts, no watch re-arms -- which the teardown ordering depends on.
+static void
+quiesce(void)
+{
+  if (!tid_pipe)
+    return;
+
+  commands_exec_sync(cmdbase, pipe_quiesce_cmd, NULL, NULL);
 }
 
 static void *
@@ -1593,5 +1640,6 @@ struct input_definition input_pipe =
   .metadata_get = metadata_get,
   .init = init,
   .config_reload = pipe_config_reload,
+  .quiesce = quiesce,
   .deinit = deinit,
 };
