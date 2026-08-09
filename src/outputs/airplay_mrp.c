@@ -28,6 +28,13 @@
  * dicts) are built separately in airplay.c, using the existing plist_wrap.h
  * helpers, the same way payload_make_command_supported_commands() already
  * does.
+ *
+ * The MediaRemote message set and field layouts implemented in this module
+ * were worked out by studying the on-wire behaviour of the cliairplay
+ * sender (the music-assistant/airplay-cli project, Apache-2.0) against a
+ * real receiver. This file is an independent implementation of that wire
+ * format - no code was taken from that project (its licence is not
+ * GPL-compatible).
  */
 
 #ifdef HAVE_CONFIG_H

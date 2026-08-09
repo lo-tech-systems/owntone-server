@@ -42,6 +42,31 @@ A HomePod stereo pair is not driven as a single combined session: each
 member of the pair is played to individually (one session per speaker), with
 the pair's two speakers kept in phase via their own clock sync.
 
+## Now Playing on Apple TV
+
+When streaming to an Apple TV, OwnTone registers as a MediaRemote now-playing
+client and pushes track metadata (title, artist, album, artwork, position) over
+the AirPlay control channel. This drives the Apple TV's on-screen Now Playing
+UI, and tvOS then treats the stream as active music playback — in particular,
+the "don't show screensaver when playing music" setting works as expected.
+Legacy AirPlay metadata alone is accepted but ignored by current tvOS versions,
+which is why this dedicated path exists.
+
+This is automatic for Apple TV receivers that advertise support (AirPlay
+feature bit 50), and does not run for any other receiver type. To turn it off
+for a specific device, set `nowplaying_disable = true` in that device's
+`airplay` section in the configuration file.
+
+Note that the Apple TV typically shows a small source indicator immediately,
+and brings up the full Now Playing screen a little later — that delay is the
+receiver's own UI behaviour.
+
+The MediaRemote message exchange implemented here was worked out by studying
+the on-wire behaviour of the cliairplay sender from the
+[airplay-cli](https://github.com/music-assistant/airplay-cli) project, whose
+authors did the hard work of mapping what a receiver actually requires. The
+code in OwnTone is an independent implementation.
+
 ## Silent Speakers
 
 There are at least two potential causes of apparently successful (but still silent)
