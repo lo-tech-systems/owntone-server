@@ -867,16 +867,26 @@ pipe_read_cb(evutil_socket_t fd, short event, void *arg)
   struct player_status status;
   int ret;
 
+  // The watch event is one-shot (EV_READ without EV_PERSIST), so every exit
+  // from this callback that does not hand the pipe over to the input must
+  // re-arm the watch -- otherwise autostart is dead until something else
+  // resets it, and the writer's data just backs up in the FIFO.
   ret = player_get_status(&status);
-  if (status.id == pipe->id)
+  if (ret < 0)
+    {
+      DPRINTF(E_LOG, L_PLAYER, "Pipe autostart of '%s' failed because state of player is unknown\n", pipe->path);
+      watch_reset(pipe);
+      return;
+    }
+
+  // Only an actually PLAYING player owns the pipe. A player merely parked on
+  // the pipe item -- paused, or stopped without clearing the item -- is not
+  // draining it, and swallowing the event here would leave the FIFO backing
+  // up with the watch disarmed. Fall through and (re)start playback instead.
+  if (status.id == pipe->id && status.status == PLAY_PLAYING)
     {
       DPRINTF(E_INFO, L_PLAYER, "Pipe '%s' already playing\n", pipe->path);
       return; // We are already playing the pipe
-    }
-  else if (ret < 0)
-    {
-      DPRINTF(E_LOG, L_PLAYER, "Pipe autostart of '%s' failed because state of player is unknown\n", pipe->path);
-      return;
     }
 
   DPRINTF(E_INFO, L_PLAYER, "Autostarting pipe '%s' (fd %d)\n", pipe->path, fd);
@@ -887,6 +897,7 @@ pipe_read_cb(evutil_socket_t fd, short event, void *arg)
   if (ret < 0)
     {
       DPRINTF(E_LOG, L_PLAYER, "Autostarting pipe '%s' (fd %d) failed\n", pipe->path, fd);
+      watch_reset(pipe);
       return;
     }
 
