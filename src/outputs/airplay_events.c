@@ -365,14 +365,19 @@ handle_event(enum airplay_events event)
 
   player_get_status(&status);
 
+  // PLAY and PAUSE are honoured literally, not as a blind toggle. Receivers
+  // send unsolicited 'play' while we are already playing (observed from an
+  // Apple TV's now-playing service right after artwork is delivered), and a
+  // toggle turns that into a pause of a healthy stream.
   switch (event)
     {
       case AIRPLAY_EVENT_PLAY:
+	if (status.status != PLAY_PLAYING)
+	  player_playback_start();
+	break;
       case AIRPLAY_EVENT_PAUSE:
 	if (status.status == PLAY_PLAYING)
 	  player_playback_pause();
-	else
-	  player_playback_start();
 	break;
       default:
 	return;
