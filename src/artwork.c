@@ -38,6 +38,7 @@ artwork_get_by_queue_item_id(struct evbuffer *evbuf, int item_id,
   const char *url;
   const char *path;
   const char *ext;
+  int attempt;
   int fmt;
   int fd;
   int ret;
@@ -46,48 +47,67 @@ artwork_get_by_queue_item_id(struct evbuffer *evbuf, int item_id,
   (void)max_h;
   (void)format;
 
-  qi = db_queue_fetch_byitemid((uint32_t)item_id);
-  if (!qi)
+  /* The artwork file named by artwork_url is a rotating tmpfile: the pipe
+   * metadata input retires older generations as new pictures arrive, so the
+   * path captured in one queue-item snapshot can be gone by the time it is
+   * opened here (rapid successive pushes). ENOENT therefore gets one retry
+   * with a freshly fetched snapshot, which names the current generation. */
+  fd = -1;
+  fmt = -1;
+  for (attempt = 0; attempt < 2; attempt++)
     {
-      DPRINTF(E_DBG, L_MISC, "artwork: queue item %d not found\n", item_id);
-      return -1;
-    }
+      qi = db_queue_fetch_byitemid((uint32_t)item_id);
+      if (!qi)
+	{
+	  DPRINTF(E_DBG, L_MISC, "artwork: queue item %d not found\n", item_id);
+	  return -1;
+	}
 
-  url = qi->artwork_url;
-  if (!url || strncmp(url, "file:", 5) != 0)
-    {
+      url = qi->artwork_url;
+      if (!url || strncmp(url, "file:", 5) != 0)
+	{
+	  free_queue_item(qi, 0);
+	  return -1;
+	}
+
+      path = url + 5; /* skip "file:" prefix */
+
+      ext = strrchr(path, '.');
+      if (!ext)
+	{
+	  free_queue_item(qi, 0);
+	  return -1;
+	}
+
+      if (strcasecmp(ext, ".png") == 0)
+	fmt = ART_FMT_PNG;
+      else if (strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0)
+	fmt = ART_FMT_JPEG;
+      else
+	{
+	  DPRINTF(E_DBG, L_MISC, "artwork: unsupported extension '%s'\n", ext);
+	  free_queue_item(qi, 0);
+	  return -1;
+	}
+
+      fd = open(path, O_RDONLY);
+      if (fd >= 0)
+	break;
+
+      if (errno != ENOENT || attempt > 0)
+	{
+	  DPRINTF(E_WARN, L_MISC, "artwork: could not open '%s': %s\n",
+	          path, strerror(errno));
+	  free_queue_item(qi, 0);
+	  return -1;
+	}
+
+      DPRINTF(E_DBG, L_MISC, "artwork: '%s' was retired, retrying with a fresh snapshot\n", path);
       free_queue_item(qi, 0);
-      return -1;
     }
 
-  path = url + 5; /* skip "file:" prefix */
-
-  ext = strrchr(path, '.');
-  if (!ext)
-    {
-      free_queue_item(qi, 0);
-      return -1;
-    }
-
-  if (strcasecmp(ext, ".png") == 0)
-    fmt = ART_FMT_PNG;
-  else if (strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0)
-    fmt = ART_FMT_JPEG;
-  else
-    {
-      DPRINTF(E_DBG, L_MISC, "artwork: unsupported extension '%s'\n", ext);
-      free_queue_item(qi, 0);
-      return -1;
-    }
-
-  fd = open(path, O_RDONLY);
   if (fd < 0)
-    {
-      DPRINTF(E_WARN, L_MISC, "artwork: could not open '%s': %s\n",
-              path, strerror(errno));
-      free_queue_item(qi, 0);
-      return -1;
-    }
+    return -1;
 
   /* Read the entire file into the evbuffer in chunks */
   do
