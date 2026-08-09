@@ -55,6 +55,7 @@ owntone_SOURCES = main.c \
 	outputs/rtp_common.h outputs/rtp_common.c \
 	outputs/raop.c outputs/airplay.c $(PAIR_AP_SRC) \
 	outputs/airplay_events.c outputs/airplay_events.h \
+	outputs/airplay_mrp.c outputs/airplay_mrp.h \
 	outputs/airplay_buffered.c outputs/airplay_buffered.h \
 	outputs/airplay_encoder.c outputs/airplay_encoder.h \
 	outputs/airplay_crypto.c outputs/airplay_crypto.h \
