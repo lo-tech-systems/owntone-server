@@ -955,6 +955,39 @@ input_config_reload(void)
 }
 
 void
+input_quiesce(void)
+{
+  int i;
+
+  for (i = 0; inputs[i]; i++)
+    {
+      if (inputs[i]->disabled)
+	continue;
+
+      if (inputs[i]->quiesce)
+        inputs[i]->quiesce();
+    }
+}
+
+// Teardown runs in three phases, and the order carries the correctness:
+//
+//   1. Quiesce (input_quiesce(), called by player_deinit() BEFORE the
+//      playback abort): every source of new work -- pipe watches, autostart
+//      triggers, health timers -- is disarmed while all threads and command
+//      bases are still alive. After this, nothing can initiate a playback
+//      start that would post fresh commands into a base that is about to go
+//      away.
+//   2. Drain (here): stop the current source, destroy this module's command
+//      base and join the input thread, so no queued command -- including an
+//      async stop still in flight -- can run against an input's state after
+//      that input is torn down.
+//   3. Deinit (below): tear the inputs themselves down, now that nothing is
+//      running against them.
+//
+// Skipping phase 1 lets a watch fire mid-teardown and start playback against
+// a half-destroyed player; running phase 3 before phase 2 lets the drained
+// commands touch freed input state. Both have produced real shutdown faults.
+void
 input_deinit(void)
 {
   int i;
@@ -964,11 +997,6 @@ input_deinit(void)
 
   input_initialized = false;
 
-  // Shut the input thread down and join it before tearing any input down. An
-  // input's stop() runs on this thread and reaches into that input's own state
-  // -- the pipe input posts to its command base, which its deinit() frees. A
-  // stop queued asynchronously can still be in flight here, so deiniting first
-  // frees that state underneath the thread still using it.
   commands_base_destroy(cmdbase);
 
   ret = pthread_join(tid_input, NULL);

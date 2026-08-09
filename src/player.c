@@ -3634,6 +3634,13 @@ player_deinit(void)
 {
   int ret;
 
+  // First stop the inputs from generating any new work -- a pipe watch that
+  // fires after the abort below would start playback into a player that is
+  // being torn down, posting commands into bases that are about to be freed.
+  // Everything is still alive at this point, so the quiesce is safe, and the
+  // abort then drains whatever was already queued.
+  input_quiesce();
+
   player_playback_abort();
 
   // Stop the GC timer before tearing down output backends. The callback
