@@ -2256,6 +2256,18 @@ airplay_metadata_send(struct output_metadata *metadata)
   struct airplay_session *next;
   int ret;
 
+  // Replace the current metadata BEFORE dispatching any sequences. The
+  // MediaRemote sequences are multi-row, so their later payloads are built
+  // asynchronously (after RTSP round-trips) and read airplay_cur_metadata
+  // at build time rather than holding the pointer they were dispatched
+  // with - the previous metadata object may be long freed by then. Swapping
+  // first means the global is always either NULL or alive when a deferred
+  // payload builder runs. The legacy single-row sequences build their
+  // payload synchronously from the argument below, so the swap order does
+  // not affect them.
+  airplay_metadata_purge();
+  airplay_cur_metadata = metadata;
+
   for (session = airplay_sessions; session; session = next)
     {
       next = session->next;
@@ -2270,10 +2282,6 @@ airplay_metadata_send(struct output_metadata *metadata)
 	  continue;
 	}
     }
-
-  // Replace current metadata with the new stuff
-  airplay_metadata_purge();
-  airplay_cur_metadata = metadata;
 }
 
 
@@ -3631,8 +3639,14 @@ airplay_mrp_elapsed_s(struct output_metadata *metadata)
 static int
 payload_make_nowplaying(struct evrtsp_request *req, struct airplay_session *session, void *arg)
 {
-  struct output_metadata *metadata = arg;
-  struct airplay_metadata *rmd = metadata->priv;
+  // Deliberately NOT the sequence's payload_make_arg: this builder can run
+  // asynchronously (rows after the first execute from response callbacks),
+  // by which time the metadata object the sequence was dispatched with may
+  // already have been purged. airplay_cur_metadata is always either NULL or
+  // alive on this thread, and airplay_metadata_send() swaps it before
+  // dispatching, so reading it at build time is both safe and freshest.
+  struct output_metadata *metadata = airplay_cur_metadata;
+  struct airplay_metadata *rmd;
   struct db_queue_item *queue_item;
   const uint8_t *artwork;
   size_t artwork_len;
@@ -3640,8 +3654,10 @@ payload_make_nowplaying(struct evrtsp_request *req, struct airplay_session *sess
   double duration_s;
   int ret;
 
-  if (!session->mrp)
+  if (!session->mrp || !metadata)
     return 1; // Skip: receiver isn't gated into the MediaRemote path
+
+  rmd = metadata->priv;
 
   queue_item = db_queue_fetch_byitemid(metadata->item_id);
   if (!queue_item)
@@ -3701,9 +3717,11 @@ payload_make_nowplaying(struct evrtsp_request *req, struct airplay_session *sess
 static int
 payload_make_nowplaying_update(struct evrtsp_request *req, struct airplay_session *session, void *arg)
 {
-  struct output_metadata *metadata = arg;
+  // See payload_make_nowplaying() for why this reads airplay_cur_metadata
+  // rather than the sequence's payload_make_arg.
+  struct output_metadata *metadata = airplay_cur_metadata;
 
-  if (!session->mrp)
+  if (!session->mrp || !metadata)
     return 1;
 
   return airplay_mrp_nowplaying_make(req->output_buffer, session->mrp, 0,
