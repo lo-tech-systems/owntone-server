@@ -117,6 +117,7 @@ curl -X PUT "http://localhost:3689/api/metadata" \
 | `name` | string | Display name |
 | `type` | string | Output type |
 | `selected` | boolean | `true` if the output is enabled |
+| `paused_by_device` | boolean | `true` if the output was deselected because the device itself requested pause (e.g. an Apple TV entering standby), as opposed to being deselected by the user or another client. Cleared automatically once the output is selected again. `false` when not applicable |
 | `has_password` | boolean | `true` if the output advertises password protection |
 | `requires_auth` | boolean | `true` if the output currently requires authorization |
 | `needs_auth_key` | boolean | `true` if the server does not have a valid stored auth key |
@@ -171,6 +172,7 @@ curl -X GET "http://localhost:3689/api/outputs"
       "name": "Living Room",
       "type": "AirPlay 2",
       "selected": true,
+      "paused_by_device": false,
       "has_password": false,
       "requires_auth": false,
       "needs_auth_key": false,
