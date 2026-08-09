@@ -40,6 +40,7 @@
 #include "logger.h"
 #include "player.h"
 #include "pair_ap/pair.h"
+#include "plist_wrap.h"
 
 #define RTSP_VERSION "RTSP/1.0"
 
@@ -327,7 +328,20 @@ rtsp_parse(enum airplay_events *event, uint8_t *in, size_t in_len)
   else if (strcmp(value, "pitm") == 0)
     *event = AIRPLAY_EVENT_PREV;
   else
-    *event = AIRPLAY_EVENT_UNKNOWN;
+    {
+      // Receivers send command values we have no handling for, and the value
+      // on its own rarely says what was meant by it. Dump the whole event: it
+      // is the only way to work out what a device is asking for, and these are
+      // rare enough that the log volume is not a concern. Logged at a level
+      // that stays visible without turning diagnostics up.
+      char *xml = wplist_to_xml(request);
+
+      DPRINTF(E_LOG, L_AIRPLAY, "Unhandled media remote command '%s', full event follows:\n%s\n",
+              value, xml ? xml : "(could not render event plist)");
+      free(xml);
+
+      *event = AIRPLAY_EVENT_UNKNOWN;
+    }
 
   free(type);
   free(value);
