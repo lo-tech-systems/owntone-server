@@ -427,8 +427,15 @@ logger_severity(void)
 void
 logger_severity_set(int severity)
 {
-  if (severity < E_FATAL || severity > E_SPAM)
-    return;
+  // Follow the requested level, clamping to the nearest supported severity
+  // rather than ignoring an out-of-range request. Ignoring it would leave the
+  // running threshold at its old value while the persisted config holds the
+  // requested number - a silent divergence between what is configured and
+  // what is actually applied.
+  if (severity < E_FATAL)
+    severity = E_FATAL;
+  else if (severity > E_SPAM)
+    severity = E_SPAM;
 
   LOGGER_CHECK_ERR(pthread_mutex_lock(&logger_lck));
   threshold = severity;
@@ -468,7 +475,9 @@ logger_init(char *file, char *domains, int severity, char *logformat)
     }
 
   console = 1;
-  threshold = severity;
+  // Clamp a persisted severity into range so a bad stored value cannot be
+  // applied raw at startup (a negative threshold would suppress all output).
+  threshold = (severity < E_FATAL) ? E_FATAL : (severity > E_SPAM ? E_SPAM : severity);
   format = format_code_get(logformat);
 
   if (domains)

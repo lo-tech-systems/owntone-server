@@ -743,6 +743,12 @@ config_set_int(const char *key, int value)
   if (strcmp(key, "pipe_bits_per_sample") == 0 && value != 16 && value != 32)
     return -1;
 
+  // loglevel follows the requested severity, clamped to the supported range
+  // instead of being rejected, so the persisted value always matches what
+  // logger_severity_set() will actually apply (no config/runtime divergence).
+  if (strcmp(key, "loglevel") == 0)
+    value = (value < E_FATAL) ? E_FATAL : (value > E_SPAM ? E_SPAM : value);
+
   pthread_mutex_lock(&config_lck);
   current = get_int_unlocked(key, INT_MIN);
   json_object_object_add(root, key, json_object_new_int(value));
