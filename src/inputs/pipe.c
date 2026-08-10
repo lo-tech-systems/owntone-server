@@ -118,6 +118,17 @@ struct pipe_metadata_prepared
   char pict_tmpfile_path_prev[sizeof(PIPE_TMPFILE_TEMPLATE)];
   // Volume
   int volume;
+  // Bundle accumulation: senders bracket a metadata update with mdst/mden
+  // (Shairport convention), and everything inside the bracket - text,
+  // progress, picture - describes ONE track state. Dispatching the parts as
+  // they individually arrive means the player can push a track change
+  // without its artwork, and an AirPlay receiver binds artwork to the item
+  // it first sees, ignoring a later artwork-only update. So the message
+  // bits accumulated here are only released as one dispatch when mden
+  // arrives. in_bundle is false for senders that never send mdst, keeping
+  // the old dispatch-as-it-comes behaviour for them.
+  enum pipe_metadata_msg bundle_msg;
+  bool in_bundle;
   // Mutex to share the prepared metadata
   pthread_mutex_t lock;
 };
@@ -762,6 +773,28 @@ parse_item(enum pipe_metadata_msg *out_msg, struct pipe_metadata_prepared *prepa
       return 0;
     }
 
+  // Bundle brackets first: mdst opens an update bundle, mden closes it and
+  // releases everything accumulated inside as one dispatch (see the
+  // bundle_msg comment in struct pipe_metadata_prepared). A new mdst while a
+  // bundle is already open means the previous mden was lost - release what
+  // was gathered so far rather than swallowing it.
+  if (code == dmap_str2val("mdst"))
+    {
+      *out_msg = prepared->bundle_msg;
+      prepared->bundle_msg = 0;
+      prepared->in_bundle = true;
+      free(data);
+      return 0;
+    }
+  else if (code == dmap_str2val("mden"))
+    {
+      *out_msg = prepared->bundle_msg;
+      prepared->bundle_msg = 0;
+      prepared->in_bundle = false;
+      free(data);
+      return 0;
+    }
+
   dstptr = NULL;
   message = PIPE_METADATA_MSG_METADATA;
 
@@ -805,7 +838,17 @@ parse_item(enum pipe_metadata_msg *out_msg, struct pipe_metadata_prepared *prepa
 
   log_incoming(E_DBG, "Applying Shairport metadata", type, code, data_len);
 
-  *out_msg = message;
+  // Inside an mdst/mden bundle the track-state parts (text, progress,
+  // picture) are held back and released together at mden; volume and flush
+  // are player actions, not track state, and always act immediately.
+  if (prepared->in_bundle && (message & (PIPE_METADATA_MSG_METADATA | PIPE_METADATA_MSG_PROGRESS | PIPE_METADATA_MSG_PICTURE)))
+    {
+      prepared->bundle_msg |= message;
+      *out_msg = 0;
+    }
+  else
+    *out_msg = message;
+
   free(data);
   return 0;
 
@@ -1100,6 +1143,11 @@ pipe_metadata_watch_del_locked(void)
   pipe_metadata.pipe = NULL;
 
   pict_tmpfiles_remove(&pipe_metadata.prepared);
+
+  // A bundle interrupted by teardown must not leave the accumulator armed
+  // for the next watch - its parts are gone with the evbuffer anyway.
+  pipe_metadata.prepared.bundle_msg = 0;
+  pipe_metadata.prepared.in_bundle = false;
 }
 
 static void
