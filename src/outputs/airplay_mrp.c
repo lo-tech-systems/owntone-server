@@ -30,11 +30,13 @@
  * does.
  *
  * The MediaRemote message set and field layouts implemented in this module
- * were worked out by studying the on-wire behaviour of the cliairplay
- * sender (the music-assistant/airplay-cli project, Apache-2.0) against a
- * real receiver. This file is an independent implementation of that wire
- * format - no code was taken from that project (its licence is not
- * GPL-compatible).
+ * are derived from the documentation and code of the
+ * music-assistant/airplay-cli project (Apache-2.0), coupled with
+ * observation of its operation against a real target - that project's
+ * authors did the hard work of mapping what a receiver actually requires.
+ * This file is nonetheless an independent implementation of that wire
+ * format (no source code was copied from that project) due to
+ * Apache-2.0/GPL license interoperability restrictions.
  */
 
 #ifdef HAVE_CONFIG_H
