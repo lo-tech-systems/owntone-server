@@ -1,5 +1,29 @@
 # Changelog
 
+## Version 1.1.3
+
+Changes since 1.1.2:
+
+- new: Apple TV receivers now get MediaRemote now-playing support: track
+  title, artist, album, artwork and playback position are shown on the
+  Apple TV's Now Playing screen, and tvOS treats the stream as active
+  music playback (the "don't show screensaver when playing music" setting
+  works as expected). Automatic for Apple TVs that advertise support;
+  disable per device with `nowplaying_disable` in the configuration
+- new: a pause initiated by the receiving device deselects that output
+  alone instead of pausing the whole player, and the outputs API reports
+  `paused_by_device` for it
+- fix: play and pause remote commands are honoured literally instead of
+  toggling, so a repeated command no longer inverts the playback state
+- fix: several crashes and races found under instrumentation: a double
+  free of the pipe watch at shutdown, a race on the shared queue item
+  between threads, a stale metadata pointer in multi-request sequences,
+  and playback teardown now quiesces the inputs before aborting them
+- fix: artwork pushed in quick succession no longer intermittently loses
+  the cover (the retired artwork file is re-fetched once before giving up)
+- improved: transcode no longer fabricates timestamps for packets without
+  one, and playback suspension guards against an empty playing-now state
+
 ## Version 1.1.2
 
 Changes since 1.1.1:
