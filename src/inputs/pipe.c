@@ -820,6 +820,11 @@ parse_item(enum pipe_metadata_msg *out_msg, struct pipe_metadata_prepared *prepa
   if (message != PIPE_METADATA_MSG_FLUSH && (!data || data_len == 0))
     {
       log_incoming(E_DBG, "Missing or pending Shairport metadata payload", type, code, data_len);
+      // A payload-bearing item without a payload should not exist on the
+      // wire; log what actually arrived (bounded) so a malformed or
+      // resynced-after-truncation item can be told apart from a writer
+      // genuinely emitting an empty one.
+      DPRINTF(E_DBG, L_PLAYER, "Payload-less item head: '%.300s'\n", item);
       goto ignore;
     }
 
