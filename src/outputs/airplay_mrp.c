@@ -285,6 +285,58 @@ airplay_mrp_deviceinfo_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, con
   return 0;
 }
 
+// Extracts pixel dimensions from JPEG (SOF0/1/2 frame header) or PNG (IHDR)
+// artwork bytes. Receivers validate inline artwork and expect
+// ArtworkDataWidth/ArtworkDataHeight to accompany ArtworkData; deriving the
+// real values from the bytes keeps them truthful for any image the pipe
+// delivers. Returns 0 with *w/*h set, or -1 if the dimensions could not be
+// determined (caller then omits the keys rather than guessing).
+static int
+mrp_artwork_dims_get(int *w, int *h, const uint8_t *data, size_t len)
+{
+  size_t i;
+
+  if (len > 24 && data[0] == 0x89 && data[1] == 0x50)
+    {
+      // PNG: IHDR is always the first chunk; width/height at fixed offsets
+      *w = (data[16] << 24) | (data[17] << 16) | (data[18] << 8) | data[19];
+      *h = (data[20] << 24) | (data[21] << 16) | (data[22] << 8) | data[23];
+      return (*w > 0 && *h > 0) ? 0 : -1;
+    }
+
+  if (len > 4 && data[0] == 0xff && data[1] == 0xd8)
+    {
+      // JPEG: walk the segment chain to the first SOF marker
+      i = 2;
+      while (i + 9 < len && data[i] == 0xff)
+	{
+	  uint8_t marker = data[i + 1];
+	  size_t seglen;
+
+	  if (marker == 0xd8 || (marker >= 0xd0 && marker <= 0xd7) || marker == 0x01)
+	    {
+	      i += 2;
+	      continue;
+	    }
+
+	  seglen = ((size_t)data[i + 2] << 8) | data[i + 3];
+	  if (seglen < 2)
+	    return -1;
+
+	  if (marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc)
+	    {
+	      *h = (data[i + 5] << 8) | data[i + 6];
+	      *w = (data[i + 7] << 8) | data[i + 8];
+	      return (*w > 0 && *h > 0) ? 0 : -1;
+	    }
+
+	  i += 2 + seglen;
+	}
+    }
+
+  return -1;
+}
+
 // Derives the 16-lowercase-hex-char ArtworkIdentifier from the artwork
 // content itself (a 64-bit hash of the bytes), rather than a random token:
 // this gives us "same bytes -> same identifier" for free, which is what the
@@ -367,28 +419,46 @@ airplay_mrp_nowplaying_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, uin
       wplist_dict_add_string(inner_params, "kMRMediaRemoteNowPlayingInfoMediaType", "MRMediaRemoteMediaTypeMusic");
       wplist_dict_add_int(inner_params, "kMRMediaRemoteNowPlayingInfoUniqueIdentifier", (int64_t)mrp->nowplaying_uid);
 
-      if (artwork && artwork_len > 0)
+      // omit_artwork leaves the artwork keys out of the body entirely (keys
+      // absent, not artwork removed) - see the field comment in
+      // airplay_mrp.h for why the track-change push sets this.
+      if (!mrp->omit_artwork)
 	{
-	  // Content-derived, so identical bytes always land on the same
-	  // identifier without needing to keep the previous bytes around to
-	  // compare - and a real content change naturally mints a new one.
-	  // Keeping the identifier stable across unchanged bytes matters: an
-	  // identifier flip alone triggers a visible receiver-side re-render.
-	  mrp_artwork_id_make(mrp->artwork_id, artwork, artwork_len);
+	  if (artwork && artwork_len > 0)
+	    {
+	      // Content-derived, so identical bytes always land on the same
+	      // identifier without needing to keep the previous bytes around to
+	      // compare - and a real content change naturally mints a new one.
+	      // Keeping the identifier stable across unchanged bytes matters: an
+	      // identifier flip alone triggers a visible receiver-side re-render.
+	      mrp_artwork_id_make(mrp->artwork_id, artwork, artwork_len);
 
-	  wplist_dict_add_string(inner_params, "kMRMediaRemoteNowPlayingInfoArtworkIdentifier", mrp->artwork_id);
-	  wplist_dict_add_string(inner_params, "kMRMediaRemoteNowPlayingInfoArtworkMIMEType", artwork_mime ? artwork_mime : "image/jpeg");
-	  wplist_dict_add_data(inner_params, "kMRMediaRemoteNowPlayingInfoArtworkData", (uint8_t *)artwork, artwork_len);
-	}
-      else
-	{
-	  mrp->artwork_id[0] = '\0';
+	      wplist_dict_add_string(inner_params, "kMRMediaRemoteNowPlayingInfoArtworkIdentifier", mrp->artwork_id);
+	      wplist_dict_add_string(inner_params, "kMRMediaRemoteNowPlayingInfoArtworkMIMEType", artwork_mime ? artwork_mime : "image/jpeg");
+	      wplist_dict_add_data(inner_params, "kMRMediaRemoteNowPlayingInfoArtworkData", (uint8_t *)artwork, artwork_len);
+
+	      // Receivers validate inline artwork against declared dimensions;
+	      // senders that omit them have been observed losing artwork to a
+	      // silent post-render validation failure. Derived from the bytes so
+	      // they are always truthful; omitted when underivable.
+	      int art_w, art_h;
+	      if (mrp_artwork_dims_get(&art_w, &art_h, artwork, artwork_len) == 0)
+		{
+		  wplist_dict_add_int(inner_params, "kMRMediaRemoteNowPlayingInfoArtworkDataWidth", art_w);
+		  wplist_dict_add_int(inner_params, "kMRMediaRemoteNowPlayingInfoArtworkDataHeight", art_h);
+		}
+	    }
+	  else
+	    {
+	      mrp->artwork_id[0] = '\0';
+	    }
 	}
     }
 
   outer_params = plist_new_dict();
   wplist_dict_add_string(outer_params, "type", "npi-text");
-  wplist_dict_add_string(outer_params, "mergePolicy", timeline_only ? "update" : "replace");
+  wplist_dict_add_string(outer_params, "mergePolicy",
+      (timeline_only || mrp->merge_update) ? "update" : "replace");
   plist_dict_set_item(outer_params, "params", inner_params);
 
   root = plist_new_dict();

@@ -540,6 +540,10 @@ struct airplay_session
   // track-change push (see np_reassert_cb() for the full rationale).
   struct event *np_reassert_ev;
 
+  // One-shot timer that follows up a track-change push with artwork ~1s
+  // later (see np_artwork_cb() for the full rationale).
+  struct event *np_artwork_ev;
+
   /* Pairing, see pair.h */
   enum pair_type pair_type;
   struct pair_cipher_context *control_cipher_ctx;
@@ -1615,6 +1619,9 @@ session_free(struct airplay_session *session)
   if (session->np_reassert_ev)
     event_free(session->np_reassert_ev);
 
+  if (session->np_artwork_ev)
+    event_free(session->np_artwork_ev);
+
   airplay_buffered_stop(session->buffered);
 
   if (session->server_fd >= 0)
@@ -1720,7 +1727,43 @@ np_reassert_cb(int fd, short what, void *arg)
   if (!(session->wanted_metadata & AIRPLAY_MD_WANTS_NOWPLAYING) || !session->mrp || !airplay_cur_metadata)
     return;
 
+  // Re-assert as a full-body mergePolicy "update" with the canonical
+  // identifier -- a push the receiver fails to process leaves the current
+  // display untouched (no wipe), one it processes fills a blank. Artwork is
+  // always included by this point (the ~1s artwork follow-up has long since
+  // fired for any normal track).
+  session->mrp->omit_artwork = false;
+  session->mrp->merge_update = true;
   sequence_start(AIRPLAY_SEQ_SEND_NOWPLAYING, session, airplay_cur_metadata, "POST /command (NowPlayingInfo reassert)");
+}
+
+// Fires ~1s after a track-change NowPlayingInfo push and re-sends the full
+// body -- this time including artwork -- under mergePolicy "update" with the
+// same UniqueIdentifier, rebuilt fresh from airplay_cur_metadata at request
+// time (so a track change during the wait targets the new track and is
+// always correct by construction, same as np_reassert_cb()).
+//
+// Rationale: the receiver creates the now-playing item and binds artwork to
+// it asynchronously. A single "replace" push carrying both the item and its
+// artwork races the item's creation against the artwork bind, and has been
+// observed intermittently losing the artwork as a result. Establishing the
+// item/play state first and pushing the artwork shortly after avoids that
+// race, per observed receiver behaviour. The existing ~5s re-assert and
+// keep-alive re-push (see np_reassert_cb()) are unaffected and remain as
+// unconditional backstops on top of this.
+static void
+np_artwork_cb(int fd, short what, void *arg)
+{
+  struct airplay_session *session = arg;
+
+  if (!(session->state & AIRPLAY_STATE_F_CONNECTED))
+    return;
+  if (!(session->wanted_metadata & AIRPLAY_MD_WANTS_NOWPLAYING) || !session->mrp || !airplay_cur_metadata)
+    return;
+
+  session->mrp->omit_artwork = false;
+  session->mrp->merge_update = true;
+  sequence_start(AIRPLAY_SEQ_SEND_NOWPLAYING, session, airplay_cur_metadata, "POST /command (NowPlayingInfo artwork)");
 }
 
 // Retries a SETRATEANCHORTIME that the receiver rejected (see
@@ -2054,6 +2097,7 @@ session_make(struct output_device *device, int callback_id)
   CHECK_NULL(L_AIRPLAY, session->deferredev = evtimer_new(evbase_player, deferred_session_failure_cb, session));
   CHECK_NULL(L_AIRPLAY, session->anchorev = evtimer_new(evbase_player, anchor_retry_cb, session));
   CHECK_NULL(L_AIRPLAY, session->np_reassert_ev = evtimer_new(evbase_player, np_reassert_cb, session));
+  CHECK_NULL(L_AIRPLAY, session->np_artwork_ev = evtimer_new(evbase_player, np_artwork_cb, session));
 
   session->anchor_retries_left = AIRPLAY_BUFFERED_ANCHOR_RETRIES_MAX;
 
@@ -2262,6 +2306,14 @@ airplay_metadata_send_generic(struct airplay_session *session, struct output_met
   // sends above.
   if (!only_progress && (session->wanted_metadata & AIRPLAY_MD_WANTS_NOWPLAYING) && session->mrp)
     {
+      // Track-change push: establish the item and play state first, WITHOUT
+      // artwork keys, under mergePolicy "replace". The artwork follows in a
+      // separate push ~1s later (see np_artwork_cb()) -- the receiver binds
+      // artwork to the now-playing item asynchronously, and a single push
+      // carrying both races the item's creation against the artwork bind,
+      // per observed receiver behaviour.
+      session->mrp->omit_artwork = true;
+      session->mrp->merge_update = false;
       sequence_start(AIRPLAY_SEQ_SEND_NOWPLAYING, session, metadata, "POST /command (NowPlayingInfo)");
 
       // Arm the one-shot ~5s re-assert for this push (see np_reassert_cb()
@@ -2271,6 +2323,16 @@ airplay_metadata_send_generic(struct airplay_session *session, struct output_met
 	{
 	  struct timeval np_tv = { 5, 0 };
 	  evtimer_add(session->np_reassert_ev, &np_tv);
+	}
+
+      // Arm the one-shot ~1s artwork follow-up for this push (see
+      // np_artwork_cb() for why). Re-arming replaces any pending timer, so
+      // rapid track changes collapse to a single artwork push for the
+      // newest track.
+      if (session->np_artwork_ev)
+	{
+	  struct timeval np_art_tv = { 1, 0 };
+	  evtimer_add(session->np_artwork_ev, &np_art_tv);
 	}
     }
 
@@ -2303,7 +2365,12 @@ airplay_metadata_keep_alive_send(struct airplay_session *session)
   // the cost is one extra push per interval against a session that is already
   // idling.
   if ((session->wanted_metadata & AIRPLAY_MD_WANTS_NOWPLAYING) && session->mrp && airplay_cur_metadata)
-    sequence_start(AIRPLAY_SEQ_SEND_NOWPLAYING, session, airplay_cur_metadata, "POST /command (NowPlayingInfo keepalive)");
+    {
+      // Full-body "update" merge, same as the 5s re-assert.
+      session->mrp->omit_artwork = false;
+      session->mrp->merge_update = true;
+      sequence_start(AIRPLAY_SEQ_SEND_NOWPLAYING, session, airplay_cur_metadata, "POST /command (NowPlayingInfo keepalive)");
+    }
 }
 
 static void

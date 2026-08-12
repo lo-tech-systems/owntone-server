@@ -67,15 +67,26 @@ the metadata pipe is decoded once and held in RAM for the life of the
 session (never written to disk), and served from there for every push
 described below.
 
-Each NowPlayingInfo push is followed by a one-shot re-assert of the same
-payload roughly 5 seconds later, and a slower re-assert is also piggybacked
-on the periodic keep-alive request. Both exist because a receiver has been
-observed to occasionally accept a valid, size-compliant NowPlayingInfo push
-(including its artwork) without ever rendering it — no error is reported and
-no re-request follows, so the sender has no way to detect the drop other than
-re-asserting. Since only one push happens per track change, a single silent
-drop would otherwise leave that track's Now Playing screen blank (or stale)
-for its whole duration; the two re-asserts bound how long that can last.
+A track change is pushed in two stages rather than one. The first push
+establishes the item and play state (title/artist/album/timeline) without
+artwork, replacing whatever was there before; a second push roughly a second
+later carries the same identifiers plus the artwork, merged onto the item
+just created. This split exists because the receiver creates the now-playing
+item and binds artwork to it asynchronously — a single push carrying both has
+been observed to intermittently lose the artwork, apparently by racing the
+item's creation against the artwork bind. Establishing the item first and
+following with artwork shortly after avoids that race.
+
+On top of the staged push, each NowPlayingInfo push is followed by a one-shot
+re-assert of the full payload (now including artwork) roughly 5 seconds
+later, and a slower re-assert is also piggybacked on the periodic keep-alive
+request. Both exist because a receiver has been observed to occasionally
+accept a valid, size-compliant NowPlayingInfo push (including its artwork)
+without ever rendering it — no error is reported and no re-request follows,
+so the sender has no way to detect the drop other than re-asserting. Since
+only one artwork push happens per track change, a single silent drop would
+otherwise leave that track's Now Playing screen blank (or stale) for its
+whole duration; the two re-asserts bound how long that can last.
 
 The MediaRemote message exchange implemented here was worked out by studying
 the on-wire behaviour of the cliairplay sender from the

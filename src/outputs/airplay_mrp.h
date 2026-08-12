@@ -49,6 +49,28 @@ struct airplay_mrp
   // receiver-visible re-render is triggered by an identifier flip alone.
   char artwork_id[17];
 
+  // When true, the next full NowPlayingInfo body is sent with mergePolicy
+  // "update" instead of "replace". Re-asserts set this: the receiver's
+  // inline-artwork processing can fail per push, and under "replace" a
+  // failed push actively WIPES the artwork already on screen (observed as
+  // covers flashing then disappearing at the first re-assert). Under
+  // "update", a failed draw leaves the display untouched and a successful
+  // one fills a blank -- re-asserts become strictly healing.
+  bool merge_update;
+
+  // When true, the artwork keys (ArtworkIdentifier/MIME/Data/Width/Height)
+  // are left out of the body entirely, rather than emitted empty -- an
+  // absent artwork key leaves any artwork the receiver already has
+  // untouched, whereas emitting one tells the receiver artwork changed. Set
+  // for the track-change push: the receiver creates the now-playing item and
+  // binds artwork to it asynchronously, so a single push carrying both item
+  // and artwork races the item's creation against the artwork bind and has
+  // been observed intermittently losing the artwork. A follow-up push ~1s
+  // later clears this and carries the artwork under mergePolicy "update".
+  // Left false everywhere else (re-asserts, keep-alive, pause/resume
+  // timeline updates).
+  bool omit_artwork;
+
   // Last mrPlaybackState value actually sent (AIRPLAY_MRP_STATE_*), for
   // dedup'ing updateMRPlaybackState pushes. Starts at 0, which is not a
   // valid state, so the first push of a session is always sent regardless
@@ -96,8 +118,9 @@ airplay_mrp_deviceinfo_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, con
 //    string if NULL), duration_s (omitted when <= 0), elapsed_s, playing,
 //    MediaType, UniqueIdentifier (content-derived from item_id + the tag
 //    triple, so it flips exactly on a real track change), and artwork (when
-//    non-NULL) on every call. item_id, title, artist, album, duration_s and
-//    artwork/artwork_len/artwork_mime are used.
+//    non-NULL, unless mrp->omit_artwork is set - see airplay_mrp.h). item_id,
+//    title, artist, album, duration_s and artwork/artwork_len/artwork_mime
+//    are used.
 //  - true ("update"): only ElapsedTime/PlaybackRate/DefaultPlaybackRate/
 //    Timestamp. item_id, title, artist, album, duration_s and artwork are
 //    ignored (pass 0/NULL) and mrp's track-identity state is left alone.

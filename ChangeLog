@@ -13,6 +13,11 @@ Changes since 1.1.3:
   re-asserted once more a few seconds later, and again on the periodic
   keep-alive, bounding how long a track can show a blank or stale cover if a
   single push is silently dropped by the receiver
+- improved: a track change now pushes the item/play state first and follows
+  with the artwork about a second later, instead of pushing both together —
+  the Apple TV binds artwork to the now-playing item asynchronously, and the
+  combined push was intermittently losing the artwork to a race between item
+  creation and artwork binding
 
 ## Version 1.1.3
 
