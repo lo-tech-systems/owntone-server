@@ -61,6 +61,22 @@ Note that the Apple TV typically shows a small source indicator immediately,
 and brings up the full Now Playing screen a little later — that delay is the
 receiver's own UI behaviour.
 
+Artwork sent to the Apple TV over this path comes from the pipe metadata
+input's in-memory picture: a picture pushed alongside the current track over
+the metadata pipe is decoded once and held in RAM for the life of the
+session (never written to disk), and served from there for every push
+described below.
+
+Each NowPlayingInfo push is followed by a one-shot re-assert of the same
+payload roughly 5 seconds later, and a slower re-assert is also piggybacked
+on the periodic keep-alive request. Both exist because a receiver has been
+observed to occasionally accept a valid, size-compliant NowPlayingInfo push
+(including its artwork) without ever rendering it — no error is reported and
+no re-request follows, so the sender has no way to detect the drop other than
+re-asserting. Since only one push happens per track change, a single silent
+drop would otherwise leave that track's Now Playing screen blank (or stale)
+for its whole duration; the two re-asserts bound how long that can last.
+
 The MediaRemote message exchange implemented here was worked out by studying
 the on-wire behaviour of the cliairplay sender from the
 [airplay-cli](https://github.com/music-assistant/airplay-cli) project, whose

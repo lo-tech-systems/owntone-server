@@ -92,6 +92,13 @@ PUT /api/metadata
 
 All fields are optional; omitted fields are not changed.
 
+This endpoint reads the file straight from disk, unlike the pipe metadata
+path (which carries artwork as bytes and keeps them in memory for the
+session). If used, the file should already respect the same size contract as
+the pipe path — at most ~48 KB — since that is the size an AirPlay/MRP
+receiver is known to render reliably; this endpoint does not resize or
+re-encode what it is given.
+
 **Example**
 
 ```shell

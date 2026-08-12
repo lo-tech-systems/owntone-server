@@ -1,5 +1,16 @@
 # Artwork
 
+This page describes upstream OwnTone's library-artwork lookup and its
+SQLite-backed cache, which this fork does not build (there is no library
+scanner and no `cache.db`). In this fork, the artwork a listener actually
+sees comes from the pipe metadata input: a picture pushed alongside the
+current track over the metadata pipe is decoded and held in memory for the
+session, then served straight from there to AirPlay/MRP receivers and to the
+legacy DAAP artwork request. See the pipe metadata section of
+[AirPlay devices/speakers](audio-outputs/airplay.md#now-playing-on-apple-tv)
+and the `/api/metadata` `artwork_url` parameter in the [JSON API](json-api.md#metadata)
+for the two ways artwork reaches a queue item in this fork.
+
 OwnTone has support for PNG and JPEG artwork which is either:
 
 - embedded in the media files
