@@ -11,6 +11,9 @@ Apple TV.
 - pyatv
 - openairplay
 - Emanuele Cozzi - AirPlay 2 Internals
+- music-assistant/airplay-cli - documentation and observed behaviour of the
+  MediaRemote message set used for Apple TV Now Playing support (see
+  docs/audio-outputs/airplay.md)
 
 This project is not affiliated with or endorsed by Apple Inc, and no claim is
 made that operation with any device is authorised or will continue to work. No

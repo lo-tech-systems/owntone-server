@@ -4,6 +4,13 @@
 
 Changes since 1.1.3:
 
+- fixed: an out-of-range log level requested over the settings API is now
+  clamped to the nearest supported level instead of being silently ignored
+  (previously the persisted and runtime levels could diverge)
+- fixed: a metadata update arriving on the pipe is now applied as one atomic
+  bundle, so a track change can no longer reach receivers as text first and
+  artwork later (stale or one-behind covers)
+
 - improved: pipe metadata artwork is now held entirely in memory instead of
   in rotating tmpfiles under `/tmp` — a picture arriving on the metadata pipe
   is decoded once and kept for the session, removing the tmpfile
