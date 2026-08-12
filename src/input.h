@@ -257,6 +257,15 @@ int
 pipe_path_validate(const char *path);
 
 /*
+ * Appends a copy of the pipe input's current in-memory artwork picture (set
+ * by the most recent Shairport PICT metadata item, if any) to evbuf.
+ * Returns the ART_FMT_* constant for the picture, or -1 if there is none.
+ * Used by artwork.c to serve the pipe input's private sentinel artwork_url.
+ */
+int
+pipe_metadata_artwork_get(struct evbuffer *evbuf);
+
+/*
  * Called by player_deinit at the very start of shutdown (main thread), before
  * playback is aborted and before any thread or command base is torn down.
  * Tells every input to stop generating new work; see the quiesce op.

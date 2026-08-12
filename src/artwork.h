@@ -3,8 +3,10 @@
  *
  * The upstream airplay.c and raop.c call artwork_get_by_queue_item_id().
  * In the full OwnTone build this function queries the SQLite artwork cache;
- * in owntone-minimal we read artwork directly from the file referenced by
- * queue_item->artwork_url (must be a "file:" URI).
+ * in owntone-minimal artwork normally lives in the pipe input's in-RAM
+ * picture store and is served from there. A "file:" URI in
+ * queue_item->artwork_url is also supported, read directly from disk, for
+ * any other producer of queue artwork.
  *
  * Copyright (C) 2025 OwnTone-Minimal contributors
  *

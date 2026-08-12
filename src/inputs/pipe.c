@@ -60,6 +60,7 @@
 #include "player.h"
 #include "worker.h"
 #include "commands.h"
+#include "artwork.h"
 
 // Maximum number of pipes to watch for data
 #define PIPE_MAX_WATCH 4
@@ -70,11 +71,13 @@
 #define PIPE_READ_MAX 65536
 // Max number of bytes to buffer from metadata pipes
 #define PIPE_METADATA_BUFLEN_MAX 1048576
-// Ignore pictures with larger size than this
+// Ignore pictures with larger size than this. This is a headroom guard, not
+// the operative size contract: the sender is expected to keep pictures at or
+// below ~48 KB (the size an AirPlay/MRP receiver is known to render
+// reliably), and upstream full OwnTone's own tmpfile-backed artwork path
+// guards at 256 KB. 1 MB just stops a misbehaving or unexpected sender from
+// growing the in-RAM picture store without bound.
 #define PIPE_PICTURE_SIZE_MAX 1048576
-// Where we store pictures for the artwork module to read
-#define PIPE_TMPFILE_TEMPLATE "/tmp/" PACKAGE_NAME ".XXXXXX.ext"
-#define PIPE_TMPFILE_TEMPLATE_EXTLEN 4
 
 enum pipetype
 {
@@ -110,12 +113,14 @@ struct pipe_metadata_prepared
 {
   // Progress, artist etc goes here
   struct input_metadata input_metadata;
-  // Picture (artwork) data
-  int pict_tmpfile_fd;
-  char pict_tmpfile_path[sizeof(PIPE_TMPFILE_TEMPLATE)];
-  // The tmpfile from the previous picture, kept on disk one generation longer
-  // than the fd -- see pict_tmpfile_recreate(). Empty when there is none.
-  char pict_tmpfile_path_prev[sizeof(PIPE_TMPFILE_TEMPLATE)];
+  // Picture (artwork) data: the decoded bytes of the current picture, held
+  // in RAM for the life of the session. parse_picture() replaces this buffer
+  // (never appends), and pipe_metadata_watch_del_locked() frees it at
+  // teardown. There is never a path or a file backing this -- consumers get
+  // a copy of the bytes via pipe_metadata_artwork_get(), never a filename.
+  uint8_t *pict;
+  size_t pict_len;
+  int pict_fmt; // ART_FMT_PNG / ART_FMT_JPEG, meaningful only when pict != NULL
   // Volume
   int volume;
   // Bundle accumulation: senders bracket a metadata update with mdst/mden
@@ -400,73 +405,15 @@ pipelist_find(struct pipe *list, int id)
   return NULL;
 }
 
+// Frees the in-RAM picture store, if any. Used both when a new picture
+// replaces the old one and at teardown.
 static void
-pict_tmpfile_close(int fd, const char *path)
+pict_store_clear(struct pipe_metadata_prepared *prepared)
 {
-  if (fd < 0)
-    return;
-
-  close(fd);
-  unlink(path);
-}
-
-// Removes both the current artwork tmpfile and the retained previous one.
-// Used when metadata handling stops, so nothing is left behind in /tmp.
-static void
-pict_tmpfiles_remove(struct pipe_metadata_prepared *prepared)
-{
-  pict_tmpfile_close(prepared->pict_tmpfile_fd, prepared->pict_tmpfile_path);
-  prepared->pict_tmpfile_fd = -1;
-  prepared->pict_tmpfile_path[0] = '\0';
-
-  if (prepared->pict_tmpfile_path_prev[0])
-    {
-      unlink(prepared->pict_tmpfile_path_prev);
-      prepared->pict_tmpfile_path_prev[0] = '\0';
-    }
-}
-
-// Opens a tmpfile to store metadata artwork in. *ext is the extension to use
-// for the tmpfile, eg .jpg or .png. Extension cannot be longer than
-// PIPE_TMPFILE_TEMPLATE_EXTLEN. The path buffer in *prepared is updated with
-// the new tmpfile, and the fd is returned.
-//
-// The outgoing tmpfile is closed but deliberately left on disk for one more
-// picture. Its path stays published as the queue item's artwork_url, and a
-// client can still be reading it when the next picture arrives -- deleting it
-// at that moment makes the read fail with ENOENT. Retiring it one generation
-// later instead gives readers the life of the following picture to finish. At
-// most two files exist at a time, and both are removed when metadata handling
-// stops.
-static int
-pict_tmpfile_recreate(struct pipe_metadata_prepared *prepared, const char *ext)
-{
-  char *path = prepared->pict_tmpfile_path;
-  char *path_prev = prepared->pict_tmpfile_path_prev;
-  int offset = strlen(PIPE_TMPFILE_TEMPLATE) - PIPE_TMPFILE_TEMPLATE_EXTLEN;
-
-  if (strlen(ext) > PIPE_TMPFILE_TEMPLATE_EXTLEN)
-    {
-      DPRINTF(E_LOG, L_PLAYER, "Invalid extension provided to pict_tmpfile_recreate: '%s'\n", ext);
-      return -1;
-    }
-
-  // Retire the picture before last; anything reading it has had a full
-  // picture's worth of time to do so.
-  if (path_prev[0])
-    unlink(path_prev);
-
-  // Close the outgoing file but leave it on disk for one more generation.
-  if (prepared->pict_tmpfile_fd >= 0)
-    close(prepared->pict_tmpfile_fd);
-  prepared->pict_tmpfile_fd = -1;
-
-  memcpy(path_prev, path, sizeof(prepared->pict_tmpfile_path_prev));
-
-  strcpy(path, PIPE_TMPFILE_TEMPLATE);
-  strcpy(path + offset, ext);
-
-  return mkstemps(path, PIPE_TMPFILE_TEMPLATE_EXTLEN);
+  free(prepared->pict);
+  prepared->pict = NULL;
+  prepared->pict_len = 0;
+  prepared->pict_fmt = -1;
 }
 
 static int
@@ -557,16 +504,26 @@ parse_volume(struct pipe_metadata_prepared *prepared, const char *volume)
   return -1;
 }
 
+// Sentinel artwork_url that tells artwork.c to serve the picture from the
+// in-RAM store below (pipe_metadata_artwork_get()) instead of opening a
+// file. Private contract between this module and artwork.c.
+#define PIPE_ARTWORK_SENTINEL_URL "pipe-pict://current"
+
 static int
 parse_picture(struct pipe_metadata_prepared *prepared, uint8_t *data, int data_len)
 {
   struct input_metadata *m = &prepared->input_metadata;
-  const char *ext;
-  ssize_t ret;
+  int fmt;
+  uint8_t *copy;
 
   free(m->artwork_url);
   m->artwork_url = NULL;
 
+  // Size contract for this pipe: the sender is expected to keep pictures at
+  // or below ~48 KB (the size an AirPlay/MRP receiver is known to render
+  // reliably); PIPE_PICTURE_SIZE_MAX (1 MB) is just a headroom guard against
+  // an unexpected sender, well above what upstream full OwnTone's own
+  // tmpfile-backed artwork path guards at (256 KB).
   if (data_len < 2 || data_len > PIPE_PICTURE_SIZE_MAX)
     {
       DPRINTF(E_WARN, L_PLAYER, "Unsupported picture size (%d) from Shairport metadata pipe\n", data_len);
@@ -574,37 +531,32 @@ parse_picture(struct pipe_metadata_prepared *prepared, uint8_t *data, int data_l
     }
 
   if (data[0] == 0xff && data[1] == 0xd8)
-    ext = ".jpg";
+    fmt = ART_FMT_JPEG;
   else if (data[0] == 0x89 && data[1] == 0x50)
-    ext = ".png";
+    fmt = ART_FMT_PNG;
   else
     {
       DPRINTF(E_LOG, L_PLAYER, "Unsupported picture format from Shairport metadata pipe\n");
       goto error;
     }
 
-  prepared->pict_tmpfile_fd = pict_tmpfile_recreate(prepared, ext);
-  if (prepared->pict_tmpfile_fd < 0)
+  copy = malloc(data_len);
+  if (!copy)
     {
-      DPRINTF(E_LOG, L_PLAYER, "Could not open tmpfile for pipe artwork '%s': %s\n", prepared->pict_tmpfile_path, strerror(errno));
+      DPRINTF(E_LOG, L_PLAYER, "Out of memory storing pipe artwork (%d bytes)\n", data_len);
       goto error;
     }
+  memcpy(copy, data, data_len);
 
-  ret = write(prepared->pict_tmpfile_fd, data, data_len);
-  if (ret < 0)
-    {
-      DPRINTF(E_LOG, L_PLAYER, "Error writing artwork from metadata pipe to '%s': %s\n", prepared->pict_tmpfile_path, strerror(errno));
-      goto error;
-    }
-  else if (ret != data_len)
-    {
-      DPRINTF(E_LOG, L_PLAYER, "Incomplete write of artwork to '%s' (%zd/%d)\n", prepared->pict_tmpfile_path, ret, data_len);
-      goto error;
-    }
+  // Replace whatever picture was stored before; there is only ever one.
+  pict_store_clear(prepared);
+  prepared->pict = copy;
+  prepared->pict_len = data_len;
+  prepared->pict_fmt = fmt;
 
-  DPRINTF(E_DBG, L_PLAYER, "Wrote pipe artwork to '%s'\n", prepared->pict_tmpfile_path);
+  DPRINTF(E_DBG, L_PLAYER, "Stored pipe artwork in memory (%d bytes)\n", data_len);
 
-  m->artwork_url = safe_asprintf("file:%s", prepared->pict_tmpfile_path);
+  m->artwork_url = strdup(PIPE_ARTWORK_SENTINEL_URL);
 
   return 9;
 
@@ -1147,7 +1099,7 @@ pipe_metadata_watch_del_locked(void)
   pipe_free(pipe_metadata.pipe);
   pipe_metadata.pipe = NULL;
 
-  pict_tmpfiles_remove(&pipe_metadata.prepared);
+  pict_store_clear(&pipe_metadata.prepared);
 
   // A bundle interrupted by teardown must not leave the accumulator armed
   // for the next watch - its parts are gone with the evbuffer anyway.
@@ -1605,6 +1557,34 @@ play(struct input_source *source)
   return 0;
 }
 
+// Appends a copy of the current pipe artwork (if any) to evbuf and returns
+// its ART_FMT_* format, or -1 if there is no picture stored. Called from
+// artwork.c when a queue item's artwork_url is the pipe sentinel
+// (PIPE_ARTWORK_SENTINEL_URL). The store is never invalidated out from under
+// the caller -- it lives in RAM for the session and is only ever replaced
+// (by a new picture) or freed (at teardown), both under prepared.lock, so
+// there is nothing here for a caller to retry.
+int
+pipe_metadata_artwork_get(struct evbuffer *evbuf)
+{
+  int fmt;
+
+  pthread_mutex_lock(&pipe_metadata.prepared.lock);
+
+  if (!pipe_metadata.prepared.pict)
+    {
+      pthread_mutex_unlock(&pipe_metadata.prepared.lock);
+      return -1;
+    }
+
+  fmt = pipe_metadata.prepared.pict_fmt;
+  evbuffer_add(evbuf, pipe_metadata.prepared.pict, pipe_metadata.prepared.pict_len);
+
+  pthread_mutex_unlock(&pipe_metadata.prepared.lock);
+
+  return fmt;
+}
+
 static int
 metadata_get(struct input_metadata *metadata, struct input_source *source)
 {
@@ -1630,7 +1610,7 @@ init(void)
   CHECK_ERR(L_PLAYER, mutex_init(&pipe_metadata.prepared.lock));
   CHECK_ERR(L_PLAYER, mutex_init(&pipe_metadata.lock));
 
-  pipe_metadata.prepared.pict_tmpfile_fd = -1;
+  pipe_metadata.prepared.pict_fmt = -1;
 
   configured_pipe_path = config_get_str("pipe_path", NULL);
   ret = pipe_path_update(configured_pipe_path);
