@@ -536,6 +536,12 @@ struct airplay_session
   unsigned short buffered_data_port;
   struct airplay_buffered_stream *buffered;
 
+  // TEMP DEBUG (interim instrumentation, removed when the re-assert ladder is productionised): one-shot timer re-asserting NowPlayingInfo
+  // ~5s after each track-change push. The receiver was observed accepting a
+  // valid artwork push without rendering it; a prompt second push bounds the
+  // blank window without waiting for the keep-alive fallback.
+  struct event *np_reassert_ev;
+
   /* Pairing, see pair.h */
   enum pair_type pair_type;
   struct pair_cipher_context *control_cipher_ctx;
@@ -1608,6 +1614,9 @@ session_free(struct airplay_session *session)
   if (session->anchorev)
     event_free(session->anchorev);
 
+  if (session->np_reassert_ev)
+    event_free(session->np_reassert_ev);
+
   airplay_buffered_stop(session->buffered);
 
   if (session->server_fd >= 0)
@@ -1688,6 +1697,25 @@ deferred_session_failure(struct airplay_session *session)
 
   evutil_timerclear(&tv);
   evtimer_add(session->deferredev, &tv);
+}
+
+// TEMP DEBUG (interim instrumentation, removed when the re-assert ladder is productionised): fires ~5s after a track-change NowPlayingInfo
+// push and sends the same payload again (built fresh from airplay_cur_metadata
+// at request time, so a track change during the wait re-asserts the NEW track,
+// which is always correct). Bounds the artwork blank window when the receiver
+// silently drops the first render; the keep-alive re-push remains the
+// slower fallback.
+static void
+np_reassert_cb(int fd, short what, void *arg)
+{
+  struct airplay_session *session = arg;
+
+  if (!(session->state & AIRPLAY_STATE_F_CONNECTED))
+    return;
+  if (!(session->wanted_metadata & AIRPLAY_MD_WANTS_NOWPLAYING) || !session->mrp || !airplay_cur_metadata)
+    return;
+
+  sequence_start(AIRPLAY_SEQ_SEND_NOWPLAYING, session, airplay_cur_metadata, "POST /command (NowPlayingInfo reassert)");
 }
 
 // Retries a SETRATEANCHORTIME that the receiver rejected (see
@@ -2020,6 +2048,7 @@ session_make(struct output_device *device, int callback_id)
   CHECK_NULL(L_AIRPLAY, session = calloc(1, sizeof(struct airplay_session)));
   CHECK_NULL(L_AIRPLAY, session->deferredev = evtimer_new(evbase_player, deferred_session_failure_cb, session));
   CHECK_NULL(L_AIRPLAY, session->anchorev = evtimer_new(evbase_player, anchor_retry_cb, session));
+  CHECK_NULL(L_AIRPLAY, session->np_reassert_ev = evtimer_new(evbase_player, np_reassert_cb, session));
 
   session->anchor_retries_left = AIRPLAY_BUFFERED_ANCHOR_RETRIES_MAX;
 
@@ -2227,7 +2256,18 @@ airplay_metadata_send_generic(struct airplay_session *session, struct output_met
   // push, additive to (not a replacement for) the legacy DAAP text/artwork
   // sends above.
   if (!only_progress && (session->wanted_metadata & AIRPLAY_MD_WANTS_NOWPLAYING) && session->mrp)
-    sequence_start(AIRPLAY_SEQ_SEND_NOWPLAYING, session, metadata, "POST /command (NowPlayingInfo)");
+    {
+      sequence_start(AIRPLAY_SEQ_SEND_NOWPLAYING, session, metadata, "POST /command (NowPlayingInfo)");
+
+      // TEMP DEBUG (interim instrumentation, removed when the re-assert ladder is productionised): arm the one-shot ~5s re-assert for this
+      // push (re-arming replaces any pending timer, so rapid track changes
+      // collapse to one re-assert of the newest track).
+      if (session->np_reassert_ev)
+	{
+	  struct timeval np_tv = { 5, 0 };
+	  evtimer_add(session->np_reassert_ev, &np_tv);
+	}
+    }
 
   return 0;
 }
@@ -2247,6 +2287,14 @@ static void
 airplay_metadata_keep_alive_send(struct airplay_session *session)
 {
   sequence_start(AIRPLAY_SEQ_FEEDBACK, session, NULL, "keep_alive");
+
+  // TEMP DEBUG (interim instrumentation, removed when the re-assert ladder is productionised): re-assert NowPlayingInfo on every keep-alive
+  // tick. Experiment: a receiver was observed accepting a valid artwork push
+  // and not rendering it (single push per track = one silent drop leaves the
+  // track blank). If failures now self-heal within a keep-alive interval,
+  // the fix is a periodic re-assert.
+  if ((session->wanted_metadata & AIRPLAY_MD_WANTS_NOWPLAYING) && session->mrp && airplay_cur_metadata)
+    sequence_start(AIRPLAY_SEQ_SEND_NOWPLAYING, session, airplay_cur_metadata, "POST /command (NowPlayingInfo keepalive)");
 }
 
 static void
@@ -3704,6 +3752,25 @@ payload_make_nowplaying(struct evrtsp_request *req, struct airplay_session *sess
       queue_item->title, queue_item->artist, queue_item->album,
       duration_s, airplay_mrp_elapsed_s(metadata), !session->mrp->paused,
       artwork, artwork_len, artwork_mime, false);
+
+  // TEMP DEBUG (interim instrumentation, removed when the re-assert ladder is productionised): persist each built NowPlayingInfo body so a
+  // failing push can be decoded offline and diffed against a working one.
+  if (ret == 0)
+    {
+      static int np_dump_seq;
+      char np_path[64];
+      FILE *np_fp;
+      uint8_t *np_buf = evbuffer_pullup(req->output_buffer, -1);
+      size_t np_len = evbuffer_get_length(req->output_buffer);
+      snprintf(np_path, sizeof(np_path), "/tmp/mrp-np-%03d-%s.bin", np_dump_seq++, session->devname ? session->devname : "unknown");
+      np_fp = fopen(np_path, "wb");
+      if (np_fp)
+	{
+	  fwrite(np_buf, 1, np_len, np_fp);
+	  fclose(np_fp);
+	  DPRINTF(E_DBG, L_AIRPLAY, "TEMP: dumped NowPlayingInfo body (%zu bytes, artwork_len=%zu) to %s\n", np_len, artwork_len, np_path);
+	}
+    }
 
   free_queue_item(queue_item, 0);
 
