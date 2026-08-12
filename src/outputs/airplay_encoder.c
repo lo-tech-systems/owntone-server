@@ -138,6 +138,7 @@ encoder_thread_run(void *arg)
   struct airplay_encoded_frame *frame;
   struct airplay_encoded_frame *frames_head;
   struct airplay_encoded_frame *frames_tail;
+  struct airplay_encoded_frame *next;
   transcode_frame *xframe;
   struct timespec t0;
   struct timespec t1;
@@ -225,9 +226,7 @@ encoder_thread_run(void *arg)
           if (!frame)
             {
               evbuffer_drain(enc->encoded_buffer, len);
-              encoder_frame_list_free(frames_head);
-              frames_head = NULL;
-              frames_tail = NULL;
+              // Partial chain is freed at the len < 0 merge point below.
               len = -1;
               break;
             }
@@ -237,9 +236,7 @@ encoder_thread_run(void *arg)
             {
               free(frame);
               evbuffer_drain(enc->encoded_buffer, len);
-              encoder_frame_list_free(frames_head);
-              frames_head = NULL;
-              frames_tail = NULL;
+              // Partial chain is freed at the len < 0 merge point below.
               len = -1;
               break;
             }
@@ -262,6 +259,18 @@ encoder_thread_run(void *arg)
       if (len < 0)
         {
           DPRINTF(E_LOG, L_AIRPLAY, "Encoder (kind %d): out of memory splitting encoded frames\n", enc->kind);
+          // The chain is already freed on the paths that set len negative;
+          // freeing it (again) here makes that invariant local to this
+          // merge point instead of something every exit from the loop above
+          // has to uphold - a no-op at runtime on today's paths.
+          while (frames_head)
+            {
+              next = frames_head->next;
+              free(frames_head->data);
+              free(frames_head);
+              frames_head = next;
+            }
+          frames_tail = NULL;
           enc->failed = true;
           break;
         }

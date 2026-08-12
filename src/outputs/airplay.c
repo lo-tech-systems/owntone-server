@@ -1410,8 +1410,8 @@ master_session_make(struct media_quality *quality, bool use_ptp, enum airplay_bu
   struct transcode_encode_setup_args encode_args;
   uint64_t clock_id;
   int ret;
-  int cost;
-  int budget;
+  int cost = 0;    // set below when buffered; neutral default keeps gcc happy
+  int budget = 0;  // across the two separate "if (buffered)" blocks in this function
 
   // For the ALAC 48k/24 profile and the 48k AAC buffered kinds (AAC stereo,
   // surround stereo, surround upmix) the session subscribes at 48k instead of
