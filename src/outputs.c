@@ -1832,6 +1832,18 @@ outputs_device_volume_set(struct output_device *device, output_status_cb cb)
 }
 
 int
+outputs_device_offset_set(struct output_device *device)
+{
+  if (outputs[device->type]->disabled || !outputs[device->type]->device_offset_set)
+    return 0; // Backend doesn't support live offset refresh
+
+  if (!device->session)
+    return 0; // Device isn't active
+
+  return outputs[device->type]->device_offset_set(device);
+}
+
+int
 outputs_device_volume_to_pct(struct output_device *device, const char *volume)
 {
   if (outputs[device->type]->disabled || !outputs[device->type]->device_volume_to_pct)

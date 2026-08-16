@@ -2803,6 +2803,23 @@ raop_set_volume_one(struct output_device *device, int callback_id)
   return 1;
 }
 
+// Recomputes the cached offset for a live session from the device's current
+// offset_ms. No RTSP request needed; the next sync packet picks it up.
+static int
+raop_set_offset_one(struct output_device *device)
+{
+  struct raop_session *rs = device->session;
+
+  if (!rs)
+    return 0;
+
+  rs->offset_samples = device->offset_ms * device->quality.sample_rate / 1000;
+
+  DPRINTF(E_DBG, L_RAOP, "Refreshed live offset for '%s' to %d ms\n", device->name, device->offset_ms);
+
+  return 0;
+}
+
 static void
 raop_cb_flush(struct evrtsp_request *req, void *arg)
 {
@@ -5098,6 +5115,7 @@ struct output_definition output_raop =
   .device_cb_set = raop_device_cb_set,
   .device_free_extra = raop_device_free_extra,
   .device_volume_set = raop_set_volume_one,
+  .device_offset_set = raop_set_offset_one,
   .device_volume_to_pct = raop_volume_to_pct,
   .write = raop_write,
   .metadata_prepare = raop_metadata_prepare,

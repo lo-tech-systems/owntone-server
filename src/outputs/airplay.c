@@ -489,8 +489,14 @@ struct airplay_session
   int volume;
 
   // device->offset_ms in samples (user config for correction of static
-  // amplifier or DSP delays)
+  // amplifier or DSP delays). Realtime transport only - buffered sessions
+  // apply offset_ms below in the time domain instead, so no sample-rate
+  // conversion is involved there.
   int offset_samples;
+  // Snapshot of device->offset_ms, applied to this session's anchor time
+  // (see anchor_offset_apply). Kept per-session so a payload build never
+  // needs the device struct.
+  int offset_ms;
 
   char *local_v4_address;
   char *local_v6_address;
@@ -2104,6 +2110,7 @@ session_make(struct output_device *device, int callback_id)
   session->devname = strdup(device->name);
   session->volume = device->volume;
   session->offset_samples = device->offset_ms * device->quality.sample_rate / 1000;
+  session->offset_ms = device->offset_ms;
 
   session->state = AIRPLAY_STATE_STOPPED;
   session->reqs_in_flight = 0;
@@ -2519,6 +2526,39 @@ airplay_set_volume_one(struct output_device *device, int callback_id)
   sequence_start(AIRPLAY_SEQ_SEND_VOLUME, session, NULL, "set_volume_one");
 
   return 1;
+}
+
+// Applies a changed device->offset_ms to a live session. Realtime sessions
+// just refresh the cached sample offset - the next sync packet
+// (packets_sync_send) carries the new mapping, no wire request needed.
+// Buffered sessions are re-timed by re-sending SETRATEANCHORTIME with the
+// new offset applied to the anchor time; delivery is not interrupted (see
+// payload_make_send_anchor). A buffered session that has not confirmed its
+// anchor yet needs no request here - the pending anchor machinery sends one
+// with the fresh value.
+static int
+airplay_set_offset_one(struct output_device *device)
+{
+  struct airplay_session *session = device->session;
+
+  if (!session)
+    return 0;
+
+  session->offset_ms = device->offset_ms;
+
+  DPRINTF(E_DBG, L_AIRPLAY, "Refreshing live offset for '%s' to %d ms (%s)\n",
+          device->name, device->offset_ms, session->buffered_mode ? "buffered re-anchor" : "realtime sync");
+
+  if (session->buffered_mode)
+    {
+      if (session->state == AIRPLAY_STATE_STREAMING && session->anchor_confirmed)
+	sequence_start(AIRPLAY_SEQ_SEND_ANCHOR, session, NULL, "offset");
+      return 0;
+    }
+
+  session->offset_samples = device->offset_ms * device->quality.sample_rate / 1000;
+
+  return 0;
 }
 
 static void
@@ -3313,6 +3353,36 @@ payload_make_audio_mode(struct evrtsp_request *req, struct airplay_session *sess
   return 0;
 }
 
+// Applies a session's configured offset to the network time transmitted in
+// its anchor. Positive offset_ms plays the receiver later, negative earlier,
+// mirroring the realtime transport's sync-packet bias. Biasing the time
+// rather than rtpTime keeps the anchor naming exactly the frame the session's
+// delivery is aligned to, in both offset directions. 18446744073709551 is
+// floor(2^64 / 1000), i.e. frac units per 1ms; carry/borrow detected via
+// unsigned wrap.
+static void
+anchor_offset_apply(uint64_t *secs, uint64_t *frac, int offset_ms)
+{
+  uint64_t magnitude_ms = (uint64_t)((offset_ms < 0) ? -offset_ms : offset_ms);
+  uint64_t frac_delta = (magnitude_ms % 1000) * (uint64_t)18446744073709551ULL;
+  uint64_t frac_before = *frac;
+
+  if (offset_ms > 0)
+    {
+      *secs += magnitude_ms / 1000;
+      *frac += frac_delta;
+      if (*frac < frac_before)
+	(*secs)++;
+    }
+  else if (offset_ms < 0)
+    {
+      *secs -= magnitude_ms / 1000;
+      *frac -= frac_delta;
+      if (*frac > frac_before)
+	(*secs)--;
+    }
+}
+
 // The receiver's decode chain doesn't start until it gets a rate=1 anchor -
 // audio queued before that point is simply held, so it is fine to start
 // writing buffered packets right after SETUP without waiting for this to
@@ -3391,7 +3461,17 @@ payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *ses
       ams->buffered_anchor_map_frac = frac;
     }
 
-  session->buffered_start_rtptime = anchor_rtptime;
+  // A live re-anchor (offset change on a session that is already delivering)
+  // must not touch the delivery gate: frames keep flowing uninterrupted and
+  // the receiver re-times its queue against the fresh anchor. Only a session
+  // that is not yet delivering waits for the anchor frame.
+  if (!session->anchor_confirmed)
+    session->buffered_start_rtptime = anchor_rtptime;
+
+  // Per-session static-latency correction. The mapping stored on the ams
+  // stays unbiased (it is the shared multi-room truth); only the time
+  // transmitted to this receiver is shifted.
+  anchor_offset_apply(&secs, &frac, session->offset_ms);
 
   root = plist_new_dict();
   wplist_dict_add_uint(root, "networkTimeSecs", secs);
@@ -7049,6 +7129,7 @@ struct output_definition output_airplay =
   .device_cb_set = airplay_device_cb_set,
   .device_free_extra = airplay_device_free_extra,
   .device_volume_set = airplay_set_volume_one,
+  .device_offset_set = airplay_set_offset_one,
   .device_volume_to_pct = airplay_volume_to_pct,
   .write = airplay_write,
   .metadata_prepare = airplay_metadata_prepare,

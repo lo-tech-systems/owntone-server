@@ -2813,12 +2813,19 @@ speaker_offset_ms_set(void *arg, int *retval)
 
   device->offset_ms = param->offset_ms;
 
-  // We can't change offset during playback, but if playback is paused we stop
-  // the output session, so the new offset is used when restarting playback
   if (player_state == PLAY_PAUSED)
-    *retval = outputs_device_stop(device, device_shutdown_cb);
+    {
+      // No live session to refresh; stop so the new offset is picked up
+      // when playback resumes
+      *retval = outputs_device_stop(device, device_shutdown_cb);
+    }
   else
-    *retval = 0;
+    {
+      // Refresh any live realtime session so the new offset applies to the
+      // next sync packet; a no-op for backends without live offset support
+      outputs_device_offset_set(device);
+      *retval = 0;
+    }
 
   if (*retval > 0)
     return COMMAND_PENDING; // async

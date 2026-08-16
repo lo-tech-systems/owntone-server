@@ -332,6 +332,12 @@ struct output_definition
   // Convert device internal representation of volume to our pct scale
   int (*device_volume_to_pct)(struct output_device *device, const char *volume);
 
+  // Refresh a live realtime session's cached offset from device->offset_ms.
+  // Purely a local recompute (no wire request), so it completes synchronously
+  // and does not take a callback_id. Optional: only realtime transports that
+  // cache a per-sync-packet offset need to implement this.
+  int (*device_offset_set)(struct output_device *device);
+
   // Request a change of quality from the device
   int (*device_quality_set)(struct output_device *device, struct media_quality *quality, int callback_id);
 
@@ -445,6 +451,13 @@ outputs_device_volume_register(struct output_device *device, int absvol, int rel
 
 int
 outputs_device_volume_set(struct output_device *device, output_status_cb cb);
+
+// Refreshes the cached offset on any live realtime session for the device.
+// Synchronous (no wire request), so unlike the other device_* setters this
+// takes no callback. Returns 0 if the device isn't active or the backend
+// doesn't support live offset refresh, negative on error.
+int
+outputs_device_offset_set(struct output_device *device);
 
 int
 outputs_device_volume_to_pct(struct output_device *device, const char *value);

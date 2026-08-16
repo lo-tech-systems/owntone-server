@@ -389,6 +389,7 @@ jsonapi_reply_config(struct httpd_request *hreq)
   json_object_object_add(jreply, "websocket_port", json_object_new_int(0));
   json_object_object_add(jreply, "buildoptions", jbuildopts);
   json_object_object_add(jreply, "restart_required", json_object_new_boolean(config_restart_required_get()));
+  json_object_object_add(jreply, "live_offset", json_object_new_boolean(true));
 
   CHECK_ERRNO(L_WEB, evbuffer_add_printf(hreq->out_body, "%s", json_object_to_json_string(jreply)));
   jparse_free(jreply);
