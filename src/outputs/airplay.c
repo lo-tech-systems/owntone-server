@@ -5783,6 +5783,8 @@ static struct airplay_seq_request airplay_seq_request[][10] =
   },
   {
     { AIRPLAY_SEQ_FLUSH_BUFFERED, "FLUSHBUFFERED", EVRTSP_REQ_FLUSHBUFFERED, payload_make_flush_buffered, response_handler_flush_buffered, "application/x-apple-binary-plist", NULL, false },
+  },
+  {
     { AIRPLAY_SEQ_FLUSH_OFFSET, "FLUSHBUFFERED (offset)", EVRTSP_REQ_FLUSHBUFFERED, payload_make_flush_buffered, response_handler_flush_offset, "application/x-apple-binary-plist", NULL, false },
   },
 };
