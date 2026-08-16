@@ -2452,10 +2452,13 @@ airplay_volume_from_pct(int volume, const char *name)
   max_volume = volume_max_get(name);
 
   /* RAOP volume
-   *  -144.0 is off (not really used since we have no concept of muted/off)
-   *  0 - 100 maps to -30.0 - 0 (if no max_volume set)
+   *  -144.0 is off; volume 0 sends it so "muted" really is silent (the
+   *  bottom of the dial is otherwise only -30dB, clearly audible)
+   *  1 - 100 maps into -30.0 - 0 (scaled by max_volume)
    */
-  if (volume >= 0 && volume <= 100)
+  if (volume == 0)
+    airplay_volume = -144.0;
+  else if (volume > 0 && volume <= 100)
     airplay_volume = -30.0 + ((float)max_volume * (float)volume * 30.0) / (100.0 * AIRPLAY_CONFIG_MAX_VOLUME);
   else
     airplay_volume = -144.0;

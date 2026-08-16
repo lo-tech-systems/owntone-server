@@ -2663,10 +2663,13 @@ raop_volume_from_pct(int volume, struct output_device *device)
   float raop_volume;
 
   /* RAOP volume
-   *  -144.0 is off (not really used since we have no concept of muted/off)
-   *  0 - 100 maps to -30.0 - 0 (if no max_volume set)
+   *  -144.0 is off; volume 0 sends it so "muted" really is silent (the
+   *  bottom of the dial is otherwise only -30dB, clearly audible)
+   *  1 - 100 maps into -30.0 - 0 (scaled by max_volume)
    */
-  if (volume >= 0 && volume <= 100)
+  if (volume == 0)
+    raop_volume = -144.0;
+  else if (volume > 0 && volume <= 100)
     raop_volume = -30.0 + ((float)device->max_volume * (float)volume * 30.0) / (100.0 * RAOP_CONFIG_MAX_VOLUME);
   else
     raop_volume = -144.0;
