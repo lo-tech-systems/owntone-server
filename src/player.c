@@ -2811,6 +2811,15 @@ speaker_offset_ms_set(void *arg, int *retval)
   if (!device)
     goto error;
 
+  // Clients routinely re-send the current offset alongside other output
+  // fields (e.g. a volume change); an unchanged value must not disturb a
+  // live session (the buffered path re-times with an audible flush).
+  if (device->offset_ms == param->offset_ms)
+    {
+      *retval = 0;
+      return COMMAND_END;
+    }
+
   device->offset_ms = param->offset_ms;
 
   if (player_state == PLAY_PAUSED)
