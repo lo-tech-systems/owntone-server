@@ -260,6 +260,7 @@ enum airplay_seq_type
   AIRPLAY_SEQ_FEEDBACK,
   AIRPLAY_SEQ_SEND_ANCHOR,
   AIRPLAY_SEQ_FLUSH_BUFFERED,
+  AIRPLAY_SEQ_FLUSH_OFFSET,
   AIRPLAY_SEQ_CONTINUE, // Must be last element
 };
 
@@ -2531,11 +2532,12 @@ airplay_set_volume_one(struct output_device *device, int callback_id)
 // Applies a changed device->offset_ms to a live session. Realtime sessions
 // just refresh the cached sample offset - the next sync packet
 // (packets_sync_send) carries the new mapping, no wire request needed.
-// Buffered sessions are re-timed by re-sending SETRATEANCHORTIME with the
-// new offset applied to the anchor time; delivery is not interrupted (see
-// payload_make_send_anchor). A buffered session that has not confirmed its
-// anchor yet needs no request here - the pending anchor machinery sends one
-// with the fresh value.
+// Buffered sessions need their receive buffer invalidated before they honour
+// a new anchor time (receivers accept but ignore a mid-stream anchor while
+// the frame flow is continuous), so they get a per-session flush + re-anchor
+// (see response_handler_flush_offset). A buffered session that has not
+// confirmed its anchor yet needs no request here - the pending anchor
+// machinery sends one with the fresh value.
 static int
 airplay_set_offset_one(struct output_device *device)
 {
@@ -2547,12 +2549,12 @@ airplay_set_offset_one(struct output_device *device)
   session->offset_ms = device->offset_ms;
 
   DPRINTF(E_DBG, L_AIRPLAY, "Refreshing live offset for '%s' to %d ms (%s)\n",
-          device->name, device->offset_ms, session->buffered_mode ? "buffered re-anchor" : "realtime sync");
+          device->name, device->offset_ms, session->buffered_mode ? "buffered flush + re-anchor" : "realtime sync");
 
   if (session->buffered_mode)
     {
       if (session->state == AIRPLAY_STATE_STREAMING && session->anchor_confirmed)
-	sequence_start(AIRPLAY_SEQ_SEND_ANCHOR, session, NULL, "offset");
+	sequence_start(AIRPLAY_SEQ_FLUSH_OFFSET, session, NULL, "offset");
       return 0;
     }
 
@@ -3461,12 +3463,7 @@ payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *ses
       ams->buffered_anchor_map_frac = frac;
     }
 
-  // A live re-anchor (offset change on a session that is already delivering)
-  // must not touch the delivery gate: frames keep flowing uninterrupted and
-  // the receiver re-times its queue against the fresh anchor. Only a session
-  // that is not yet delivering waits for the anchor frame.
-  if (!session->anchor_confirmed)
-    session->buffered_start_rtptime = anchor_rtptime;
+  session->buffered_start_rtptime = anchor_rtptime;
 
   // Per-session static-latency correction. The mapping stored on the ams
   // stays unbiased (it is the shared multi-room truth); only the time
@@ -4989,6 +4986,38 @@ master_session_has_confirmed_anchor(struct airplay_master_session *ams)
   return false;
 }
 
+// Re-times ONE session after a live offset change. Receivers accept a
+// mid-stream SETRATEANCHORTIME but keep playing to their old schedule while
+// the frame flow is continuous, so the buffer must be invalidated first -
+// this is the pause/resume flow, scoped to a single session. Unlike
+// response_handler_flush_buffered, the shared master-session state is left
+// alone while any other session still has a confirmed anchor: the stored
+// mapping stays valid (this receiver rejoins it like a mid-play join, with
+// its offset applied to the transmitted anchor time), the shared encoder is
+// not flushed, and co-resident receivers play on undisturbed. In-flight
+// frames below flushUntilSeq are discarded receiver-side, so the per-session
+// send queue does not need clearing. If this was the only anchored session,
+// the counters will freeze on the delivery gate and a join-point anchor
+// would never be reached - fall back to exactly the full-flush behaviour,
+// which is correct when alone.
+static enum airplay_seq_type
+response_handler_flush_offset(struct evrtsp_request *req, struct airplay_session *session)
+{
+  session->state = AIRPLAY_STATE_CONNECTED;
+  session->anchor_pending = true;
+  session->anchor_confirmed = false;
+
+  if (!master_session_has_confirmed_anchor(session->master_session))
+    {
+      session->master_session->buffered_marker_pending = true;
+      session->master_session->buffered_anchor_mapped = false;
+      if (session->master_session->encoder)
+	airplay_encoder_flush(session->master_session->encoder);
+    }
+
+  return AIRPLAY_SEQ_CONTINUE;
+}
+
 // Runs with proceed_on_rtsp_not_ok, since a rejected anchor is retryable: the
 // suspected cause of an in-band or RTSP-level rejection is that the anchor
 // raced the receiver's lock onto our PTP timeline (it can arrive under a
@@ -5653,6 +5682,7 @@ static struct airplay_seq_definition airplay_seq_definition[] =
   { AIRPLAY_SEQ_FEEDBACK, NULL, session_failure },
   { AIRPLAY_SEQ_SEND_ANCHOR, NULL, session_failure },
   { AIRPLAY_SEQ_FLUSH_BUFFERED, session_status, session_failure },
+  { AIRPLAY_SEQ_FLUSH_OFFSET, NULL, session_failure },
 };
 
 // The size of the second array dimension MUST at least be the size of largest
@@ -5753,6 +5783,7 @@ static struct airplay_seq_request airplay_seq_request[][10] =
   },
   {
     { AIRPLAY_SEQ_FLUSH_BUFFERED, "FLUSHBUFFERED", EVRTSP_REQ_FLUSHBUFFERED, payload_make_flush_buffered, response_handler_flush_buffered, "application/x-apple-binary-plist", NULL, false },
+    { AIRPLAY_SEQ_FLUSH_OFFSET, "FLUSHBUFFERED (offset)", EVRTSP_REQ_FLUSHBUFFERED, payload_make_flush_buffered, response_handler_flush_offset, "application/x-apple-binary-plist", NULL, false },
   },
 };
 

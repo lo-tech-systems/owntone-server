@@ -7,9 +7,9 @@ Changes since 1.1.4:
 - new: the per-output playback offset (`offset_ms` on `PUT /api/outputs/{id}`)
   now takes effect immediately on a playing output instead of on the next
   session start. Realtime (type-96/RAOP) outputs pick the new value up with
-  the next sync packet; buffered (type-103) outputs are re-timed by
-  re-sending the anchor with the offset applied to its network time, without
-  interrupting frame delivery
+  the next sync packet; buffered (type-103) outputs are re-timed with a
+  per-session flush and re-anchor — a short blip on the adjusted output
+  only, while other outputs play on undisturbed
 - new: buffered outputs now honour `offset_ms` at all (previously the offset
   only applied to the realtime transport). The offset is applied in the time
   domain, so it is exact regardless of the stream sample rate
