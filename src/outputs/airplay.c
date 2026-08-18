@@ -2164,7 +2164,18 @@ session_make(struct output_device *device, int callback_id)
     // "auto".
     if (mode == OUTPUT_MODE_AUTO && config_get_bool("buffered_audio_enabled", true)
         && outputs_device_buffered_capable(device))
-      kind = AIRPLAY_BUFFERED_KIND_AAC_STEREO;
+      {
+        // The uncompressed-audio preference extends to the buffered
+        // transport: a receiver that advertises the lossless ALAC
+        // bufferStream gets it instead of AAC (which is also far cheaper
+        // to encode); receivers without it keep AAC rather than falling
+        // to the realtime path.
+        if (config_get_bool("uncompressed_alac", false)
+            && (device->buffered_modes & OUTPUT_MODE_AIRPLAY2_BUFFERED_24))
+          kind = AIRPLAY_BUFFERED_KIND_ALAC24;
+        else
+          kind = AIRPLAY_BUFFERED_KIND_AAC_STEREO;
+      }
 
     session->wants_buffered_kind = kind;
   }

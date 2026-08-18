@@ -125,7 +125,11 @@ config_defaults_build(void)
   json_object_object_add(defaults, "resample_quality", json_object_new_string("standard"));
   json_object_object_add(defaults, "ipv6", json_object_new_boolean(true));
   json_object_object_add(defaults, "start_buffer_ms", json_object_new_int(2250));
-  json_object_object_add(defaults, "uncompressed_alac", json_object_new_boolean(false));
+  // Default on: receivers advertising the lossless ALAC bufferStream get it
+  // instead of AAC (better quality, far cheaper to encode - decisive on
+  // small cores); receivers without it keep AAC, and the realtime path
+  // sends uncompressed ALAC framing. LAN bandwidth cost is negligible.
+  json_object_object_add(defaults, "uncompressed_alac", json_object_new_boolean(true));
   json_object_object_add(defaults, "buffered_audio_enabled", json_object_new_boolean(true));
   json_object_object_add(defaults, "buffered_encoder_budget", json_object_new_int(0));
   json_object_object_add(defaults, "device_removal_grace_period", json_object_new_int(180));
