@@ -1,5 +1,18 @@
 # Changelog
 
+## Version 1.2.1
+
+Changes since 1.2.0:
+
+- new: the uncompressed-audio preference now carries through to AirPlay 2.
+  With `uncompressed_alac` enabled, a buffered (type-103) receiver that
+  advertises the lossless ALAC bufferStream is sent bit-exact ALAC instead
+  of AAC — better quality, and far cheaper to encode on small appliances;
+  receivers without ALAC support keep AAC rather than falling back to the
+  realtime transport
+- change: `uncompressed_alac` now defaults to enabled on new installs (an
+  existing stored setting is respected either way)
+
 ## Version 1.2.0
 
 Changes since 1.1.4:
