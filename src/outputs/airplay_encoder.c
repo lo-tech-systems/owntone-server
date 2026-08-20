@@ -151,6 +151,14 @@ encoder_thread_run(void *arg)
 #if defined(__linux__)
   // Best effort: encode may lag (buffered outputs have seconds of anchor
   // lead); the player/RTSP thread must win CPU contention.
+  //
+  // This nice() value is RELATIVE to the process's current priority, not an
+  // absolute one: it only matters together with whatever baseline the
+  // owning systemd unit sets via Nice=. With the unit's Nice= at -12, this
+  // thread lands at -2, i.e. still above default-priority (nice 0)
+  // processes -- so lowering it here does not hand the CPU advantage back
+  // to unrelated housekeeping work. If the unit's baseline Nice= is ever
+  // changed, this thread's effective priority moves with it.
   errno = 0;
   if (nice(10) == -1 && errno != 0)
     DPRINTF(E_DBG, L_AIRPLAY, "Could not lower encoder thread priority: %s\n", strerror(errno));
