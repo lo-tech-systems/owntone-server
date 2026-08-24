@@ -1,7 +1,6 @@
 {
   "uid": "owntone",
   "server_name": "owntone-mini",
-  "user_agent": "owntone/0.0.0",
   "loglevel": 3,
   "logfile": "/var/log/owntone.log",
   "pipe_path": "/tmp/owntone.fifo",
@@ -11,7 +10,7 @@
   "resample_quality": "standard",
   "ipv6": true,
   "start_buffer_ms": 2250,
-  "uncompressed_alac": false,
+  "uncompressed_alac": true,
   "device_removal_grace_period": 180,
   "airplay_timing_port": 0,
   "airplay_control_port": 0,

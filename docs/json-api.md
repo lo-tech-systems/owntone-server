@@ -404,8 +404,11 @@ There are no category-listing or option-listing endpoints in this build.
 | `/api/settings/misc/user_agent` | string | User-Agent header sent on AirPlay RTSP requests, max 255 bytes, no control characters, restart required. Empty string resets to the built-in default (`<product>/<version>`). GET always returns the effective value, including the default when unset. |
 | `/api/settings/player/start_buffer_ms` | integer | Start buffer in milliseconds, valid range `300` to `3500`, restart required |
 | `/api/settings/player/uncompressed_alac` | boolean | ALAC output preference, restart required |
+| `/api/settings/player/device_removal_grace_period` | integer | Seconds a disappeared AirPlay device is kept selectable, valid range `0` to `3600`; applied to the running player immediately on PUT, no restart required |
 | `/api/settings/player/buffered_audio_enabled` | boolean | Prefer buffered AAC-LC over realtime for AirPlay 2 outputs left on `auto` (default `true`, gated per device on an advertised buffered format); takes effect on the next output start |
 | `/api/settings/player/buffered_encoder_budget` | integer | Buffered-encode capacity budget override, valid range `0` to `64` (`0` = auto, CPU-based); takes effect on the next output activation |
+| `/api/settings/player/pipe_sample_rate` | integer | Pipe input sample rate, one of `44100`, `48000`, `88200`, `96000`; restart required |
+| `/api/settings/player/pipe_bits_per_sample` | integer | Pipe input bit depth, `16` or `32`; restart required |
 | `/api/settings/player/resample_quality` | string | Output resampler quality for format-mismatched paths, `high` or `standard` (default `standard`); unknown values fall back to `standard`; takes effect on the next playback session, no restart required |
 
 ### Get a setting
