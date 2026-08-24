@@ -12,6 +12,10 @@ Changes since 1.2.0:
   realtime transport
 - change: `uncompressed_alac` now defaults to enabled on new installs (an
   existing stored setting is respected either way)
+- new: the AirPlay RTSP `User-Agent` header is now settable via
+  `PUT /api/settings/misc/user_agent`, restart required. An empty value
+  restores the built-in derived default (`<product>/<version>`) instead of
+  being persisted as a stale string
 
 ## Version 1.2.0
 

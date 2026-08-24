@@ -401,6 +401,7 @@ There are no category-listing or option-listing endpoints in this build.
 | `/api/settings/misc/pipe_path` | string | Pipe/FIFO path. The provided path must already exist, be a FIFO, and be readable by the server. A successful PUT persists the value immediately; `PUT /api/update` makes it live. GET returns the live path currently in use. |
 | `/api/settings/misc/pipe_autostart` | boolean | Whether the pipe input autostarts. Changes become live on `PUT /api/update`. |
 | `/api/settings/misc/ipv6` | boolean | IPv6 enable/disable, restart required |
+| `/api/settings/misc/user_agent` | string | User-Agent header sent on AirPlay RTSP requests, max 255 bytes, no control characters, restart required. Empty string resets to the built-in default (`<product>/<version>`). GET always returns the effective value, including the default when unset. |
 | `/api/settings/player/start_buffer_ms` | integer | Start buffer in milliseconds, valid range `300` to `3500`, restart required |
 | `/api/settings/player/uncompressed_alac` | boolean | ALAC output preference, restart required |
 | `/api/settings/player/buffered_audio_enabled` | boolean | Prefer buffered AAC-LC over realtime for AirPlay 2 outputs left on `auto` (default `true`, gated per device on an advertised buffered format); takes effect on the next output start |

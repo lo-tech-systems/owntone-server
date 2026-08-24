@@ -121,6 +121,10 @@ bool config_is_api_settable(const char *key);
 int  config_set_str(const char *key, const char *value);
 int  config_set_int(const char *key, int value);
 int  config_set_bool(const char *key, bool value);
+
+// Remove a key from the settings file entirely (as opposed to storing a
+// null value), so readers fall back to their built-in default.
+int  config_delete(const char *key);
 bool config_restart_required_get(void);
 
 #endif /* !__OWNTONE_CONFIG_H__ */

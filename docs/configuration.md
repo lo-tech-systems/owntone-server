@@ -107,6 +107,19 @@ matches the pipe (for example a 48kHz buffered AirPlay 2 receiver) never
 insert a resample stage and are unaffected either way. An unrecognised value
 is treated as `standard`.
 
+### misc: user_agent
+
+String, default derived from the running build (`<product>/<version>`). Also
+settable at runtime via `PUT /api/settings/misc/user_agent` (restart
+required).
+
+Controls the `User-Agent` header sent on AirPlay RTSP requests. Useful when
+diagnosing a receiver that treats this server differently from a real Apple
+sender, since some receivers gate behaviour on the sender's advertised
+version. Max 255 bytes, no control characters. Setting it to an empty string
+removes the override and restores the derived default; GET always reports the
+effective value, so it never appears blank.
+
 ## Other settings
 
 See the repository `owntone-settings.json` file for the current reference

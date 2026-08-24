@@ -106,7 +106,11 @@ config_defaults_build(void)
 
   json_object_object_add(defaults, "uid", json_object_new_string("owntone"));
   json_object_object_add(defaults, "server_name", json_object_new_string("owntone-mini"));
-  json_object_object_add(defaults, "user_agent", json_object_new_string(PACKAGE_NAME "/" PACKAGE_VERSION));
+  // user_agent is deliberately absent here: absence means "derive from the
+  // running build's PACKAGE_NAME/PACKAGE_VERSION" (see config_get_str()
+  // callers), so the effective default always tracks the running build
+  // instead of being frozen at whatever version first wrote the settings
+  // file.
   json_object_object_add(defaults, "loglevel", json_object_new_int(3));
   json_object_object_add(defaults, "logfile", json_object_new_string("/var/log/owntone.log"));
   json_object_object_add(defaults, "pipe_path", json_object_new_string("/run/autostream-pipes/autostream.fifo"));
@@ -157,6 +161,7 @@ static const char *api_settable_keys[] = {
   "pipe_sample_rate",
   "pipe_bits_per_sample",
   "resample_quality",
+  "user_agent",
   NULL
 };
 
@@ -167,7 +172,8 @@ config_key_requires_restart(const char *key)
        || strcmp(key, "start_buffer_ms") == 0
        || strcmp(key, "uncompressed_alac") == 0
        || strcmp(key, "pipe_sample_rate") == 0
-       || strcmp(key, "pipe_bits_per_sample") == 0);
+       || strcmp(key, "pipe_bits_per_sample") == 0
+       || strcmp(key, "user_agent") == 0);
 }
 
 bool
@@ -711,6 +717,29 @@ config_set_str(const char *key, const char *value)
           || (current && value && strcmp(current, value) != 0));
 
   json_object_object_add(root, key, value ? json_object_new_string(value) : NULL);
+  ret = config_write();
+  if (ret == 0 && changed && config_key_requires_restart(key))
+    restart_required_pending = true;
+  pthread_mutex_unlock(&config_lck);
+
+  return ret;
+}
+
+// Remove a key entirely, rather than storing JSON null (config_set_str()
+// with a NULL value would do that instead), so a cleared setting leaves no
+// trace in the settings file and readers fall back to their built-in default.
+int
+config_delete(const char *key)
+{
+  int changed;
+  int ret;
+
+  if (!config_is_api_settable(key))
+    return -1;
+
+  pthread_mutex_lock(&config_lck);
+  changed = (get_str_unlocked(key, NULL) != NULL);
+  json_object_object_del(root, key);
   ret = config_write();
   if (ret == 0 && changed && config_key_requires_restart(key))
     restart_required_pending = true;

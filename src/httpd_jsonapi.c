@@ -185,6 +185,7 @@ static const struct setting_entry settings_table[] = {
   { "misc",   "pipe_path",         SETTING_TYPE_STR,  "pipe_path"         },
   { "misc",   "pipe_autostart",    SETTING_TYPE_BOOL, "pipe_autostart"    },
   { "misc",   "ipv6",              SETTING_TYPE_BOOL, "ipv6"              },
+  { "misc",   "user_agent",        SETTING_TYPE_STR,  "user_agent"        },
   { "player", "start_buffer_ms",   SETTING_TYPE_INT,  "start_buffer_ms"   },
   { "player", "uncompressed_alac",           SETTING_TYPE_BOOL, "uncompressed_alac"           },
   { "player", "device_removal_grace_period", SETTING_TYPE_INT,  "device_removal_grace_period" },
@@ -242,12 +243,45 @@ jsonapi_reply_settings_option_get(struct httpd_request *hreq)
       else
         json_object_object_add(jreply, "value", json_object_new_null());
     }
+  else if (strcmp(entry->config_key, "user_agent") == 0)
+    // Absent from the settings file means "derive from the running build",
+    // not empty - report the effective value, matching what airplay.c and
+    // raop.c actually send, so the API never reports a blank when a real
+    // default is in force.
+    json_object_object_add(jreply, "value", json_object_new_string(config_get_str("user_agent", PACKAGE_NAME "/" PACKAGE_VERSION)));
   else
     json_object_object_add(jreply, "value", json_object_new_string(config_get_str(entry->config_key, "")));
 
   CHECK_ERRNO(L_WEB, evbuffer_add_printf(hreq->out_body, "%s", json_object_to_json_string(jreply)));
   jparse_free(jreply);
   return HTTP_OK;
+}
+
+// Rejects control characters (which evrtsp_add_header() also rejects, but
+// only by returning -1 and dropping the header silently, leaving the
+// request with no User-Agent at all) and anything over 255 bytes. An empty
+// string is accepted - it is the sentinel that resets the setting to its
+// derived default.
+static int
+user_agent_validate(const char *value)
+{
+  size_t i;
+  size_t len;
+
+  if (!value)
+    return -1;
+
+  len = strlen(value);
+  if (len > 255)
+    return -1;
+
+  for (i = 0; i < len; i++)
+    {
+      if ((unsigned char)value[i] < 0x20 || (unsigned char)value[i] == 0x7f)
+        return -1;
+    }
+
+  return 0;
 }
 
 static int
@@ -299,8 +333,22 @@ jsonapi_reply_settings_option_put(struct httpd_request *hreq)
               return jsonapi_reply_error(hreq, HTTP_BADREQUEST, errmsg);
             }
         }
+      else if (strcmp(entry->config_key, "user_agent") == 0)
+        {
+          ret = user_agent_validate(value);
+          if (ret < 0)
+            {
+              snprintf(errmsg, sizeof(errmsg), "Invalid user_agent: must be at most 255 bytes with no control characters");
+              DPRINTF(E_LOG, L_WEB, "%s\n", errmsg);
+              jparse_free(request);
+              return jsonapi_reply_error(hreq, HTTP_BADREQUEST, errmsg);
+            }
+        }
 
-      ret = config_set_str(entry->config_key, value);
+      if (strcmp(entry->config_key, "user_agent") == 0 && value[0] == '\0')
+        ret = config_delete(entry->config_key);
+      else
+        ret = config_set_str(entry->config_key, value);
     }
   else
     {
