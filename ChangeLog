@@ -16,6 +16,9 @@ Changes since 1.2.0:
   `PUT /api/settings/misc/user_agent`, restart required. An empty value
   restores the built-in derived default (`<product>/<version>`) instead of
   being persisted as a stale string
+- change: the server now runs at raised CPU scheduling priority, with the
+  AirPlay encoder threads tracking that baseline rather than a fixed
+  priority of their own, so playback stays ahead of other system load
 
 ## Version 1.2.0
 
